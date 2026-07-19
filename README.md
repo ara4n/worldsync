@@ -1,0 +1,87 @@
+# worldsync
+
+A test jig for experimenting with peer-to-peer multiplayer physics: Three.js
+rendering, bitECS entities, Rapier simulation, WebRTC data channels, and
+rollback netcode with rubber-band presentation.
+
+Every participant runs their own full Rapier simulation. There is no server
+authority: user interactions (spawn, grab, move, release) are timestamped and
+broadcast to every peer, and each peer folds remote interactions into its own
+history by rolling the physics world back and replaying.
+
+## Run it
+
+```
+npm install
+npm run dev
+```
+
+Open http://localhost:5173 in two or more tabs (or `--host` and use two
+machines). Everyone in the same `?room=` is meshed together. The Vite dev
+server doubles as the WebRTC signaling server (`/signal`), so there is nothing
+else to start. `npm run build && npm run preview` serves the production build
+with the same signaling.
+
+Controls: click the ground to spawn a box, drag a box to move it (physics
+resumes on release, with throw velocity), right-drag orbits, wheel zooms.
+
+Test hooks: `npm run dev` then `node test/smoke.mjs` runs a two-browser
+Playwright smoke test (spawn replication plus a laggy drag that must converge).
+
+## How it works
+
+- **Fixed 60Hz tick.** State is defined at tick boundaries. Before each tick
+  we snapshot the Rapier world (`world.takeSnapshot`), the netId to body-handle
+  map, and the grab table into a 2 second ring buffer.
+- **Interactions, not state.** Each user action is `{peer, seq, t, type,
+  netId, pos, vel?, color?}`, applied locally and broadcast on an ordered
+  reliable data channel. Sequence numbers dedupe; (tick, joinOrder, seq) gives
+  every peer the same total order.
+- **Clock sync.** Per-peer NTP-style ping/pong every second; the minimum-RTT
+  sample gives the clock offset used to map remote timestamps onto the local
+  tick timeline.
+- **Rollback.** A remote interaction older than the current tick restores the
+  snapshot at its tick and re-steps to the present, applying every timeline
+  entry (local and remote) on its tick. Body handles can change during a
+  replay, which is why the handle map is snapshotted too.
+- **Rubber-banding.** When a rollback rewrites the present, each mesh keeps an
+  error offset (old presented pose minus corrected sim pose) that decays to
+  zero over 100ms (tunable in the panel, 0 disables it).
+- **Interacting during rubber-band.** Grabbing uses the presented pose as
+  truth: the grab teleports the body there locally and in the broadcast, per
+  the design. The locally dragged box never rubber-bands; the pointer wins.
+- **Contested drags.** A grab or move is last-writer-wins in timeline order,
+  including stealing a grab another peer holds. Two users fighting over a box
+  produce an honest tug of war; the loser sees it rubber-band away.
+- **Staleness.** An interaction older than `max(250ms, 1.5 * RTT + 120ms)`
+  (or older than the rollback window) is dropped and counts as a strike; ten
+  strikes and the peer is excluded from the sim, flagged in the panel for an
+  admin to kick. Uncheck "lag clock sync too" while faking latency to look
+  like a peer backdating history and watch yourself get excluded elsewhere.
+- **Late join.** A joiner requests a one-shot entity snapshot from the most
+  senior peer it connects to.
+- **Divergence.** Sims are best-effort deterministic only. A coarse hash of
+  quantised positions is broadcast every second; the peer table shows = when a
+  peer's sim matches ours (meaningful once things are at rest).
+
+## Experiments to try
+
+- Two tabs, fake latency 200ms on one, drag the same box in opposite
+  directions and watch the tug of war resolve.
+- Throw a box through a stack while another peer is dragging in it.
+- Set rubber-band to 0 to see raw rollback snaps, or 1000ms to see the
+  correction glide in slow motion.
+- Uncheck "lag clock sync too" with high fake latency to trigger the
+  stale-interaction exclusion path.
+
+## Known gaps (deliberate, for now)
+
+- Replay is best effort, not bit-deterministic (Rapier is only deterministic
+  with identical builds and step sequences; local drag targets are sampled at
+  20Hz on the wire but per-frame locally).
+- No resync after divergence; the hash column only reports it.
+- No kick mechanism; exclusion is local and one-way.
+- No entity deletion, no interest management, JSON on the wire, snapshots
+  every tick: all fine at jig scale, all replaceable later.
+- A hidden tab stops simulating and rebases its clock on return rather than
+  replaying the gap.
