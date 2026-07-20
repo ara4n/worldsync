@@ -5,9 +5,11 @@ rendering, bitECS entities, Rapier simulation, WebRTC data channels, and
 rollback netcode with rubber-band presentation.
 
 Every participant runs their own full Rapier simulation. There is no server
-authority: user interactions (spawn, grab, move, release) are timestamped and
-broadcast to every peer, and each peer folds remote interactions into its own
-history by rolling the physics world back and replaying.
+authority. Replication happens on two planes: discrete ops (spawn, grab,
+release, boot) are tick-stamped events on one shared timeline that every
+peer folds in by rolling the physics world back and replaying, while
+continuous drag motion travels as latest-wins pose streams that never cause
+rollbacks and are healed in batches by heartbeat folds.
 
 ## Run it
 
@@ -39,21 +41,40 @@ pile on one page, joins a second page late, and asserts the boot seam
 bit-converges with no divergence latch (LAT=500 delays the boot so it folds
 into the joiner's past). All run headed.
 
+`npm run test:headless` needs no browser and no server: the whole protocol
+stack (Session + Sim) runs on an in-process hub with a virtual clock and
+per-link one-way latencies, covering laggy drags, late joins, three-peer
+meshes, wildly skewed local clocks, ops racing a join, and a backdating
+cheater - ~72 virtual seconds, bit-exact assertions, a third of a real
+second. The hub delivers messages through a JSON round-trip so wire
+serialisation hazards stay exercised.
+
 ## How it works
 
-- **Fixed 60Hz tick on a global grid.** Tick K covers wall-clock time
-  [K*16.7ms, (K+1)*16.7ms), the same window on every peer, so a claimed
-  timestamp bins into the same tick everywhere (modulo wall-clock skew).
-  State is defined at tick boundaries; rendering interpolates between the
-  previous and current tick, one tick behind. At every cadence point (every
-  10th grid-aligned tick by default) we snapshot the Rapier world
-  (`world.takeSnapshot`), the netId to body-handle map, and the grab table
-  into a 5 second ring buffer.
+- **Fixed 60Hz tick on a shared grid, by calibration, not wall clocks.**
+  Ops carry the tick number they belong to, stamped by their author, and
+  every peer folds an op at exactly that tick; within a tick, (joinOrder,
+  seq) orders ops, so the timeline's total order is all-integer. What tick
+  "now" is comes from a per-peer tick clock: the first peer in a room roots
+  the grid at tick 0, a joiner calibrates once against a senior peer's pong
+  (which carries the responder's fractional tick reading, corrected by
+  half the measured round trip) and then slews toward the current root by
+  at most 0.05 ticks per 1Hz pong. Grid phase error never affects
+  convergence - ops fold at their stamped tick everywhere regardless - it
+  only affects how deep folds run. A 47s-skewed, 200ppm-drifting local
+  clock calibrates away to zero grid error in the headless suite. State is
+  defined at tick boundaries; rendering interpolates between the previous
+  and current tick, one tick behind. At every cadence point (every 10th
+  grid-aligned tick by default) the Rapier world (`world.takeSnapshot`),
+  the netId to body-handle map, and the grab table go into a 5 second ring
+  buffer; a young sim also snapshots its (off-grid) start tick so folds
+  have a floor from tick one.
 - **Determinism.** Physics uses the `@dimforge/rapier3d-deterministic-compat`
   build (Rapier's enhanced-determinism feature, reproducible across
-  platforms). All physics inputs flow through the interaction timeline, drags
-  included: the dragger's own sim is driven by the same tick-rate move
-  samples it broadcasts, never by raw pointer state. Body creation order
+  platforms). All physics inputs flow through the op timeline and the
+  recorded pose tracks: the dragger's own sim is driven by the same
+  tick-stamped pose samples it broadcasts, never by raw pointer state.
+  Body creation order
   (and hence handle assignment) converges because rollback replays recreate
   bodies in timeline order. Sleeping is disabled on all bodies: the sleep
   timer is per-peer-history dependent, so a peer that rolls back a lot puts
@@ -110,28 +131,43 @@ into the joiner's past). All run headed.
   diffing. "verify replay determinism" runs the self-check on demand: it
   restores a 2s-old snapshot into a scratch world, replays the same
   timeline, and compares poses and snapshot bytes against the live world.
-- **Interactions, not state.** Each user action is `{peer, seq, t, type,
-  netId, pos, vel?, color?}`, applied locally and broadcast on an ordered
-  reliable data channel. Sequence numbers dedupe.
-- **Timestamps decide what happened when.** `t` is wall-clock epoch ms with
-  sub-ms precision (`performance.timeOrigin + performance.now()`; browsers do
-  not expose true nanoseconds). The claimed timestamp is trusted as-is to
-  place the event in a tick and to order events within a tick, with
-  (joinOrder, seq) breaking exact ties so all peers converge on one total
-  order. Clock skew is measured (NTP-style ping/pong, minimum-RTT sample) and
-  shown in the panel but deliberately not corrected for; the future plan is
-  to stamp interactions with a tick number and calibrate tick timelines
-  across peers instead.
+- **Two replication planes.** Discrete ops are `{peer, order, seq, tick,
+  type, netId, ...}`, applied locally and broadcast on an ordered reliable
+  data channel; sequence numbers dedupe. Continuous drag motion is NOT an
+  op: it is a `pose` stream, latest-wins per (entity, author), recorded
+  into tick-sorted tracks. The kinematic pin drives each held body from
+  its holder's track at the tick being simulated, so replays read the
+  poses that belong to that tick however late they arrived: folding an op
+  back in also folds in the motion that raced it. Each grab records its
+  start tick, so stragglers from an earlier drag of the same box can
+  never drive a new one. Why the split: routing every drag sample through
+  rollback costs a restore+replay per remote packet; the pose plane pays
+  one heartbeat fold per remote peer per 200ms instead, converging to the
+  identical bits (the diverge stress folds ~3x less often than when drags
+  were ops).
+- **Heartbeats: healing and attestation.** Every peer broadcasts a beat
+  every 12 ticks. A beat from P folds one whole interval deeper than the
+  beat's tick, so every tick gets re-simulated at least once after P's
+  poses for it fully arrived (ordered channel: they were sent before the
+  beat), converging pose-driven contact outcomes within ~200ms + RTT; the
+  fold is skipped when P streamed nothing in the window and holds nothing.
+  Beats are also attestations: anything P later stamps before its own last
+  beat is a provable history rewrite and earns a strike, however slow the
+  link - which replaces any RTT-based staleness heuristic. Ops too old to
+  fold (beyond the snapshot window) also strike; ten strikes exclude the
+  peer, flagged for an admin to kick.
 - **Rollback.** An interaction claiming a past tick restores the snapshot at
   the cadence point at or below that tick and re-steps to the present,
   applying every timeline entry (local and remote) on its tick, so it takes
   effect at the time the sender claimed.
-  An interaction claiming a time inside the current not-yet-simulated tick
-  needs no rollback (it is a depth-0 fold: that tick has not run yet); with
-  60Hz ticks that only happens for sub-17ms delivery, so most network RTTs
-  force a genuine rollback for every received interaction. Claimed-future
-  timestamps are scheduled for their tick (clamped to 500ms ahead). Body
-  handles can change during a replay, which is why the handle map is
+  An op stamped at the current not-yet-simulated tick needs no rollback
+  (it is a depth-0 fold: that tick has not run yet); with 60Hz ticks that
+  only happens for sub-17ms delivery, so most network RTTs force a genuine
+  rollback for every received op. Claimed-future stamps are scheduled for
+  their tick (clamped to 500ms ahead). Ops stamped before a peer's own
+  start are logged inert at their true tick (the boot seam owns that era),
+  which keeps input logs identical across peers with different join times.
+  Body handles can change during a replay, which is why the handle map is
   snapshotted alongside the physics state.
 - **Rubber-banding.** When a rollback rewrites the present, each mesh keeps an
   error offset (old presented pose minus corrected sim pose) that decays to
@@ -139,24 +175,20 @@ into the joiner's past). All run headed.
 - **Interacting during rubber-band.** Grabbing uses the presented pose as
   truth: the grab teleports the body there locally and in the broadcast, per
   the design. The locally dragged box never rubber-bands; the pointer wins.
-- **Contested drags.** A grab or move is last-writer-wins in timeline order,
-  including stealing a grab another peer holds. Two users fighting over a box
-  produce an honest tug of war; the loser sees it rubber-band away.
-- **Staleness (opt-in).** With "enforce staleness limit" ticked, an
-  interaction older than `max(250ms, 1.5 * RTT + 120ms)` is dropped and
-  counts as a strike; ten strikes and the peer is excluded from the sim,
-  flagged in the panel for an admin to kick. It is off by default because a
-  dropped interaction is a guaranteed permanent divergence (the sender
-  applied what you refused), which gets in the way of determinism testing;
-  when off, arbitrarily late interactions fold in as long as they are within
-  the 5s snapshot window. Tick "enforce" and untick "lag clock sync too"
-  while faking latency to look like a peer backdating history and watch
-  yourself get excluded elsewhere.
-- **Input log.** Everything fed into the local Rapier world is recorded with
-  full float precision as `{tick, claimedTick, t, peer, order, seq, type,
+- **Contested drags.** A grab is last-writer-wins in timeline order,
+  including stealing a grab another peer holds (the loser's pose stream
+  stops driving the body identically on every peer). Two users fighting
+  over a box produce an honest tug of war; the loser sees it rubber-band
+  away. Held bodies are kinematic: the solver integrates them toward the
+  holder's pose with a real velocity, so a held box shoves the pile
+  properly; release returns the body to dynamic with the author's
+  authoritative pose and throw velocity.
+- **Input log.** Every op fed into the local Rapier world is recorded with
+  full float precision as `{tick, claimedTick, peer, order, seq, type,
   netId, pos, vel}`. "download input log" saves it as JSON; grab it from two
-  peers and diff (sort by tick, t, order, seq) to see exactly where their
-  inputs disagreed. If the logs match but state hashes differ, the divergence
+  peers and diff (sort by tick, order, seq) to see exactly where their
+  inputs disagreed. Pose streams are not logged (they are disposable by
+  design); the recorded tracks cover the fold window. If the logs match but state hashes differ, the divergence
   is in the engine, not the netcode. Events that are expected to break sync
   (tick jumps after a hard stall, interactions clamped because they predate
   the snapshot window) are logged in the panel as ANOMALY lines and marked in
@@ -171,9 +203,15 @@ into the joiner's past). All run headed.
   reset-in-place there vs a cold create on the joiner steps differently;
   rebuilding from empty on all peers is the only symmetric route, and makes
   post-seam histories bit-identical (verified: a late joiner into a settled
-  pile converges to equal per-tick hashes, with and without latency). Hash
-  exchange is floored at the seam: a joiner neither sends nor compares
-  hashes for ticks it simulated before its world was seeded.
+  pile converges to equal per-tick hashes, with and without latency). The
+  dump is read from the sender's newest snapshot (state at a declared
+  tick), the seam is stamped 12 ticks ahead so no peer's grid has already
+  passed it, an empty room still sends a marker op so the seam always
+  exists, and every peer re-applies non-boot ops stamped between the dump
+  and the seam after the rebuild: ops that race a join survive on every
+  peer (the headless suite asserts this). Hash exchange is floored at the
+  seam: a joiner neither sends nor compares hashes for ticks it simulated
+  before its world was seeded.
 
 ## Experiments to try
 
@@ -182,18 +220,19 @@ into the joiner's past). All run headed.
 - Throw a box through a stack while another peer is dragging in it.
 - Set rubber-band to 0 to see raw rollback snaps, or 1000ms to see the
   correction glide in slow motion.
-- Uncheck "lag clock sync too" with high fake latency to trigger the
-  stale-interaction exclusion path.
+- Crank fake latency while dragging and watch the pose plane: the remote
+  side shows the drag ~RTT late and its contact consequences snap into
+  place at each 200ms heartbeat fold.
 
 ## Known gaps (deliberate, for now)
 
-- Convergence still depends on trusted wall clocks: peers whose clocks
-  disagree bin events into different ticks. The fix is stamping interactions
-  with the tick number and calibrating tick timelines explicitly.
-- A boot seam rebuilds the world for everyone, so an interaction ordered
-  within the boot tick but before the boot itself is wiped on every peer
-  alike: consistent, but a spawn racing the seam by milliseconds can vanish
-  (and its mesh linger, as nothing deletes render entities yet).
+- Attestation assumes ordered delivery per author; changing the fake
+  latency slider mid-flight can reorder a beat past an op and cause a
+  spurious strike (the 10-strike threshold absorbs it).
+- An op that folds below the boot dump's snapshot tick after the dump was
+  sent is erased by the seam on every peer alike: consistent, but a
+  sufficiently laggy op racing a join can still vanish (its mesh lingers,
+  as nothing deletes render entities yet).
 - No resync after divergence; the hash column only reports it.
 - No kick mechanism; exclusion is local and one-way.
 - No entity deletion, no interest management, JSON on the wire: all fine at
