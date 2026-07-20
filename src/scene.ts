@@ -51,23 +51,39 @@ export async function parseGlb(bytes: ArrayBuffer): Promise<ParsedScene> {
   const iparts: Uint32Array[] = []
   let base = 0
   const v = new THREE.Vector3()
-  object.traverse(node => {
-    const mesh = node as THREE.Mesh
-    if (!mesh.isMesh) return
-    const pos = mesh.geometry.getAttribute('position')
+  const bake = (geo: THREE.BufferGeometry, matrix: THREE.Matrix4) => {
+    const pos = geo.getAttribute('position')
     if (!pos) return
     const out = new Float32Array(pos.count * 3)
     for (let i = 0; i < pos.count; i++) {
-      v.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld)
+      v.fromBufferAttribute(pos, i).applyMatrix4(matrix)
       out[i * 3] = v.x; out[i * 3 + 1] = v.y; out[i * 3 + 2] = v.z
     }
     vparts.push(out)
-    const idx = mesh.geometry.getIndex()
+    const idx = geo.getIndex()
     const ia = new Uint32Array(idx ? idx.count : pos.count)
     if (idx) for (let i = 0; i < ia.length; i++) ia[i] = idx.getX(i) + base
     else for (let i = 0; i < ia.length; i++) ia[i] = i + base
     iparts.push(ia)
     base += pos.count
+  }
+  const m = new THREE.Matrix4()
+  object.traverse(node => {
+    const mesh = node as THREE.Mesh
+    if (!mesh.isMesh) return
+    // EXT_mesh_gpu_instancing: the renderer places copies via the instance
+    // matrix buffer, so the bake must too - one collider copy per instance
+    // at matrixWorld * instanceMatrix, or the physics ends up with a single
+    // phantom copy parked at the node's origin (invisible walls).
+    const inst = mesh as THREE.InstancedMesh
+    if (inst.isInstancedMesh) {
+      for (let k = 0; k < inst.count; k++) {
+        inst.getMatrixAt(k, m)
+        bake(mesh.geometry, new THREE.Matrix4().multiplyMatrices(mesh.matrixWorld, m))
+      }
+    } else {
+      bake(mesh.geometry, mesh.matrixWorld)
+    }
   })
   const vertices = new Float32Array(vparts.reduce((n, p) => n + p.length, 0))
   const indices = new Uint32Array(iparts.reduce((n, p) => n + p.length, 0))
