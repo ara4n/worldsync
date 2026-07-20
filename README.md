@@ -28,6 +28,35 @@ Controls: click the ground to spawn a box, drag a box to move it (physics
 resumes on release, with throw velocity), cmd-drag or right-drag orbits,
 wheel zooms.
 
+## Matrix widget mode (matryoshka)
+
+With widget URL params present (`widgetId`, `parentUrl`, `roomId`, `userId`,
+`deviceId`, `baseUrl`, per element-call's convention) the app runs as a
+Matrix widget instead of the ws demo: matrix-widget-api + matrix-js-sdk's
+`createRoomWidgetClient` proxy everything through the host client, so
+identity and encryption are inherited from it. Room presence is MatrixRTC
+(`m.call.member` state events); each member's `createdTs` is its join
+order, and the oldest member roots the tick grid. Data travels as LiveKit
+text streams (topic `worldsync`), with the SFU url + JWT obtained via the
+OpenID exchange against an lk-jwt-service (element-call's flow; override
+the service url with `?lkService=`). The Session and Sim are identical in
+both modes - MatrixNet is just another transport behind the same seam.
+
+For the dev loop, `/mock.html?room=x` is a mock widget host: the real
+`ClientWidgetApi` against an in-memory widget driver whose room state is
+replicated across tabs via BroadcastChannel, with a BroadcastChannel
+transport standing in for LiveKit. Two tabs mesh exactly like the classic
+demo - no Element Web, homeserver, or SFU required - while still
+exercising the genuine widget handshake, RoomWidgetClient, and MatrixRTC
+membership machinery. `node test/mockwidget.mjs` asserts bit-exact
+convergence through this stack, late join included.
+
+To embed for real: build, host the bundle, and `/addwidget <url>` it into
+a room in Element Web with element-call's dev backend (Synapse +
+lk-jwt-service + livekit-server; `pnpm backend` in the element-call
+repo). The LiveKit transport follows element-call's sdk patterns but has
+not yet been exercised against a real SFU.
+
 Test hooks: `npm run dev` then `node test/smoke.mjs` runs a two-browser
 Playwright smoke test (spawn replication plus a laggy drag that must
 converge, with identical input logs). `MINUTES=2 BOXES=150 node
