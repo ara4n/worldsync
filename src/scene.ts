@@ -1,5 +1,8 @@
 import * as THREE from 'three'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { KTX2Loader } from 'three/addons/loaders/KTX2Loader.js'
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js'
+import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js'
 import type { SceneGeometry } from './sim'
 
 /** A parsed GLB: the renderable graph plus every mesh baked (world-
@@ -12,6 +15,28 @@ const cache = new Map<string, ParsedScene>()
 export const cachedScene = (url: string) => cache.get(url) ?? null
 export const cacheScene = (url: string, s: ParsedScene) => { cache.set(url, s) }
 
+let loader: GLTFLoader | null = null
+
+/**
+ * Wire the decoders real-world GLBs need: KTX2/Basis textures (needs the
+ * renderer to pick a target GPU format), Draco and meshopt geometry
+ * compression. Decoder binaries are served from /basis and /draco, copied
+ * out of three's examples tree into public/ (pinned alongside the three
+ * version in package.json). Call once at startup, before any parseGlb;
+ * without it, only uncompressed GLBs parse. Geometry decoders matter for
+ * determinism too: every peer runs the same wasm on the same bytes, so
+ * decoded POSITION streams (and thus colliders) stay bit-identical.
+ */
+export function configureGlbLoader(renderer: THREE.WebGLRenderer) {
+  if (loader) return
+  const ktx2 = new KTX2Loader().setTranscoderPath('/basis/').detectSupport(renderer)
+  const draco = new DRACOLoader().setDecoderPath('/draco/')
+  loader = new GLTFLoader()
+    .setKTX2Loader(ktx2)
+    .setDRACOLoader(draco)
+    .setMeshoptDecoder(MeshoptDecoder)
+}
+
 /**
  * Parse GLB bytes into visuals + collider geometry. The bake is
  * deterministic: same bytes -> same scene graph -> same traversal order,
@@ -19,7 +44,7 @@ export const cacheScene = (url: string, s: ParsedScene) => { cache.set(url, s) }
  * Rapier receives bit-identical trimesh input everywhere.
  */
 export async function parseGlb(bytes: ArrayBuffer): Promise<ParsedScene> {
-  const gltf = await new GLTFLoader().parseAsync(bytes, '')
+  const gltf = await (loader ?? new GLTFLoader()).parseAsync(bytes, '')
   const object = gltf.scene
   object.updateWorldMatrix(true, true)
   const vparts: Float32Array[] = []

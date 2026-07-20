@@ -1,6 +1,6 @@
 import { Vector3 } from 'three'
 import { BOOT_LEAD_TICKS, Sim } from './sim'
-import { cachedScene, cacheScene, parseGlb } from './scene'
+import { cachedScene, cacheScene, configureGlbLoader, parseGlb } from './scene'
 import { fetchWorldAsset, uploadWorldAsset } from './matrix/world'
 import { Net } from './net'
 import { Session } from './session'
@@ -44,6 +44,7 @@ async function main() {
   if (cad >= 1) sim.cadence = cad
   await sim.init()
   const view = new View(document.body, sim.ecs)
+  configureGlbLoader(view.renderer)
   // In widget mode the transport is Matrix (identity from the host client,
   // MatrixRTC membership, LiveKit or mock data path); otherwise the classic
   // ws-signalled WebRTC mesh. The Session cannot tell them apart.
