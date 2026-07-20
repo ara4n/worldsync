@@ -42,20 +42,47 @@ OpenID exchange against an lk-jwt-service (element-call's flow; override
 the service url with `?lkService=`). The Session and Sim are identical in
 both modes - MatrixNet is just another transport behind the same seam.
 
+The handshake matches real Element Web semantics, learned the hard way
+against a live EW: widgets added with `/addwidget` run under the host
+default `waitForIframeLoad=true`, so the widget must NOT send
+ContentLoaded (such hosts answer it with a hard "Improper sequence"
+error, visible only in the parent frame's console), and the
+RoomWidgetClient must be constructed at module scope: the host fires its
+capabilities request at the iframe load event, and constructing after
+the Rapier wasm init loses that race by seconds, leaving startClient
+waiting forever. In widget mode every diagnostic line is mirrored to the
+console with a `[worldsync]` prefix, including a notice when input is
+ignored because the session has not started.
+
 For the dev loop, `/mock.html?room=x` is a mock widget host: the real
 `ClientWidgetApi` against an in-memory widget driver whose room state is
 replicated across tabs via BroadcastChannel, with a BroadcastChannel
 transport standing in for LiveKit. Two tabs mesh exactly like the classic
-demo - no Element Web, homeserver, or SFU required - while still
-exercising the genuine widget handshake, RoomWidgetClient, and MatrixRTC
-membership machinery. `node test/mockwidget.mjs` asserts bit-exact
-convergence through this stack, late join included.
+demo - no Element Web, homeserver, or SFU required - while exercising the
+genuine widget handshake (same waitForIframeLoad semantics as EW),
+RoomWidgetClient, and MatrixRTC membership machinery. `node
+test/mockwidget.mjs` asserts bit-exact convergence through this stack,
+late join included.
 
-To embed for real: build, host the bundle, and `/addwidget <url>` it into
-a room in Element Web with element-call's dev backend (Synapse +
-lk-jwt-service + livekit-server; `pnpm backend` in the element-call
-repo). The LiveKit transport follows element-call's sdk patterns but has
-not yet been exercised against a real SFU.
+To embed for real, serve the app (dev server works: `npm run dev --
+--host`) and add it to a room in Element Web with
+
+```
+/addwidget http://HOST:5173/?widgetId=$matrix_widget_id&userId=$matrix_user_id&deviceId=$org.matrix.msc3819.matrix_device_id&baseUrl=$org.matrix.msc4039.matrix_base_url&roomId=$matrix_room_id
+```
+
+(Element Web substitutes the `$`-templates and appends `parentUrl`
+itself; add `&lkService=` if the homeserver's `.well-known` does not
+advertise `org.matrix.msc4143.rtc_foci`.) Status: against a live Element
+Web + matrix.org the widget params and handshake are verified up to the
+capability exchange; the LiveKit transport follows element-call's sdk
+patterns but has not yet been exercised against a real SFU
+(element-call's `pnpm backend` provides one), and LiveKit text streams
+are not yet end-to-end encrypted - wiring the MatrixRTC key events into
+payload encryption is the natural next step. A known trap: a ghost
+`m.call.member` from a killed session makes a solo joiner wait for a
+senior peer that will never answer calibration pings; until the
+reachable-senior fallback lands, use a fresh room.
 
 Test hooks: `npm run dev` then `node test/smoke.mjs` runs a two-browser
 Playwright smoke test (spawn replication plus a laggy drag that must
@@ -211,7 +238,14 @@ serialisation hazards stay exercised.
   away. Held bodies are kinematic: the solver integrates them toward the
   holder's pose with a real velocity, so a held box shoves the pile
   properly; release returns the body to dynamic with the author's
-  authoritative pose and throw velocity.
+  authoritative pose and throw velocity. The pin is velocity-faithful,
+  not latest-wins: it approaches the newest sample no faster than the
+  hand's measured speed (over a >=6-tick baseline), reading only samples
+  stamped at or before the simulated tick so live and healed histories
+  agree. Without this, any sample/tick cadence mismatch multiplied the
+  held body's instantaneous velocity (a 4:1 mismatch measured 4x, and a
+  gentle 0.25 m/s touch ejected a resting box at 1 m/s; now 0.27 m/s,
+  the physical floor for an infinite-mass impact at restitution 0.3).
 - **Input log.** Every op fed into the local Rapier world is recorded with
   full float precision as `{tick, claimedTick, peer, order, seq, type,
   netId, pos, vel}`. "download input log" saves it as JSON; grab it from two
@@ -269,3 +303,10 @@ serialisation hazards stay exercised.
 - Hidden tabs keep simulating via an unthrottled worker heartbeat, but a hard
   stall of more than 2s (debugger pause, machine sleep) still jumps ticks and
   is reported as an ANOMALY rather than repaired.
+- Held bodies are infinite-mass kinematic while grabbed: even a slow touch
+  transfers (1+restitution) x hand speed to a 1kg box. A force-capped PD
+  controller on a dynamic body would give finite hand mass, at the cost of
+  a mushier hold.
+- Widget mode: tick calibration waits on the lowest-order membership even
+  if that peer is unreachable (ghost membership); needs a reachable-senior
+  fallback with a timeout.
