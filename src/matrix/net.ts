@@ -4,6 +4,7 @@ import { logger } from 'matrix-js-sdk/lib/logger'
 import type { DcMessage } from '../types'
 import type { WidgetParams } from './params'
 import { initWidgetClient } from './widget'
+import type { WidgetApi } from 'matrix-widget-api'
 import { BroadcastTransport, LiveKitTransport, type DataTransport } from './transport'
 
 /** Transport-level peer view, mirroring the old Net.Peer surface. */
@@ -44,9 +45,13 @@ export class MatrixNet {
   private announced = new Set<string>()
   private joined = false
 
-  async connect(p: WidgetParams, lkServiceUrl: string | null) {
+  async connect(
+    p: WidgetParams, lkServiceUrl: string | null,
+    /** the handshake started at module scope, before the iframe load event */
+    boot: Promise<{ api: WidgetApi; client: MatrixClient }> = initWidgetClient(p),
+  ) {
     this.id = `${p.userId}:${p.deviceId}`
-    const { client } = await initWidgetClient(p)
+    const { client } = await boot
     this.client = client
     this.onLog(`widget client up as ${p.userId} (${p.deviceId})`)
 

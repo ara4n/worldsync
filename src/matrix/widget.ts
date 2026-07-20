@@ -39,7 +39,12 @@ export async function initWidgetClient(p: WidgetParams): Promise<{ api: WidgetAp
       deviceId: p.deviceId,
       timelineSupport: true,
     },
-    true, // sendContentLoaded
+    // Never auto-send ContentLoaded: widgets added with /addwidget get the
+    // host default waitForIframeLoad=true, and such hosts treat an
+    // unexpected ContentLoaded as a hard "Improper sequence" error (in the
+    // PARENT frame's console) and never finish the handshake - the widget
+    // then waits in startClient forever. Element-call passes false too.
+    false,
   )
   await client.startClient()
   return { api, client }

@@ -7,6 +7,7 @@ import { Input, type Emitter } from './input'
 import { UI } from './ui'
 import { wallNow, type DcMessage } from './types'
 import { widgetParams } from './matrix/params'
+import { initWidgetClient } from './matrix/widget'
 
 /** What main needs from a transport; Net (ws demo) and MatrixNet both fit. */
 interface NetLike {
@@ -17,9 +18,20 @@ interface NetLike {
   broadcast(msg: DcMessage): void
 }
 
+// The widget-api handshake must begin at module scope, before the window
+// 'load' event: hosts with waitForIframeLoad=true (Element Web's default
+// for /addwidget widgets) fire their capabilities request at iframe load,
+// and only a constructed RoomWidgetClient is listening. Module scripts
+// finish before 'load', so constructing here wins the race; waiting until
+// after the Rapier wasm init (seconds) loses it and the session never
+// starts. The stray-rejection guard keeps an early handshake failure
+// quiet until connect() awaits and reports it.
+const wp = widgetParams()
+const widgetBoot = wp ? initWidgetClient(wp) : null
+widgetBoot?.catch(() => {})
+
 async function main() {
   const params = new URLSearchParams(location.search)
-  const wp = widgetParams()
   const room = wp ? wp.roomId : params.get('room') ?? 'default'
   const sim = new Sim()
   // ?norm=pipeline swaps per-tick world restore for per-tick solver reset
@@ -121,7 +133,7 @@ async function main() {
   if (net instanceof Net) net.connect(room)
   else {
     (net as import('./matrix/net').MatrixNet)
-      .connect(wp!, params.get('lkService'))
+      .connect(wp!, params.get('lkService'), widgetBoot!)
       .catch(e => { log(`matrix connect failed: ${e}`); console.error('[worldsync]', e) })
   }
 

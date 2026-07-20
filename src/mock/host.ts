@@ -166,14 +166,15 @@ function boot() {
   widgetUrl.searchParams.set('baseUrl', location.origin)
   widgetUrl.searchParams.set('mockTransport', '1')
 
+  // waitForIframeLoad stays at its default (true), matching what Element
+  // Web gives widgets added via /addwidget: the handshake starts from the
+  // iframe load event and the widget must NOT send ContentLoaded. Keeping
+  // the mock host on the same semantics as the real one is the point.
   const widget = new Widget({
     id: `worldsync-${room}`,
     creatorUserId: userId,
     type: 'm.custom',
     url: widgetUrl.toString(),
-    // the widget signals readiness itself via ContentLoaded (matryoshka
-    // convention); waiting for the iframe load event instead double-fires
-    waitForIframeLoad: false,
   })
   const driver = new MockDriver()
   const api = new ClientWidgetApi(widget, iframe, driver)
