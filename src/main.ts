@@ -163,6 +163,7 @@ async function main() {
       log(`scene preloaded (${parsed.geometry.indices.length / 3} tris)`)
     }
     m.onWorldScript = url => worldScriptChanged(url)
+    m.onSeniorsUnreachable = () => session.seniorsUnreachable()
   }
 
   // Keep the rendered scene in step with the sim's active scene (which can

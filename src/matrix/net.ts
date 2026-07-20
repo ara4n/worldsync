@@ -1,4 +1,4 @@
-import { MatrixRTCSessionManager, MatrixRTCSessionEvent, type MatrixRTCSession } from 'matrix-js-sdk/lib/matrixrtc'
+import { MatrixRTCSessionManager, MatrixRTCSessionEvent, isLivekitTransportConfig, type MatrixRTCSession } from 'matrix-js-sdk/lib/matrixrtc'
 import { ClientEvent, EventType, type MatrixClient, type MatrixEvent } from 'matrix-js-sdk'
 import { logger } from 'matrix-js-sdk/lib/logger'
 import type { DcMessage } from '../types'
@@ -7,6 +7,10 @@ import { initWidgetClient } from './widget'
 import type { WidgetApi } from 'matrix-widget-api'
 import { BroadcastTransport, LiveKitTransport, type DataTransport } from './transport'
 import { readWorldSceneUrl, readWorldScriptUrl, worldUrls, WORLD_EVENT_TYPE } from './world'
+
+/** How long a senior membership may stay unreachable on the transport
+ * before a calibrating joiner writes it off as a ghost and self-roots. */
+const GHOST_GRACE_MS = 12000
 
 /** Transport-level peer view, mirroring the old Net.Peer surface. */
 export interface MatrixPeer {
@@ -49,6 +53,11 @@ export class MatrixNet {
    * effects enter the timeline as ordinary ops, so a plain state watch is
    * enough (no op, no seam handling). */
   onWorldScript: (scriptUrl: string | null) => void = () => {}
+
+  /** every membership senior to us has stayed transport-unreachable past
+   * the grace period: ghosts. main wires this to Session.seniorsUnreachable
+   * so calibration stops waiting for pongs that cannot come. */
+  onSeniorsUnreachable: () => void = () => {}
 
   /** the widget-api handle (media upload/download) and proxied client
    * (state events), exposed for the MSC3815 world plumbing in main */
@@ -100,7 +109,12 @@ export class MatrixNet {
       void poke?.call(this.rtc).then(() => this.reconcile())
     })
 
-    const serviceUrl = lkServiceUrl ?? this.discoverService()
+    const serviceUrl = lkServiceUrl ?? await this.discoverService(p)
+    if (!p.mockTransport && !serviceUrl) {
+      throw new Error('no LiveKit service url: not in rtc_foci of the client well-known, '
+        + 'none advertised by current members - pass ?lkService=https://your-lk-jwt-service')
+    }
+    if (!p.mockTransport) this.onLog(`livekit service: ${serviceUrl}`)
     this.transport = p.mockTransport
       ? new BroadcastTransport(p.roomId, this.id)
       : new LiveKitTransport(client, serviceUrl!, p.roomId, p.userId, p.deviceId)
@@ -129,12 +143,54 @@ export class MatrixNet {
     )
     await this.transport.connect()
     this.reconcile()
+
+    // Ghost-membership fallback: a crashed session leaves its m.call.member
+    // behind (the delayed leave event may never fire), and a joiner would
+    // wait forever to calibrate against a senior that cannot answer. Give
+    // real seniors a grace period to show up on the transport; if none of
+    // them do, declare them ghosts.
+    setTimeout(() => {
+      let anySenior = false
+      let reachableSenior = false
+      for (const m of this.rtc.memberships) {
+        const id = `${m.userId}:${m.deviceId}`
+        if (id === this.id || m.createdTs() >= this.order) continue
+        anySenior = true
+        if (this.reachable.has(id)) reachableSenior = true
+      }
+      if (anySenior && !reachableSenior) {
+        this.onLog('senior members never became reachable; treating them as ghosts')
+        this.onSeniorsUnreachable()
+      }
+    }, GHOST_GRACE_MS)
   }
 
-  private discoverService(): string | null {
-    const wk = this.client.getClientWellKnown() as Record<string, unknown> | undefined
-    const foci = wk?.['org.matrix.msc4143.rtc_foci'] as { type: string; livekit_service_url?: string }[] | undefined
-    return foci?.find(f => f.type === 'livekit')?.livekit_service_url ?? null
+  /**
+   * Find the lk-jwt-service, element-call style, in preference order:
+   * a transport an existing member advertises (joining their session means
+   * using their SFU), the host-provided client well-known (usually absent
+   * for widgets: a RoomWidgetClient never talks to a homeserver), and
+   * finally the user's homeserver .well-known fetched directly over HTTP.
+   */
+  private async discoverService(p: WidgetParams): Promise<string | null> {
+    const fromWk = (wk: unknown): string | null => {
+      const foci = (wk as Record<string, unknown> | undefined)?.['org.matrix.msc4143.rtc_foci'] as
+        { type: string; livekit_service_url?: string }[] | undefined
+      return foci?.find(f => f.type === 'livekit')?.livekit_service_url ?? null
+    }
+    for (const m of this.rtc.memberships) {
+      for (const t of m.transports) {
+        if (isLivekitTransportConfig(t)) return t.livekit_service_url
+      }
+    }
+    const viaClient = fromWk(this.client.getClientWellKnown())
+    if (viaClient) return viaClient
+    const server = p.userId.split(':').slice(1).join(':')
+    try {
+      const res = await fetch(`https://${server}/.well-known/matrix/client`)
+      if (res.ok) return fromWk(await res.json())
+    } catch { /* fall through to null */ }
+    return null
   }
 
   /** membership x transport-reachability drives the peer lifecycle */

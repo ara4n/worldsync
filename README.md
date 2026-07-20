@@ -139,17 +139,21 @@ To embed for real, serve the app (dev server works: `npm run dev --
 ```
 
 (Element Web substitutes the `$`-templates and appends `parentUrl`
-itself; add `&lkService=` if the homeserver's `.well-known` does not
-advertise `org.matrix.msc4143.rtc_foci`.) Status: against a live Element
-Web + matrix.org the widget params and handshake are verified up to the
-capability exchange; the LiveKit transport follows element-call's sdk
-patterns but has not yet been exercised against a real SFU
-(element-call's `pnpm backend` provides one), and LiveKit text streams
-are not yet end-to-end encrypted - wiring the MatrixRTC key events into
-payload encryption is the natural next step. A known trap: a ghost
-`m.call.member` from a killed session makes a solo joiner wait for a
-senior peer that will never answer calibration pings; until the
-reachable-senior fallback lands, use a fresh room.
+itself.) The lk-jwt-service is discovered element-call style: a
+transport advertised by an existing member, else the client well-known,
+else the user's homeserver `/.well-known/matrix/client` fetched
+directly (a RoomWidgetClient never talks to a homeserver itself, so the
+sdk's well-known is usually empty in widget mode); `&lkService=`
+overrides all of that. Status: against a live Element Web + matrix.org
+the widget params and handshake are verified up to the capability
+exchange; the LiveKit transport follows element-call's sdk patterns but
+has not yet been exercised end-to-end against a real SFU, and LiveKit
+text streams are not yet end-to-end encrypted - wiring the MatrixRTC
+key events into payload encryption is the natural next step. Ghost
+`m.call.member`s from killed sessions no longer stall calibration: a
+joiner gives seniors 12s to become reachable on the transport, then
+writes them off and roots the tick grid itself (a senior that shows up
+late triggers a hard resync + boot seam and the room heals).
 
 Test hooks: `npm run dev` then `node test/smoke.mjs` runs a two-browser
 Playwright smoke test (spawn replication plus a laggy drag that must
@@ -376,9 +380,9 @@ serialisation hazards stay exercised.
   transfers (1+restitution) x hand speed to a 1kg box. A force-capped PD
   controller on a dynamic body would give finite hand mass, at the cost of
   a mushier hold.
-- Widget mode: tick calibration waits on the lowest-order membership even
-  if that peer is unreachable (ghost membership); needs a reachable-senior
-  fallback with a timeout.
+- Widget mode: the ghost-membership fallback writes seniors off after a
+  12s unreachability grace; a genuinely slow senior arriving later means
+  a hard resync and a boot seam rather than a clean calibration.
 - Scenes are single-file `.glb` only, colliders are a raw bake of every
   mesh (no OMI_collider / physics extensions, no exclusions), and a
   joiner whose scene preload FAILS joins without colliders and diverges
