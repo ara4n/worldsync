@@ -8,18 +8,22 @@ import { entityFor } from './ecs'
 import { wallNow, type Interaction } from './types'
 
 const HASH_EVERY_TICKS = 30
-// Only compare tick hashes older than this: both sides must have folded all
-// in-flight interactions for a tick before its hash is meaningful. Sized for
-// max fake latency (1s = 30 ticks) plus fold-storm processing backlog.
-const SETTLE_TICKS = 105
+// Only exchange tick hashes older than this. A fold can rewrite any tick in
+// the snapshot window (HISTORY_TICKS back), so anything younger can still
+// change after being sent, false-positiving the divergence latch; beyond the
+// window a rewrite is impossible without a clamp ANOMALY being logged.
+const SETTLE_TICKS = 165
 
 async function main() {
   const params = new URLSearchParams(location.search)
   const room = params.get('room') ?? 'default'
   const sim = new Sim()
-  // ?norm=pipeline swaps per-tick world restore for per-tick solver reset;
-  // every peer in a room must use the same mode.
+  // ?norm=pipeline swaps per-tick world restore for per-tick solver reset
+  // (refuted, kept as a demo); ?cad=K snapshots/normalises every K
+  // grid-aligned ticks. Every peer in a room must use the same settings.
   if (params.get('norm') === 'pipeline') sim.normalizeMode = 'pipeline'
+  const cad = Math.floor(Number(params.get('cad') ?? '0'))
+  if (cad >= 1) sim.cadence = cad
   await sim.init()
   const view = new View(document.body)
   const net = new Net()
@@ -106,13 +110,6 @@ async function main() {
       case 'hashes': {
         for (let j = 0; j < msg.hs.length; j++) {
           const t = msg.start + j
-          if (msg.bs?.[j] && peer.bytesDivergedAt === null) {
-            const oursB = sim.byteHashes.get(t)
-            if (oursB !== undefined && oursB !== msg.bs[j]) {
-              peer.bytesDivergedAt = t
-              ui.log(`internal state DIVERGED from ${peer.id} at tick ${t - startTick} (poses may still agree)`)
-            }
-          }
           const theirs = msg.hs[j]
           if (!theirs) continue
           const ours = sim.hashes.get(t)
@@ -173,24 +170,20 @@ async function main() {
       nextHashTick = sim.tick + HASH_EVERY_TICKS
       const start = sim.tick - SETTLE_TICKS - 2 * HASH_EVERY_TICKS
       const hs: number[] = []
-      const bs: number[] = []
       for (let t = start; t < sim.tick - SETTLE_TICKS; t++) {
         hs.push(sim.hashes.get(t) ?? 0)
-        bs.push(sim.byteHashes.get(t) ?? 0)
       }
-      net.broadcast({ kind: 'hashes', start, hs, bs })
+      net.broadcast({ kind: 'hashes', start, hs })
     }
     ui.maybe(now, () => ({
       room, id: net.id, order: net.order,
       entities: sim.bodies.size, tick: sim.tick - startTick, stepMs: sim.stepMs,
-      perf: sim.perf, norm: sim.normalizeMode,
+      perf: sim.perf, norm: sim.cadence > 1 ? `${sim.normalizeMode}/${sim.cadence}` : sim.normalizeMode,
       rollbacks: sim.rollbacks, lastDepth: sim.lastReplayDepth,
       peers: [...net.peers.values()].map(p => ({
         id: p.id, order: p.order, connected: p.connected, rtt: p.rtt,
         offset: p.offset, strikes: p.strikes, excluded: p.excluded,
-        sync: p.divergedAt !== null ? `≠@${p.divergedAt - startTick}`
-          : p.bytesDivergedAt !== null ? `b≠@${p.bytesDivergedAt - startTick}`
-          : p.checked ? '=' : '-',
+        sync: p.divergedAt !== null ? `≠@${p.divergedAt - startTick}` : p.checked ? '=' : '-',
       })),
     }))
     requestAnimationFrame(frame)

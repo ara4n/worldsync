@@ -40,6 +40,8 @@ export type DcMessage =
   | { kind: 'boot-req' }
   | { kind: 'boot'; entities: BootEntity[] }
   // Bit-exact per-tick hashes for a settled range of the global tick grid:
-  // hs[j] hashes poses/velocities at tick start+j, bs[j] hashes the full
-  // snapshot bytes (solver internals included). 0 = not yet known.
-  | { kind: 'hashes'; start: number; hs: number[]; bs: number[] }
+  // hs[j] hashes poses/velocities at the start of tick start+j; 0 = not yet
+  // known. Whole-snapshot bytes are NOT exchanged: Rapier serialises a
+  // per-step counter, and a folding peer steps more times than a live one,
+  // so peers' snapshot bytes legitimately never match.
+  | { kind: 'hashes'; start: number; hs: number[] }

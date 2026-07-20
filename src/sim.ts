@@ -106,12 +106,6 @@ function resetSolvers(world: RAPIER.World) {
   world.ccdSolver = new CcdCtor()
 }
 
-function fnvBytes(u: Uint8Array): number {
-  let h = 0x811c9dc5
-  for (let i = 0; i < u.length; i++) h = Math.imul(h ^ u[i], 0x01000193)
-  return h >>> 0
-}
-
 /**
  * Locally simulated Rapier world with a rollback window.
  *
@@ -145,19 +139,37 @@ export class Sim {
   inputLog: InputLogEntry[] = []
   /** Anomalies that are expected to cause divergence (tick jumps, clamps). */
   onAnomaly: (msg: string) => void = () => {}
+  anomalies: string[] = []
+  private anomaly(msg: string) {
+    this.anomalies.push(msg)
+    this.onAnomaly(msg)
+  }
   /** Bit-exact state hash at the START of each tick, on the global tick
    * grid, rewritten by rollbacks; peers exchange settled ranges of these to
-   * find the first tick at which their worlds disagreed. */
+   * find the first tick at which their worlds disagreed. Poses/velocities
+   * only: whole-snapshot bytes are NOT comparable across peers, because
+   * Rapier serialises a per-step counter and a folding peer steps more
+   * times (replays) than a live one. verifyReplay still compares bytes
+   * locally, where step counts do line up. */
   hashes = new Map<number, number>()
-  /** FNV over the full snapshot bytes at the start of each tick: catches
-   * divergence in solver-internal state before it reaches the poses. */
-  byteHashes = new Map<number, number>()
   /** EMA of full tick cost in ms (snapshot + normalise restore + step). */
   stepMs = 0
   /** EMA breakdown of stepMs: snapshot+history, normalise, physics step,
    * hashes+bookkeeping. */
   perf = { snap: 0, norm: 0, phys: 0, hash: 0 }
   normalizeMode: NormalizeMode = 'restore'
+  /**
+   * Snapshot + normalise every K GRID-ALIGNED ticks instead of every tick
+   * (rollbacks round down to the nearest cadence point). Cadence points are
+   * shared across peers because tick numbers are global, so a folding peer's
+   * replay performs restores at exactly the ticks the live path performed
+   * them; between cadence points both paths run the same uninterrupted
+   * steps. Divides the snapshot+restore cost by K at the price of up to
+   * K-1 extra replayed ticks per fold. Must match across peers. Validated
+   * bit-exact at 10 by the 150-box stress; ?cad=1 restores the old
+   * every-tick behaviour.
+   */
+  cadence = 10
   private history = new Map<number, HistoryRec>()
   private timeline: Entry[] = []
   private seen = new Set<string>()
@@ -199,9 +211,12 @@ export class Sim {
     const claimedTick = this.tickOf(i.t)
     let k = claimedTick
     if (k > this.tick + MAX_FUTURE_TICKS) k = this.tick + MAX_FUTURE_TICKS
-    if (k < this.tick) k = Math.max(k, this.tick - this.history.size)
+    if (k < this.tick) {
+      const oldest = this.oldestSnapTick()
+      k = oldest === null ? this.tick : Math.max(k, oldest)
+    }
     if (k !== claimedTick) {
-      this.onAnomaly(`clamped ${i.type} from ${i.peer} by ${k - claimedTick} ticks; sims will diverge`)
+      this.anomaly(`clamped ${i.type} from ${i.peer} by ${k - claimedTick} ticks; sims will diverge`)
     }
     this.seen.add(key)
     if (this.inputLog.length < INPUT_LOG_MAX) {
@@ -217,10 +232,20 @@ export class Sim {
     if (k < this.tick) this.resimFrom = this.resimFrom === null ? k : Math.min(this.resimFrom, k)
   }
 
+  /** Oldest tick with a stored snapshot; keys are inserted in ascending
+   * order and pruned oldest-first, so the first key is the minimum. */
+  private oldestSnapTick(): number | null {
+    for (const k of this.history.keys()) return k
+    return null
+  }
+
   /** Roll back and replay if any past-tick interactions arrived. Returns true if state was rewritten. */
   fold(): boolean {
     if (this.resimFrom === null) return false
-    const k = this.resimFrom
+    // Round down to a cadence point: insert() clamped to >= the oldest
+    // snapshot tick, which is itself aligned, so the aligned tick has a
+    // snapshot too.
+    const k = this.resimFrom - (this.resimFrom % this.cadence)
     this.resimFrom = null
     const target = this.tick
     const rec = this.history.get(k)!
@@ -246,7 +271,7 @@ export class Sim {
       const skipped = this.tickOf(now) - this.tick
       this.tick = this.tickOf(now)
       this.history.clear()
-      this.onAnomaly(`jumped ${skipped} ticks without simulating; sims will diverge`)
+      this.anomaly(`jumped ${skipped} ticks without simulating; sims will diverge`)
     }
   }
 
@@ -274,29 +299,43 @@ export class Sim {
 
   private step() {
     const t0 = performance.now()
-    const snap = this.world.takeSnapshot()
-    this.history.set(this.tick, {
-      snap,
-      bodies: new Map(this.bodies),
-      grabs: cloneGrabs(this.grabs),
-    })
-    this.history.delete(this.tick - HISTORY_TICKS)
+    // Cadence points are ticks divisible by `cadence`, aligned on the global
+    // grid so every peer snapshots and normalises at the same tick numbers.
+    const aligned = this.tick % this.cadence === 0
+    let snap: Uint8Array | null = null
+    if (aligned) {
+      snap = this.world.takeSnapshot()
+      this.history.set(this.tick, {
+        snap,
+        bodies: new Map(this.bodies),
+        grabs: cloneGrabs(this.grabs),
+      })
+      for (const key of this.history.keys()) {
+        if (key > this.tick - HISTORY_TICKS) break
+        this.history.delete(key)
+      }
+    }
     const t1 = performance.now()
-    // Normalise: EVERY tick, on every peer, drops the solver state that
-    // takeSnapshot does not serialise. Rapier keeps such state in the
-    // PhysicsPipeline and CCDSolver; it evolves differently down a
+    // Normalise: at every cadence point, on every peer, drop the solver
+    // state that takeSnapshot does not serialise. Rapier keeps such state in
+    // the PhysicsPipeline and CCDSolver; it evolves differently down a
     // fold-then-replay path than down a continuous live path, and under
-    // contact stress that changes outcomes. Making every tick step from the
-    // same effective state makes live stepping and rollback replay the same
-    // operation by construction. 'restore' rebuilds the whole world from the
-    // snapshot just taken; 'pipeline' only replaces the two non-serialised
-    // objects, which is what a restore gives you fresh anyway.
-    if (this.normalizeMode === 'restore') {
-      this.world.free()
-      this.world = RAPIER.World.restoreSnapshot(snap)
-      this.world.timestep = 1 / 30
-    } else {
-      resetSolvers(this.world)
+    // contact stress that changes outcomes. Rollbacks round down to a
+    // cadence point, so a replay performs restores at exactly the ticks the
+    // live path performed them: live stepping and rollback replay are the
+    // same operation by construction. 'restore' rebuilds the whole world
+    // from the snapshot just taken; 'pipeline' only replaces the two
+    // non-serialised objects, which turned out NOT to be equivalent (the
+    // restore also canonicalises in-memory state of the serialised
+    // components; see README), so 'restore' is the default.
+    if (aligned) {
+      if (this.normalizeMode === 'restore') {
+        this.world.free()
+        this.world = RAPIER.World.restoreSnapshot(snap!)
+        this.world.timestep = 1 / 30
+      } else {
+        resetSolvers(this.world)
+      }
     }
     const t2 = performance.now()
     const ctx = this.liveCtx()
@@ -304,14 +343,9 @@ export class Sim {
     this.writePrev()
     this.pinAndStep(ctx)
     const t3 = performance.now()
-    // The byte hash for tick N covers the state at the START of tick N,
-    // which is exactly the snapshot this call just took: no second
-    // takeSnapshot needed.
-    this.byteHashes.set(this.tick, fnvBytes(snap))
     this.tick++
     this.hashes.set(this.tick, hashCtx(ctx))
     this.hashes.delete(this.tick - 2 * HISTORY_TICKS)
-    this.byteHashes.delete(this.tick - 2 * HISTORY_TICKS)
     while (this.timeline.length && this.timeline[0].tick < this.tick - HISTORY_TICKS) this.timeline.shift()
     const t4 = performance.now()
     const ema = (old: number, v: number) => old * 0.95 + v * 0.05
@@ -332,9 +366,11 @@ export class Sim {
    * from peers that do not, even with identical inputs.
    */
   verifyReplay(depth = 60): { posesMatch: boolean; bytesMatch: boolean; depth: number } | { error: string } {
-    const from = this.tick - depth
+    let from = this.tick - depth
+    from -= from % this.cadence // replays start at cadence points
     const rec = this.history.get(from)
     if (!rec) return { error: `no snapshot ${depth} ticks back` }
+    depth = this.tick - from
     const ctx: Ctx = {
       world: RAPIER.World.restoreSnapshot(rec.snap),
       bodies: new Map(rec.bodies),
@@ -342,14 +378,16 @@ export class Sim {
     }
     ctx.world.timestep = 1 / 30
     for (let t = from; t < this.tick; t++) {
-      // mirror the per-tick normalisation of step()
-      if (this.normalizeMode === 'restore') {
-        const s = ctx.world.takeSnapshot()
-        ctx.world.free()
-        ctx.world = RAPIER.World.restoreSnapshot(s)
-        ctx.world.timestep = 1 / 30
-      } else {
-        resetSolvers(ctx.world)
+      // mirror the cadence normalisation of step()
+      if (t % this.cadence === 0) {
+        if (this.normalizeMode === 'restore') {
+          const s = ctx.world.takeSnapshot()
+          ctx.world.free()
+          ctx.world = RAPIER.World.restoreSnapshot(s)
+          ctx.world.timestep = 1 / 30
+        } else {
+          resetSolvers(ctx.world)
+        }
       }
       this.applyTick(ctx, t)
       this.pinAndStep(ctx)

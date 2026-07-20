@@ -8,10 +8,10 @@ const base = process.env.URL ?? 'http://localhost:5173'
 const boxes = Number(process.env.BOXES ?? 150)
 const browser = await chromium.launch({ headless: false })
 
-async function measure(mode) {
+async function measure(query) {
   const page = await browser.newPage()
   const room = 'perf-' + Math.random().toString(36).slice(2, 8)
-  await page.goto(`${base}/?room=${room}&norm=${mode}`)
+  await page.goto(`${base}/?room=${room}&${query}`)
   await page.waitForFunction(() => window.__jig && window.__jig.net.id !== '', null, { timeout: 15000 })
   // Inject spawns straight into the sim (no peer, no pointer): a 1.05m grid
   // at three heights collapses into one contact-rich resting pile.
@@ -40,7 +40,7 @@ async function measure(mode) {
   return s
 }
 
-for (const mode of ['restore', 'pipeline']) {
+for (const mode of ['norm=restore&cad=1', 'norm=restore&cad=10', 'norm=pipeline&cad=1']) {
   const s = await measure(mode)
   const p = s.perf
   console.log(`${mode}: ${s.entities} boxes, snapshot ${(s.snapshotBytes / 1024).toFixed(0)}KB`)

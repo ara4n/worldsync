@@ -17,11 +17,15 @@ Run: `npm run dev` (Vite serves the app AND the ws signaling at /signal),
 open http://localhost:5173 in 2+ tabs, same ?room= = same world.
 A dev server is usually already running on 5173 (kill: `kill $(lsof -ti:5173)`).
 
-Tests (dev server must be running; both run HEADED per Matthew's request):
+Tests (dev server must be running; all run HEADED per Matthew's request).
+NOTE: editing src/ while a test runs triggers a Vite reload that kills the
+test mid-flight; finish edits first.
 - `node test/smoke.mjs`: 2 browsers, spawn replication, 120ms-lagged drag
   must converge bit-identically, input logs must match.
 - `MINUTES=2 BOXES=150 node test/diverge.mjs`: stress that reproduced the
-  big divergence bug; auto post-mortem if peers disagree.
+  big divergence bug; auto post-mortem if peers disagree; NORM=/CAD= env
+  select normalisation mode and cadence (0 = app default).
+- `BOXES=150 node test/perf.mjs`: per-tick phase breakdown per mode.
 - `node test/verify-motion.mjs`: single-page replay-vs-live check mid-fall.
 
 ## File map (src/)
@@ -29,9 +33,10 @@ Tests (dev server must be running; both run HEADED per Matthew's request):
 - `types.ts`: protocol types, wallNow() (= performance.timeOrigin + now).
 - `ecs.ts`: bitECS components (Position, Rotation, PrevPosition,
   PrevRotation, Tint, Box), netId<->eid maps, ensureEntity.
-- `sim.ts`: THE CORE. Rapier world, global tick grid, snapshot history ring,
-  interaction timeline, rollback (fold/resim), grabs, per-tick pose+byte
-  hashes, verifyReplay, stateAt/snapshotAt/roundTrip probes, input log.
+- `sim.ts`: THE CORE. Rapier world, global tick grid, cadence
+  snapshot/normalize (history ring), interaction timeline, rollback
+  (fold/resim, rounds down to cadence), grabs, per-tick pose hashes,
+  verifyReplay, stateAt/snapshotAt/roundTrip probes, input log, perf EMAs.
 - `net.ts`: signaling client, WebRTC mesh (joiner initiates, signal queue
   serialized to avoid ICE races), ping/pong RTT + wall-skew measurement,
   fake-latency send delay, per-peer strike/exclusion + divergence latches.
@@ -54,13 +59,22 @@ Tests (dev server must be running; both run HEADED per Matthew's request):
    orders events within a tick (sort: tick, t, order, seq).
 2. ALL physics inputs flow through the timeline, including the dragger's own
    drag (33ms move samples). Never feed raw pointer state to the sim.
-3. Every tick, on EVERY peer, the world is freed and restored from the
-   snapshot just taken, then stepped ("normalize"). See root cause below.
+3. At every CADENCE POINT (tick % cadence == 0 on the global grid; cadence
+   10 by default, same on every peer), the world is snapshotted then freed
+   and restored from those bytes before stepping ("normalize"), and
+   rollbacks round DOWN to a cadence point. Every peer thus performs
+   restores at identical ticks whether stepping live or replaying. See
+   hunt chapters 5-9.
 4. Bodies never sleep (setCanSleep(false) at both creation sites).
 5. Body creation order = timeline order everywhere (folds recreate in
    timeline order), so Rapier handles match across peers.
-6. State = pure function of (snapshot bytes, timeline). Anything violating
-   this must be fixed, not tolerated.
+6. State = pure function of (cadence snapshot bytes, timeline). Anything
+   violating this must be fixed, not tolerated.
+7. Cross-peer state comparison uses POSE/VELOCITY hashes only, exchanged
+   for ranges older than the fold window (SETTLE_TICKS=165 > HISTORY_TICKS)
+   so no rollback can rewrite an exchanged tick. Snapshot BYTES are never
+   compared across peers (see chapter 9); byte-level checks are local only
+   (verifyReplay).
 
 ## The divergence hunt (chronological, so you don't re-litigate)
 
@@ -92,20 +106,44 @@ Tests (dev server must be running; both run HEADED per Matthew's request):
    cross-peer pose delta 0.000000000m; verifyReplay byte-exact on both.
 7. "Why not restore only on rollbacks?" (Matthew asked): because rollback
    times are per-peer arrival-determined; each restore resets the hidden
-   state, so restore timing must be identical on all peers => every tick.
-   Shared-cadence restore fails too (folds start at arbitrary ticks).
-   Real fix would be serializing the pipeline state = rapier/parry fork
-   (typetag-style work for boxed trait objects); only worth it if per-tick
-   restore cost starts hurting.
+   state, so restore timing must be identical on all peers.
+8. Pipeline-reset experiment (REFUTED, commit 5e0b3b0): world.step()
+   consults exactly the 9 serialized components plus physicsPipeline and
+   ccdSolver (verified in the bundle), and both wrappers have no-arg ctors,
+   so ?norm=pipeline replaced just those two per tick instead of restoring.
+   Result: stress diverges in seconds; a LONE page gets verifyReplay
+   posesMatch=true bytesMatch=false. Conclusion: serialize+restore also
+   canonicalises in-memory representation of the serialized components
+   (orderings affecting FP summation), and stepping is sensitive to the
+   representative. So a fork that merely serialized PhysicsPipeline would
+   NOT enable restore-free rollback; it would need representation-
+   independent stepping (canonical constraint sorting) inside rapier.
+9. Byte-hash noise + grid-aligned cadence (the actual overhead fix):
+   b-hash "divergence" latched even in restore mode with poses bit-equal;
+   final-map diff showed peers' snapshot bytes differ PERSISTENTLY.
+   Isolated in node: after the first step, exactly two u32 LE per-step
+   counters (offsets 148/192 in an empty world, broad-phase section)
+   increment every step and are serialized; equal-warmup worlds serialize
+   identically. A folding peer steps more total times than a live peer, so
+   cross-peer snapshot bytes NEVER match. The b≠ signal was structural
+   noise all along (and polluted the original bug's byte diffs). Removed
+   the byte-hash exchange entirely (also saves ~0.5ms/tick of FNV).
+   Then implemented cadence normalization (invariant 3): snapshot+restore
+   every K grid-aligned ticks, rollback rounds down. Validated bit-exact
+   at cad=1 and cad=10 (150-box stress, ~1400 rollbacks, 300/300 settled
+   pose hashes equal, zero anomalies). Default cadence 10.
 
 ## Diagnostic toolkit (all live in the app)
 
 - Input log: every input fed to the sim {tick, claimedTick, t, peer, order,
   seq, type, netId, pos, vel}, full float precision; panel button downloads;
   diff two peers' logs sorted by (tick,t,order,seq).
-- Per-tick pose hash + snapshot-byte hash on the global grid; exchanged for
-  settled ranges (SETTLE_TICKS=105 back); sync column: `=` ok, `b≠@N`
-  internals diverged, `≠@N` poses diverged; first divergent tick latched.
+- Per-tick pose/velocity hash on the global grid; exchanged for settled
+  ranges (SETTLE_TICKS=165 back, beyond the fold window so exchanged values
+  are final); sync column: `=` ok, `≠@N` diverged; first divergent tick
+  latched. No cross-peer byte hashes (invariant 7).
+- Step-phase perf EMAs in sim.perf {snap, norm, phys, hash}, shown in the
+  panel status line and dumped by test/perf.mjs.
 - On pose divergence: auto verifyReplay + window.__divergence stash (bit
   dumps + raw snapshots at divergent tick and tick-1).
 - ANOMALY log lines for the two known unrecoverable events: tick jump after
@@ -126,12 +164,28 @@ Tests (dev server must be running; both run HEADED per Matthew's request):
 
 ## Perf state
 
-~3.4ms/tick at 132 boxes (includes snapshot for history ring + normalize
-restore + step + 2 hashes; shown as "step" in panel). Budget 33ms. Fold
-storms on a lagged peer are the pressure point (replay = N ticks x full step
-cost). Next lever if scaling up: snapshot/normalize every K grid-aligned
-ticks, rollback rounds down to a cadence point (stays deterministic because
-cadence points are shared, unlike rollback points).
+150 settled boxes on Matthew's M5, per tick (budget 33ms), measured by
+test/perf.mjs after the byte-hash removal:
+- cad=1:  1.50ms = snap 0.26 + restore 0.42 + phys 0.63 + hash 0.20
+  (serialization overhead ~= 1x the physics step itself)
+- cad=10: 0.89ms = snap 0.03 + restore 0.05 + phys 0.65 + hash 0.17
+  (overhead amortised to ~13% of physics; DEFAULT)
+Fold storms on a lagged peer remain the pressure point (replay = N ticks x
+step cost, plus up to cadence-1 extra ticks from rounding down). Next
+levers if scaling further: raise cadence (validated knob), thin the pose
+hash, or batch bodies.
+
+## The fork question (answered 2026-07-20)
+
+Matthew wanted to know if forking rapier/parry could remove the restore
+overhead. Answer: the overhead is already near-zero at cadence 10, and a
+fork would be much harder than "serialize the pipeline": chapter 8 shows
+restore-free rollback needs representation-independent stepping inside
+rapier (canonical constraint ordering), not just more serde coverage. Not
+worth it at jig scale. A TINY fork could zero the two per-step broad-phase
+counters during serialization to make cross-peer byte comparison
+meaningful again (early-warning internals check, chapter 9) - nice-to-have
+only.
 
 ## Known gaps / next-step candidates
 
@@ -139,11 +193,11 @@ cadence points are shared, unlike rollback points).
   exact). Fix: tick stamps + calibration.
 - Late joiners get a JSON dump, not byte-exact state: founding peers agree
   exactly, joiners start merely close. Fix: send snapshot bytes + timeline.
-- bytesDivergedAt once false-positived during a fold storm (settle guard
-  outrun); SETTLE_TICKS raised 75->105, not re-verified at 150 boxes since.
 - No resync after real divergence, no kick, no entity deletion, no jitter
   sim (latency shim is constant delay, ordered channel).
 - Hidden tabs simulate via worker heartbeat; >2s hard stall still jumps.
+- ?norm=pipeline is kept as a live demo of the refuted experiment; do not
+  use it for real runs (it diverges by design).
 
 ## Matthew's working preferences (from this session)
 

@@ -11,12 +11,13 @@ const room = 'div-' + Math.random().toString(36).slice(2, 8)
 const minutes = Number(process.env.MINUTES ?? 1.5)
 const targetBoxes = Number(process.env.BOXES ?? 150)
 const norm = process.env.NORM ?? 'restore'
+const cad = Number(process.env.CAD ?? 0) // 0 = app default
 const browser = await chromium.launch({ headless: false })
 
 async function open(name) {
   const page = await browser.newPage()
   page.on('pageerror', e => console.error(`${name} pageerror:`, String(e)))
-  await page.goto(`${base}/?room=${room}&norm=${norm}`)
+  await page.goto(`${base}/?room=${room}&norm=${norm}&cad=${cad}`)
   await page.waitForFunction(() => window.__jig && window.__jig.net.id !== '', null, { timeout: 15000 })
   return page
 }
@@ -26,7 +27,7 @@ const b = await open('b')
 const peered = p =>
   p.waitForFunction(() => [...window.__jig.net.peers.values()].some(x => x.connected), null, { timeout: 20000 })
 await Promise.all([peered(a), peered(b)])
-console.log(`peered; 500ms send latency on a; norm=${norm}; running for`, minutes, 'min')
+console.log(`peered; 500ms send latency on a; norm=${norm} cad=${cad}; running for`, minutes, 'min')
 await a.evaluate(() => { window.__jig.net.sendDelayMs = 500 })
 
 const diverged = () => a.evaluate(() =>
@@ -80,16 +81,27 @@ const stats = p => p.evaluate(() => ({
   rollbacks: window.__jig.sim.rollbacks,
   stepMs: window.__jig.sim.stepMs,
   verify: window.__jig.sim.verifyReplay(60),
+  anomalies: window.__jig.sim.anomalies,
   divergedAt: [...window.__jig.net.peers.values()].map(x => x.divergedAt),
-  bytesDivergedAt: [...window.__jig.net.peers.values()].map(x => x.bytesDivergedAt),
   divergence: window.__divergence ?? null,
+  poseHashes: [...window.__jig.sim.hashes.entries()],
 }))
 const [sa, sb] = await Promise.all([stats(a), stats(b)])
 for (const [name, s] of [['a', sa], ['b', sb]]) {
   console.log(name, s.id, 'entities', s.entities, 'rollbacks', s.rollbacks,
     'stepMs', s.stepMs.toFixed(2),
     'verify', JSON.stringify(s.verify), 'divergedAt', s.divergedAt,
-    'bytesDivergedAt', s.bytesDivergedAt)
+    'anomalies', s.anomalies.length ? s.anomalies : 'none')
+}
+
+// Compare the peers' final (settled) pose-hash maps directly, catching any
+// divergence the in-app exchange has not latched yet.
+{
+  const ma = new Map(sa.poseHashes), mb = new Map(sb.poseHashes)
+  const shared = [...ma.keys()].filter(t => mb.has(t)).sort((x, y) => x - y)
+  const bad = shared.filter(t => ma.get(t) !== mb.get(t))
+  console.log(`final pose hashes: ${shared.length} shared ticks, ${bad.length} differ`
+    + (bad.length ? ` (first ${bad[0]}, last ${bad[bad.length - 1]})` : ''))
 }
 
 if (sa.divergence && sb.divergence) {

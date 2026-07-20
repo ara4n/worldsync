@@ -32,7 +32,9 @@ converge, with identical input logs). `MINUTES=2 BOXES=150 node
 test/diverge.mjs` is the divergence stress: one peer on 500ms latency
 builds a big pile with tight click grids and drags boxes through it while
 the other folds everything via rollback; any disagreement triggers an
-automatic bit-level post-mortem. Both run headed.
+automatic bit-level post-mortem (NORM/CAD env vars select the
+normalisation mode and cadence). `BOXES=150 node test/perf.mjs` prints the
+per-tick cost breakdown for each mode. All run headed.
 
 ## How it works
 
@@ -40,9 +42,10 @@ automatic bit-level post-mortem. Both run headed.
   [K*33.3ms, (K+1)*33.3ms), the same window on every peer, so a claimed
   timestamp bins into the same tick everywhere (modulo wall-clock skew).
   State is defined at tick boundaries; rendering interpolates between the
-  previous and current tick, one tick behind. Before each tick we snapshot
-  the Rapier world (`world.takeSnapshot`), the netId to body-handle map, and
-  the grab table into a 2 second ring buffer.
+  previous and current tick, one tick behind. At every cadence point (every
+  10th grid-aligned tick by default) we snapshot the Rapier world
+  (`world.takeSnapshot`), the netId to body-handle map, and the grab table
+  into a 5 second ring buffer.
 - **Determinism.** Physics uses the `@dimforge/rapier3d-deterministic-compat`
   build (Rapier's enhanced-determinism feature, reproducible across
   platforms). All physics inputs flow through the interaction timeline, drags
@@ -52,30 +55,58 @@ automatic bit-level post-mortem. Both run headed.
   bodies in timeline order. Sleeping is disabled on all bodies: the sleep
   timer is per-peer-history dependent, so a peer that rolls back a lot puts
   bodies to sleep later than one that steps live.
-- **Every tick steps a freshly restored world.** Rapier's `takeSnapshot`
-  serializes gravity, integration parameters, islands, broad/narrow phase,
-  bodies, colliders, and joints, but `step()` also consults the
-  PhysicsPipeline and CCD solver, which are NOT serialized. A restored world
-  gets a fresh pipeline, so a peer folding interactions in via rollback
-  carries different solver-internal state than one stepping continuously;
-  usually pose-neutral, but under contact stress it changes constraint
-  outcomes and identical inputs still diverge. So the restore path is made
-  THE path: each tick takes the history snapshot (needed anyway), then frees
-  and restores the world from those bytes before stepping. Live stepping and
-  rollback replay are then the same operation by construction. Measured
-  cross-peer agreement after this: bit-identical through 2 minutes of 132
-  boxes, 500ms one-sided latency, and 1386 rollbacks. Cost is one restore
-  per tick (~3.4ms at 132 boxes; shown as "step" in the panel).
-- **Divergence detection.** Each tick records a bit-exact pose hash and a
-  hash of the full snapshot bytes, on the global tick grid. Peers exchange
-  settled ranges (3.5s old) of both and latch the first divergent tick of
-  each kind (sync column: `=` agree, `b≠@N` solver internals diverged,
-  `≠@N` poses diverged). On pose divergence a replay self-check runs
-  automatically and bit-level dumps of the state at the divergent tick are
-  stashed on `window.__divergence` for cross-peer diffing. "verify replay
-  determinism" runs the self-check on demand: it restores the 2s-old
-  snapshot into a scratch world, replays the same timeline, and compares
-  poses and snapshot bytes against the live world.
+- **Normalisation: every cadence tick steps a freshly restored world.**
+  Rapier's `takeSnapshot` serializes gravity, integration parameters,
+  islands, broad/narrow phase, bodies, colliders, and joints, but `step()`
+  also consults the PhysicsPipeline and CCD solver, which are NOT
+  serialized. A restored world gets fresh copies of those, so a peer folding
+  interactions in via rollback carries different solver-internal state than
+  one stepping continuously; usually pose-neutral, but under contact stress
+  it changes constraint outcomes and identical inputs still diverge. So the
+  restore path is made THE path: at every cadence point (every 10th
+  grid-aligned tick by default, `?cad=K` to change, `?cad=1` for every
+  tick), the world is snapshotted into the history ring and immediately
+  freed and restored from those bytes before stepping. Rollbacks round down
+  to a cadence point, so a replay performs restores at exactly the ticks
+  the live path performed them: live stepping and rollback replay are the
+  same operation by construction. Measured cross-peer agreement:
+  bit-identical through 2 minutes of ~140 boxes, 500ms one-sided latency,
+  and ~1400 rollbacks, at cadence 1 and cadence 10.
+- **Restore is not just a pipeline reset (refuted experiment).** If the only
+  effect of restoring were fresh PhysicsPipeline/CCDSolver objects, one
+  could skip serialization and just replace those two (they are what
+  `world.step()` consults beyond the serialized components). `?norm=pipeline`
+  does exactly that, and it diverges under the stress test within seconds;
+  a single page even fails byte-level replay verification. Serialization
+  additionally CANONICALISES the in-memory representation of the serialized
+  components (orderings that change floating-point summation), and stepping
+  is sensitive to the representative, so the serialize+restore round trip
+  itself is the normaliser and cannot be skipped, only amortised via the
+  cadence. A rapier fork that merely serialized the pipeline would
+  therefore not enable restore-free rollback either; it would have to make
+  stepping representation-independent (e.g. canonically sorting
+  constraints), which is what enhanced-determinism does across platforms
+  but not across build histories of the same world.
+- **Snapshot bytes are never comparable across peers.** Rapier serializes
+  two per-step u32 counters (broad-phase section); a folding peer steps
+  more times in total than a live-stepping peer (every replayed tick
+  counts), so two peers' snapshots legitimately differ forever even when
+  every pose, velocity, and solver outcome is bit-identical. Cross-peer
+  hash comparison therefore uses the pose/velocity hash only; byte-level
+  checks are local (replay verification), where step counts do line up.
+  Perf at 150 settled boxes on an M5 (per tick, 33ms budget): cadence 1 is
+  1.5ms (0.26 snapshot + 0.42 restore + 0.63 physics + 0.20 hash), cadence
+  10 is 0.89ms with the serialization overhead amortised to ~0.08ms.
+- **Divergence detection.** Each tick records a bit-exact hash of every
+  body's pose, velocities, and sleep state, on the global tick grid. Peers
+  exchange ranges old enough (5.5s, beyond the fold window) that no later
+  rollback can rewrite them, and latch the first divergent tick (sync
+  column: `=` agree, `≠@N` diverged at tick N). On divergence a replay
+  self-check runs automatically and bit-level dumps of the state at the
+  divergent tick are stashed on `window.__divergence` for cross-peer
+  diffing. "verify replay determinism" runs the self-check on demand: it
+  restores a 2s-old snapshot into a scratch world, replays the same
+  timeline, and compares poses and snapshot bytes against the live world.
 - **Interactions, not state.** Each user action is `{peer, seq, t, type,
   netId, pos, vel?, color?}`, applied locally and broadcast on an ordered
   reliable data channel. Sequence numbers dedupe.
@@ -89,8 +120,9 @@ automatic bit-level post-mortem. Both run headed.
   to stamp interactions with a tick number and calibrate tick timelines
   across peers instead.
 - **Rollback.** An interaction claiming a past tick restores the snapshot at
-  that tick and re-steps to the present, applying every timeline entry (local
-  and remote) on its tick, so it takes effect at the time the sender claimed.
+  the cadence point at or below that tick and re-steps to the present,
+  applying every timeline entry (local and remote) on its tick, so it takes
+  effect at the time the sender claimed.
   An interaction claiming a time inside the current not-yet-simulated tick
   needs no rollback (it is a depth-0 fold: that tick has not run yet); with
   30Hz ticks that only happens for sub-33ms delivery, so most network RTTs
@@ -128,9 +160,6 @@ automatic bit-level post-mortem. Both run headed.
   the log via claimedTick.
 - **Late join.** A joiner requests a one-shot entity snapshot from the most
   senior peer it connects to.
-- **Divergence.** Sims are best-effort deterministic only. A coarse hash of
-  quantised positions is broadcast every second; the peer table shows = when a
-  peer's sim matches ours (meaningful once things are at rest).
 
 ## Experiments to try
 
@@ -152,8 +181,8 @@ automatic bit-level post-mortem. Both run headed.
   late joiner starts merely close.
 - No resync after divergence; the hash column only reports it.
 - No kick mechanism; exclusion is local and one-way.
-- No entity deletion, no interest management, JSON on the wire, snapshots
-  every tick: all fine at jig scale, all replaceable later.
+- No entity deletion, no interest management, JSON on the wire: all fine at
+  jig scale, all replaceable later.
 - Hidden tabs keep simulating via an unthrottled worker heartbeat, but a hard
   stall of more than 2s (debugger pause, machine sleep) still jumps ticks and
   is reported as an ANOMALY rather than repaired.

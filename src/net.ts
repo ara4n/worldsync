@@ -14,8 +14,6 @@ export interface Peer {
   checked: boolean
   /** first settled tick at which our pose hash disagreed with theirs */
   divergedAt: number | null
-  /** first settled tick at which the full snapshot bytes disagreed */
-  bytesDivergedAt: number | null
   connected: boolean
   pc: RTCPeerConnection
   dc: RTCDataChannel | null
@@ -116,7 +114,7 @@ export class Net {
     const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
     const peer: Peer = {
       id, order, rtt: 0, offset: 0, strikes: 0, excluded: false, checked: false,
-      divergedAt: null, bytesDivergedAt: null,
+      divergedAt: null,
       connected: false, pc, dc: null, samples: [], pingTimer: 0,
     }
     this.peers.set(id, peer)
