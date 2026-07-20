@@ -74,8 +74,12 @@ export class UI {
 
   log(line: string) {
     this.lines.push(line)
-    if (this.lines.length > 9) this.lines.shift()
+    if (this.lines.length > 200) this.lines.shift()
     this.logEl.innerHTML = this.lines.map(l => `<div>${esc(l)}</div>`).join('')
+    // follow the tail unless the user has scrolled up to read history
+    const body = this.logEl.parentElement!
+    const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 60
+    if (nearBottom) body.scrollTop = body.scrollHeight
   }
 
   maybe(now: number, get: () => Stats) {
