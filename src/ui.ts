@@ -39,7 +39,8 @@ export class UI {
 
   constructor(root: HTMLElement, hooks: Hooks) {
     root.innerHTML = `
-      <h1>worldsync</h1>
+      <h1>worldsync <span class="caret">▾</span></h1>
+      <div id="body">
       <div class="controls">
         <label>fake latency <input id="lat" type="range" min="0" max="1000" step="25" value="0"> <span id="latv">0ms</span></label>
         <label><input id="lagpings" type="checkbox" checked> lag clock sync too</label>
@@ -48,9 +49,18 @@ export class UI {
         <button id="verify">verify replay determinism</button>
       </div>
       <div id="status"></div>
-      <div id="log"></div>`
+      <div id="log"></div>
+      </div>`
     this.statusEl = root.querySelector('#status')!
     this.logEl = root.querySelector('#log')!
+    // Click the title to collapse the panel (it can cover most of a small
+    // widget iframe); the body scrolls when content outgrows the viewport.
+    const h1 = root.querySelector('h1')!
+    const caret = root.querySelector('.caret')!
+    h1.addEventListener('click', () => {
+      root.classList.toggle('collapsed')
+      caret.textContent = root.classList.contains('collapsed') ? '▸' : '▾'
+    })
     const lat = root.querySelector('#lat') as HTMLInputElement
     const latv = root.querySelector('#latv') as HTMLElement
     lat.oninput = () => { latv.textContent = `${lat.value}ms`; hooks.onLatency(Number(lat.value)) }
