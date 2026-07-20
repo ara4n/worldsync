@@ -31,7 +31,7 @@ export interface InputLogEntry {
 }
 const ZERO: Vec3 = { x: 0, y: 0, z: 0 }
 
-interface Grab { holder: string; order: number; target: Vec3 }
+interface Grab { holder: string; order: number; target: Vec3; since: number }
 interface HistoryRec { snap: Uint8Array; bodies: Map<string, number>; grabs: Map<string, Grab> }
 interface Entry { tick: number; order: number; seq: number; i: Interaction }
 
@@ -75,7 +75,7 @@ const before = (a: Entry, b: Entry) =>
 
 function cloneGrabs(m: Map<string, Grab>): Map<string, Grab> {
   const out = new Map<string, Grab>()
-  for (const [k, g] of m) out.set(k, { holder: g.holder, order: g.order, target: { ...g.target } })
+  for (const [k, g] of m) out.set(k, { holder: g.holder, order: g.order, target: { ...g.target }, since: g.since })
   return out
 }
 
@@ -192,6 +192,62 @@ export class Sim {
   private timeline: Entry[] = []
   private seen = new Set<string>()
   private resimFrom: number | null = null
+  /**
+   * The pose plane: continuous drag motion as latest-wins streams that
+   * NEVER cause rollbacks, recorded per (entity, author) sorted by tick so
+   * replays read the poses that belong to the tick being re-simulated,
+   * however late they arrived. Deliberately NOT snapshotted: tracks are
+   * append-only observations, not simulated state.
+   */
+  private tracks = new Map<string, Map<string, { tick: number; pos: Vec3 }[]>>()
+
+  addPose(netId: string, peer: string, tick: number, pos: Vec3) {
+    let byPeer = this.tracks.get(netId)
+    if (!byPeer) this.tracks.set(netId, (byPeer = new Map()))
+    let arr = byPeer.get(peer)
+    if (!arr) byPeer.set(peer, (arr = []))
+    let i = arr.length
+    while (i > 0 && arr[i - 1].tick > tick) i--
+    arr.splice(i, 0, { tick, pos })
+  }
+
+  /** latest pose from `peer` in [since, tick]; a fresh grab must not be
+   * driven by stragglers from an earlier drag of the same box */
+  private poseAt(netId: string, peer: string, since: number, tick: number): Vec3 | null {
+    const arr = this.tracks.get(netId)?.get(peer)
+    if (!arr) return null
+    for (let i = arr.length - 1; i >= 0; i--) {
+      if (arr[i].tick > tick) continue
+      if (arr[i].tick < since) break
+      return arr[i].pos
+    }
+    return null
+  }
+
+  /** did `peer` stream any pose in (from, to]? The beat-fold guard: no
+   * samples and no held body means the window cannot need healing. */
+  posesFrom(peer: string, from: number, to: number): boolean {
+    for (const byPeer of this.tracks.values()) {
+      const arr = byPeer.get(peer)
+      if (!arr) continue
+      for (let i = arr.length - 1; i >= 0; i--) {
+        if (arr[i].tick <= from) break
+        if (arr[i].tick <= to) return true
+      }
+    }
+    return false
+  }
+
+  holdsAny(peer: string): boolean {
+    for (const g of this.grabs.values()) if (g.holder === peer) return true
+    return false
+  }
+
+  /** Schedule a re-simulation from tick k (heartbeat healing): replays read
+   * the now-complete pose tracks, converging pose-driven contact outcomes. */
+  foldFrom(k: number) {
+    if (k < this.tick) this.resimFrom = this.resimFrom === null ? k : Math.min(this.resimFrom, k)
+  }
 
   async init() {
     await RAPIER.init()
@@ -332,21 +388,21 @@ export class Sim {
       }
       for (const e of this.timeline) {
         if (e.tick > tick) break
-        if (e.tick === tick && e.i.type === 'boot') this.applyTo(ctx, e.i)
+        if (e.tick === tick && e.i.type === 'boot') this.applyTo(ctx, e.i, tick)
       }
       for (const e of this.timeline) {
         if (e.tick >= tick) break
-        if (e.tick >= from && e.i.type !== 'boot') this.applyTo(ctx, e.i)
+        if (e.tick >= from && e.i.type !== 'boot') this.applyTo(ctx, e.i, tick)
       }
       for (const e of this.timeline) {
         if (e.tick > tick) break
-        if (e.tick === tick && e.i.type !== 'boot') this.applyTo(ctx, e.i)
+        if (e.tick === tick && e.i.type !== 'boot') this.applyTo(ctx, e.i, tick)
       }
       return
     }
     for (const e of this.timeline) {
       if (e.tick > tick) break
-      if (e.tick === tick) this.applyTo(ctx, e.i)
+      if (e.tick === tick) this.applyTo(ctx, e.i, tick)
     }
   }
 
@@ -383,15 +439,17 @@ export class Sim {
     ctx.grabs.clear()
   }
 
-  // Held bodies are kinematic and follow their drag target each tick via
+  // Held bodies are kinematic and follow their holder's pose stream via
   // setNextKinematicTranslation, so the solver integrates them WITH a
   // velocity: contacts resolve against real motion and a held box plows
-  // through the pile instead of teleporting.
-  private pinAndStep(ctx: Ctx) {
+  // through the pile instead of teleporting. Replays read the recorded
+  // track at the tick being re-simulated, so folding an op back in also
+  // folds in the poses that arrived since (the p2p-sync pose plane rule).
+  private pinAndStep(ctx: Ctx, tick: number) {
     for (const [netId, g] of ctx.grabs) {
       const b = bodyOf(ctx, netId)
       if (!b) continue
-      b.setNextKinematicTranslation(g.target)
+      b.setNextKinematicTranslation(this.poseAt(netId, g.holder, g.since, tick) ?? g.target)
     }
     ctx.world.step()
   }
@@ -444,12 +502,17 @@ export class Sim {
     }
     this.applyTick(ctx, this.tick)
     this.writePrev()
-    this.pinAndStep(ctx)
+    this.pinAndStep(ctx, this.tick)
     const t3 = performance.now()
     this.tick++
     this.hashes.set(this.tick, hashCtx(ctx))
     this.hashes.delete(this.tick - 2 * HISTORY_TICKS)
     while (this.timeline.length && this.timeline[0].tick < this.tick - HISTORY_TICKS) this.timeline.shift()
+    for (const byPeer of this.tracks.values()) {
+      for (const arr of byPeer.values()) {
+        while (arr.length && arr[0].tick < this.tick - HISTORY_TICKS) arr.shift()
+      }
+    }
     const t4 = performance.now()
     const ema = (old: number, v: number) => old * 0.95 + v * 0.05
     this.perf.snap = ema(this.perf.snap, t1 - t0)
@@ -485,7 +548,7 @@ export class Sim {
       if (t % this.cadence === 0) this.normalizeCtx(ctx)
       if (this.tickHasBoot(t)) this.seamReset(ctx)
       this.applyTick(ctx, t)
-      this.pinAndStep(ctx)
+      this.pinAndStep(ctx, t)
     }
     const posesMatch = hashCtx(ctx) === hashCtx(this.liveCtx())
     const a = this.world.takeSnapshot(), b = ctx.world.takeSnapshot()
@@ -544,7 +607,7 @@ export class Sim {
     return { equal: s1.length === s2.length && firstDiff === -1, firstDiff, len1: s1.length, len2: s2.length }
   }
 
-  private applyTo(ctx: Ctx, i: Interaction) {
+  private applyTo(ctx: Ctx, i: Interaction, tick: number) {
     switch (i.type) {
       case 'spawn': {
         if (ctx.bodies.has(i.netId)) return
@@ -569,14 +632,7 @@ export class Sim {
         // pile properly instead of being a zero-velocity teleport.
         b.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true)
         b.setTranslation(i.pos, true)
-        ctx.grabs.set(i.netId, { holder: i.peer, order: i.order, target: { ...i.pos } })
-        return
-      }
-      case 'move': {
-        if (!ctx.bodies.has(i.netId)) return
-        // Last writer wins, including stealing the grab: contested drags
-        // become an explicit tug of war resolved by interaction order.
-        ctx.grabs.set(i.netId, { holder: i.peer, order: i.order, target: { ...i.pos } })
+        ctx.grabs.set(i.netId, { holder: i.peer, order: i.order, target: { ...i.pos }, since: tick })
         return
       }
       case 'release': {
@@ -599,7 +655,7 @@ export class Sim {
         if (!i.netId) return
         // The grab table crosses the seam too: a body mid-drag at boot time
         // must be pinned (kinematic) from the same tick on every peer.
-        if (i.grab) ctx.grabs.set(i.netId, { holder: i.grab.holder, order: i.grab.order, target: { ...i.grab.target } })
+        if (i.grab) ctx.grabs.set(i.netId, { holder: i.grab.holder, order: i.grab.order, target: { ...i.grab.target }, since: tick })
         else ctx.grabs.delete(i.netId)
         const b = bodyOf(ctx, i.netId)
         if (b) {

@@ -21,6 +21,8 @@ export interface Emitter {
     pos: Vec3; vel?: Vec3; rot?: Quat; angvel?: Vec3
     grab?: { holder: string; order: number; target: Vec3 }; color?: number
   }): void
+  /** continuous drag motion: pose plane, not an op */
+  streamPose(netId: string, pos: Vec3): void
 }
 
 interface Drag {
@@ -103,7 +105,7 @@ export class Input {
     while (d.trail.length > 1 && now - d.trail[0].t > 150) d.trail.shift()
     if (now - d.lastSent >= MOVE_SEND_MS) {
       d.lastSent = now
-      this.out.emit('move', d.netId, { pos: v3(d.target) })
+      this.out.streamPose(d.netId, v3(d.target))
     }
   }
 

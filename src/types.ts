@@ -14,7 +14,8 @@ export interface Quat { x: number; y: number; z: number; w: number }
 // every peer folds the same create-or-reset at the same tick and post-seam
 // histories are bit-identical. A joiner-only side channel cannot be: its
 // poses are a snapshot from a different moment than the senior's own history.
-export type InteractionType = 'spawn' | 'grab' | 'move' | 'release' | 'boot'
+// Continuous drag motion is NOT an op: it travels on the pose plane.
+export type InteractionType = 'spawn' | 'grab' | 'release' | 'boot'
 
 export interface Interaction {
   peer: string
@@ -49,6 +50,13 @@ export type DcMessage =
   // calibrates its own tick clock against.
   | { kind: 'pong'; t0: number; t1: number; tt: number }
   | { kind: 'i'; i: Interaction }
+  // The pose plane: latest-wins continuous motion for a held entity.
+  // Never rolls anyone back; recorded per author and read by replays.
+  | { kind: 'pose'; tick: number; peer: string; netId: string; pos: Vec3 }
+  // The heartbeat: attests the author's present (anything it stamps earlier
+  // later is a provable history rewrite) and triggers the healing fold that
+  // re-simulates the last interval against complete pose tracks.
+  | { kind: 'beat'; tick: number }
   | { kind: 'boot-req' }
   // Bit-exact per-tick hashes for a settled range of the global tick grid:
   // hs[j] hashes poses/velocities at the start of tick start+j; 0 = not yet

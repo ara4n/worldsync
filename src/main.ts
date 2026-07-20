@@ -29,7 +29,6 @@ async function main() {
     onLatency: v => { net.sendDelayMs = v },
     onLagPings: v => { net.lagPings = v },
     onRubber: v => { view.rubberMs = v },
-    onEnforceStale: v => { session.enforceStale = v },
     onVerify: () => ui.log(`replay self-check: ${JSON.stringify(sim.verifyReplay(60))}`),
     onDumpInputs: () => {
       const blob = new Blob(
@@ -71,6 +70,7 @@ async function main() {
     ready: () => session.ready(),
     nextNetId: () => session.nextNetId(),
     emit: (type, netId, data) => session.emit(type, netId, data),
+    streamPose: (netId, pos) => session.streamPose(netId, pos),
   }
   const input = new Input(view, out)
 

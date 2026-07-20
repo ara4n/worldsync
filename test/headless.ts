@@ -41,7 +41,7 @@ async function laggySpawnAndDrag() {
   b.session.emit('grab', target, { pos: b.sim.body(target)!.translation() })
   hub.run(0.2 * S)
   for (let i = 0; i < 30; i++) {
-    b.session.emit('move', target, { pos: { x: -0.3 + i * 0.05, y: 1.2, z: -0.2 + i * 0.02 } })
+    b.session.streamPose(target, { x: -0.3 + i * 0.05, y: 1.2, z: -0.2 + i * 0.02 })
     hub.run(TICK_MS)
   }
   b.session.emit('release', target, { pos: { x: 1.2, y: 1.2, z: 0.4 }, vel: { x: 3, y: 0, z: 1 } })
@@ -100,7 +100,7 @@ async function threePeerMesh() {
   }
   c.session.emit('grab', ids[0], { pos: c.sim.body(ids[0])!.translation() })
   for (let i = 0; i < 20; i++) {
-    c.session.emit('move', ids[0], { pos: { x: -4 + i * 0.1, y: 1.5, z: 0.5 } })
+    c.session.streamPose(ids[0], { x: -4 + i * 0.1, y: 1.5, z: 0.5 })
     hub.run(TICK_MS)
   }
   c.session.emit('release', ids[0], { pos: { x: -2, y: 1.5, z: 0.5 }, vel: { x: 0, y: 0, z: 0 } })
@@ -133,7 +133,7 @@ async function skewedClocks() {
   hub.run(1 * S)
   c.session.emit('grab', target, { pos: c.sim.body(target)!.translation() })
   for (let i = 0; i < 15; i++) {
-    c.session.emit('move', target, { pos: { x: 0.3 + i * 0.1, y: 1.5, z: 0.1 } })
+    c.session.streamPose(target, { x: 0.3 + i * 0.1, y: 1.5, z: 0.1 })
     hub.run(TICK_MS)
   }
   c.session.emit('release', target, { pos: { x: 1.8, y: 1.5, z: 0.1 }, vel: { x: 0, y: 0, z: 0 } })
@@ -175,10 +175,26 @@ async function spawnRacesJoin() {
   }
 }
 
+async function backdaterStruck() {
+  console.log('\n-- an op stamped before its author\'s own beat earns a strike --')
+  const hub = createHub(10)
+  const a = await hub.join('a')
+  const b = await hub.join('b')
+  hub.run(3 * S)
+  // b backdates a spawn 40 ticks: b's beats have already attested past that
+  // tick, so receivers must treat it as a provable history rewrite.
+  b.session.emit('spawn', b.session.nextNetId(), { pos: { x: 0, y: 2.5, z: 0 } }, b.sim.tick - 40)
+  hub.run(2 * S)
+  const bOnA = a.session.peers.get('b')!
+  check(bOnA.strikes === 1, `a struck the backdater (${bOnA.strikes} strike)`)
+  check(a.sim.bodies.size === 0, `a refused the rewrite (${a.sim.bodies.size} entities)`)
+}
+
 const t0 = Date.now()
 await laggySpawnAndDrag()
 await lateJoin()
 await threePeerMesh()
 await skewedClocks()
 await spawnRacesJoin()
+await backdaterStruck()
 console.log(`\n${failures === 0 ? 'HEADLESS SUITE PASSED' : `${failures} FAILURES`} (${((Date.now() - t0) / 1000).toFixed(1)}s real for ~72s virtual)`)

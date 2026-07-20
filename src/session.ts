@@ -17,6 +17,15 @@ const SLEW_MAX_TICKS = 0.05
 // A disagreement this large is not drift (machine slept, clock stepped):
 // hard-resync and let the tick-jump anomaly machinery own the fallout.
 const HARD_RESYNC_TICKS = 30
+// Heartbeat cadence (5/s). A beat from peer P triggers a fold one whole
+// interval deeper than the beat's tick, so every tick is re-simulated at
+// least once AFTER P's poses for it fully arrived (ordered channel: they
+// were sent before the beat). Bounds how long pose-driven contact drift
+// survives; also the attestation that makes staleness provable.
+const BEAT_EVERY_TICKS = 12
+// Ops older than this cannot fold (snapshot window is HISTORY_TICKS = 300);
+// beyond it even an honest peer must be dropped, and it earns a strike.
+const STALE_MAX_TICKS = 270
 
 /**
  * Maps the local monotonic clock onto the room's shared tick grid.
@@ -78,9 +87,6 @@ export class Session {
   compareFloor = 0
   /** display origin: protocol ticks can be large, UI shows tick - startTick */
   startTick = 0
-  // Off by default so arbitrary fake latency folds instead of dropping;
-  // dropped interactions are a guaranteed permanent divergence.
-  enforceStale = false
   onLog: (line: string) => void = () => {}
   /** first hash disagreement with a peer, for post-mortem stashing */
   onDiverged: (peerId: string, tick: number) => void = () => {}
@@ -91,9 +97,12 @@ export class Session {
   private spawnCount = 0
   private bootAsked = false
   private nextHashTick = 0
+  private nextBeatTick = 0
   private lastPing = -Infinity
   /** ops that arrived before calibration finished; folded in at start */
   private pendingOps: { from: string; i: Interaction }[] = []
+  /** highest tick each peer has attested via heartbeat */
+  private lastBeat = new Map<string, number>()
 
   constructor(
     readonly sim: Sim,
@@ -125,6 +134,7 @@ export class Session {
     this.sim.startAt(Math.ceil(this.tickClock.tickTimeAt(this.clock())))
     this.startTick = this.sim.tick
     this.nextHashTick = this.sim.tick + HASH_EVERY_TICKS
+    this.nextBeatTick = this.sim.tick + BEAT_EVERY_TICKS
     this.onLog(`tick grid ${this.order === this.rootOrder() ? 'rooted' : 'calibrated'} at tick ${this.sim.tick}`)
     for (const p of this.pendingOps) this.receive(p.from, { kind: 'i', i: p.i })
     this.pendingOps.length = 0
@@ -201,16 +211,40 @@ export class Session {
     this.sendRaw(null, { kind: 'i', i })
   }
 
-  // "Too old" means significantly older than the round trip should allow.
-  private staleLimit(peer: SessionPeer) { return Math.max(250, peer.rtt * 1.5 + 120) }
-
   private strike(peer: SessionPeer, detail: string) {
     peer.strikes++
-    this.onLog(`dropped stale interaction from ${peer.id} (${detail})`)
+    this.onLog(`dropped message from ${peer.id} (${detail})`)
     if (peer.strikes >= 10 && !peer.excluded) {
       peer.excluded = true
       this.onLog(`${peer.id} excluded from sim, an admin should kick them`)
     }
+  }
+
+  // Beats are attestations: on an ordered channel, anything stamped before
+  // the author's own last beat is a provable history rewrite, however slow
+  // the link. That rule plus a fold-feasibility bound replaces any fixed
+  // RTT-based staleness heuristic, so honest peers may be arbitrarily laggy
+  // (up to the snapshot window) without strikes.
+  private admissible(peer: SessionPeer, tick: number): boolean {
+    const attested = this.lastBeat.get(peer.id)
+    if (attested !== undefined && tick < attested) {
+      this.strike(peer, `stamped ${attested - tick} ticks before own beat: history rewrite`)
+      return false
+    }
+    if (this.started && this.sim.tick - tick > STALE_MAX_TICKS) {
+      this.strike(peer, `${this.sim.tick - tick} ticks late, beyond the fold window`)
+      return false
+    }
+    return true
+  }
+
+  /** Continuous motion for a held entity: latest-wins, never rolls anyone
+   * back; heartbeat folds heal its contact consequences. */
+  streamPose(netId: string, pos: Vec3) {
+    if (!this.started) return
+    const p = this.zv(pos)
+    this.sim.addPose(netId, this.id, this.sim.tick, p)
+    this.sendRaw(null, { kind: 'pose', tick: this.sim.tick, peer: this.id, netId, pos: p })
   }
 
   receive(fromId: string, msg: DcMessage) {
@@ -259,18 +293,34 @@ export class Session {
       case 'i': {
         if (peer.excluded) return
         if (!this.started) { this.pendingOps.push({ from: fromId, i: msg.i }); return }
-        // Age in ticks against our own calibrated clock decides staleness.
-        if (this.enforceStale) {
-          const age = (this.tickTimeNow() - msg.i.tick) * TICK_MS
-          const limit = this.staleLimit(peer)
-          if (age > limit) { this.strike(peer, `${age.toFixed(0)}ms old, limit ${limit.toFixed(0)}ms`); return }
-        }
+        if (!this.admissible(peer, msg.i.tick)) return
         const k = this.sim.insert(msg.i)
         // A boot seam folded into our timeline: hashes for anything older
         // describe pre-seam worlds and are not comparable across peers.
         if (msg.i.type === 'boot' && k !== null && k + 1 > this.compareFloor) {
           this.compareFloor = k + 1
           this.onLog(`boot seam from ${peer.id} at tick ${k - this.startTick}`)
+        }
+        break
+      }
+      case 'pose': {
+        if (peer.excluded) return
+        if (!this.admissible(peer, msg.tick)) return
+        // Recorded, not folded: the next beat from this author re-simulates
+        // the interval against the completed track.
+        this.sim.addPose(msg.netId, msg.peer, msg.tick, msg.pos)
+        break
+      }
+      case 'beat': {
+        if (peer.excluded) return
+        this.lastBeat.set(fromId, Math.max(this.lastBeat.get(fromId) ?? 0, msg.tick))
+        if (!this.started) break
+        // Fold one whole interval deeper than the beat, so every tick gets
+        // re-simulated once after its poses fully arrived; skip when this
+        // author's motion cannot have influenced the window.
+        const from = msg.tick - BEAT_EVERY_TICKS
+        if (this.sim.posesFrom(fromId, from, msg.tick) || this.sim.holdsAny(fromId)) {
+          this.sim.foldFrom(from)
         }
         break
       }
@@ -332,6 +382,10 @@ export class Session {
     }
     if (!this.started) return
     this.sim.advance(this.tickClock.tickTimeAt(now))
+    if (this.sim.tick >= this.nextBeatTick) {
+      this.nextBeatTick = this.sim.tick + BEAT_EVERY_TICKS
+      this.sendRaw(null, { kind: 'beat', tick: this.sim.tick })
+    }
     if (this.sim.tick >= this.nextHashTick) {
       this.nextHashTick = this.sim.tick + HASH_EVERY_TICKS
       const start = this.sim.tick - SETTLE_TICKS - 2 * HASH_EVERY_TICKS
