@@ -27,7 +27,12 @@ resumes on release, with throw velocity), cmd-drag or right-drag orbits,
 wheel zooms.
 
 Test hooks: `npm run dev` then `node test/smoke.mjs` runs a two-browser
-Playwright smoke test (spawn replication plus a laggy drag that must converge).
+Playwright smoke test (spawn replication plus a laggy drag that must
+converge, with identical input logs). `MINUTES=2 BOXES=150 node
+test/diverge.mjs` is the divergence stress: one peer on 500ms latency
+builds a big pile with tight click grids and drags boxes through it while
+the other folds everything via rollback; any disagreement triggers an
+automatic bit-level post-mortem. Both run headed.
 
 ## How it works
 
@@ -42,11 +47,35 @@ Playwright smoke test (spawn replication plus a laggy drag that must converge).
   build (Rapier's enhanced-determinism feature, reproducible across
   platforms). All physics inputs flow through the interaction timeline, drags
   included: the dragger's own sim is driven by the same tick-rate move
-  samples it broadcasts, never by raw pointer state. Identical inputs on an
-  identical tick grid through a deterministic engine means peers who have
-  seen the same interactions should agree exactly; body creation order (and
-  hence handle assignment) also converges because rollback replays recreate
-  bodies in timeline order.
+  samples it broadcasts, never by raw pointer state. Body creation order
+  (and hence handle assignment) converges because rollback replays recreate
+  bodies in timeline order. Sleeping is disabled on all bodies: the sleep
+  timer is per-peer-history dependent, so a peer that rolls back a lot puts
+  bodies to sleep later than one that steps live.
+- **Every tick steps a freshly restored world.** Rapier's `takeSnapshot`
+  serializes gravity, integration parameters, islands, broad/narrow phase,
+  bodies, colliders, and joints, but `step()` also consults the
+  PhysicsPipeline and CCD solver, which are NOT serialized. A restored world
+  gets a fresh pipeline, so a peer folding interactions in via rollback
+  carries different solver-internal state than one stepping continuously;
+  usually pose-neutral, but under contact stress it changes constraint
+  outcomes and identical inputs still diverge. So the restore path is made
+  THE path: each tick takes the history snapshot (needed anyway), then frees
+  and restores the world from those bytes before stepping. Live stepping and
+  rollback replay are then the same operation by construction. Measured
+  cross-peer agreement after this: bit-identical through 2 minutes of 132
+  boxes, 500ms one-sided latency, and 1386 rollbacks. Cost is one restore
+  per tick (~3.4ms at 132 boxes; shown as "step" in the panel).
+- **Divergence detection.** Each tick records a bit-exact pose hash and a
+  hash of the full snapshot bytes, on the global tick grid. Peers exchange
+  settled ranges (3.5s old) of both and latch the first divergent tick of
+  each kind (sync column: `=` agree, `b≠@N` solver internals diverged,
+  `≠@N` poses diverged). On pose divergence a replay self-check runs
+  automatically and bit-level dumps of the state at the divergent tick are
+  stashed on `window.__divergence` for cross-peer diffing. "verify replay
+  determinism" runs the self-check on demand: it restores the 2s-old
+  snapshot into a scratch world, replays the same timeline, and compares
+  poses and snapshot bytes against the live world.
 - **Interactions, not state.** Each user action is `{peer, seq, t, type,
   netId, pos, vel?, color?}`, applied locally and broadcast on an ordered
   reliable data channel. Sequence numbers dedupe.
