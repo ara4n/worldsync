@@ -1,7 +1,7 @@
 import { Vector3 } from 'three'
 import { BOOT_LEAD_TICKS, Sim } from './sim'
 import { cachedScene, cacheScene, configureGlbLoader, parseGlb } from './scene'
-import { fetchWorldAsset, uploadWorldAsset } from './matrix/world'
+import { fetchWorldAsset, mediaUploadLimit, uploadWorldAsset } from './matrix/world'
 import { Net } from './net'
 import { Session } from './session'
 import { View } from './render'
@@ -80,7 +80,17 @@ async function main() {
       const m = net as import('./matrix/net').MatrixNet
       try {
         const parsed = await parseGlb(await file.arrayBuffer()) // validate before it can land in room state
-        log(`uploading ${file.name} (${(file.size / 1024).toFixed(0)} kB, ${parsed.geometry.indices.length / 3} tris)...`)
+        // Pre-flight the homeserver's media cap: a too-big file otherwise
+        // dies deep in the host as an unexplained 413. Logged either way,
+        // so a failed upload can be compared against the claimed limit.
+        const limit = await mediaUploadLimit(m.api)
+        if (limit !== null && file.size > limit) {
+          log(`scene too big to upload: ${(file.size / 1e6).toFixed(1)}MB > the homeserver's `
+            + `${(limit / 1e6).toFixed(1)}MB media limit`)
+          return
+        }
+        log(`uploading ${file.name} (${(file.size / 1024).toFixed(0)} kB, ${parsed.geometry.indices.length / 3} tris; `
+          + `host reports ${limit === null ? 'no' : (limit / 1e6).toFixed(1) + 'MB'} media limit)...`)
         const mxc = await uploadWorldAsset(m.api, m.client, wp.roomId, file, 'scene')
         cacheScene(mxc, parsed)
         sim.registerSceneGeometry(mxc, parsed.geometry)
@@ -89,8 +99,7 @@ async function main() {
         session.emit('scene', mxc, { pos: { x: 0, y: 0, z: 0 } }, sim.tick + BOOT_LEAD_TICKS)
         log(`scene set: ${mxc}`)
       } catch (e) {
-        log(`scene upload failed: ${e}`)
-        console.error('[worldsync]', e)
+        logErr('scene upload failed', e)
       }
     },
     // MSC3815 script_url: upload the JS, merge it into the world state
@@ -105,8 +114,7 @@ async function main() {
         log(`world script set: ${mxc}`)
         worldScriptChanged(mxc) // don't wait for our own state echo
       } catch (e) {
-        log(`script upload failed: ${e}`)
-        console.error('[worldsync]', e)
+        logErr('script upload failed', e)
       }
     },
   })
@@ -116,6 +124,15 @@ async function main() {
   const log = (l: string) => {
     ui.log(l)
     if (wp) console.log('[worldsync]', l)
+  }
+  // Widget-api errors bury the homeserver's actual complaint (errcode,
+  // http status) in data.matrix_api_error; dig it out or debugging an
+  // upload failure means guessing.
+  const logErr = (what: string, e: unknown) => {
+    log(`${what}: ${e}`)
+    const detail = (e as { data?: { matrix_api_error?: unknown } })?.data?.matrix_api_error
+    if (detail) log(`homeserver said: ${JSON.stringify(detail)}`)
+    console.error('[worldsync]', e)
   }
   if (wp) console.log('[worldsync] widget mode', {
     userId: wp.userId, deviceId: wp.deviceId, roomId: wp.roomId,

@@ -57,6 +57,17 @@ export async function uploadWorldAsset(
   return content_uri
 }
 
+/** The homeserver's media upload cap, via the host (null = unknown). */
+export async function mediaUploadLimit(api: WidgetApi): Promise<number | null> {
+  try {
+    const cfg = await api.getMediaConfig()
+    const n = cfg['m.upload.size']
+    return typeof n === 'number' ? n : null
+  } catch {
+    return null // hosts without MSC4039 media config; find out the hard way
+  }
+}
+
 export async function fetchWorldAsset(api: WidgetApi, mxc: string): Promise<ArrayBuffer> {
   const { file } = await api.downloadFile(mxc)
   return await new Response(file as BodyInit).arrayBuffer()
