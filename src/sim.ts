@@ -190,12 +190,12 @@ export class Sim {
   private seen = new Set<string>()
   private resimFrom: number | null = null
 
-  async init() {
+  async init(now = wallNow()) {
     await RAPIER.init()
     this.world = buildWorld()
     PipelineCtor = this.world.physicsPipeline.constructor as typeof PipelineCtor
     CcdCtor = this.world.ccdSolver.constructor as typeof CcdCtor
-    this.tick = this.tickOf(wallNow())
+    this.tick = this.tickOf(now)
   }
 
   get needsResim() { return this.resimFrom !== null }

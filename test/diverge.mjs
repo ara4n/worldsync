@@ -31,7 +31,7 @@ console.log(`peered; 500ms send latency on a; norm=${norm} cad=${cad}; running f
 await a.evaluate(() => { window.__jig.net.sendDelayMs = 500 })
 
 const diverged = () => a.evaluate(() =>
-  [...window.__jig.net.peers.values()].some(x => x.divergedAt !== null) ? true :
+  [...window.__jig.session.peers.values()].some(x => x.divergedAt !== null) ? true :
   undefined) // waitForFunction-style truthiness
 
 const deadline = Date.now() + minutes * 60_000
@@ -48,7 +48,7 @@ outer: while (Date.now() < deadline) {
           [gx * 1.7 + (round % 3) * 0.6, gz * 1.7 + (round % 2) * 0.9])
         await a.mouse.click(s.x, s.y)
         await a.waitForTimeout(45)
-        if (await a.evaluate(() => [...window.__jig.net.peers.values()].some(x => x.divergedAt !== null))) break outer
+        if (await a.evaluate(() => [...window.__jig.session.peers.values()].some(x => x.divergedAt !== null))) break outer
       }
     }
   }
@@ -82,7 +82,7 @@ const stats = p => p.evaluate(() => ({
   stepMs: window.__jig.sim.stepMs,
   verify: window.__jig.sim.verifyReplay(60),
   anomalies: window.__jig.sim.anomalies,
-  divergedAt: [...window.__jig.net.peers.values()].map(x => x.divergedAt),
+  divergedAt: [...window.__jig.session.peers.values()].map(x => x.divergedAt),
   divergence: window.__divergence ?? null,
   poseHashes: [...window.__jig.sim.hashes.entries()],
 }))

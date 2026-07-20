@@ -1,34 +1,22 @@
-import { wallNow, type DcMessage } from './types'
+import { type DcMessage } from './types'
 
-const PING_MS = 1000
-const SAMPLES = 8
-
+/** Transport-level peer: connection plumbing only. Protocol state (RTT,
+ * strikes, divergence) lives in Session's SessionPeer. */
 export interface Peer {
   id: string
   order: number
-  rtt: number
-  offset: number // measured wall-clock skew (peer minus us, ms); reported, not corrected for
-  strikes: number
-  excluded: boolean
-  /** true once at least one settled tick hash has been compared */
-  checked: boolean
-  /** first settled tick at which our pose hash disagreed with theirs */
-  divergedAt: number | null
   connected: boolean
   pc: RTCPeerConnection
   dc: RTCDataChannel | null
-  samples: { rtt: number; offset: number }[]
-  pingTimer: number
 }
 
 /**
  * Full-mesh WebRTC data channels with ws signaling at /signal.
  * The joiner initiates offers to everyone already in the room, so there is
- * never offer glare. Ping/pong measures per-peer RTT (for the staleness
- * limit) and wall-clock skew (NTP-style, minimum-RTT sample; displayed but
- * deliberately not corrected for, since claimed timestamps are trusted as-is
- * for now). Also owns the artificial outgoing latency used to provoke
- * rollbacks when testing on one machine.
+ * never offer glare. Pure transport: every decoded message (pings included)
+ * is handed to onMessage; the Session owns the protocol. Also owns the
+ * artificial outgoing latency used to provoke rollbacks when testing on one
+ * machine.
  */
 export class Net {
   id = ''
@@ -36,8 +24,10 @@ export class Net {
   sendDelayMs = 0
   lagPings = true // uncheck in the UI to make our lag look like backdating
   peers = new Map<string, Peer>()
+  onJoined: (id: string, order: number) => void = () => {}
   onMessage: (peer: Peer, msg: DcMessage) => void = () => {}
   onPeerConnected: (peer: Peer) => void = () => {}
+  onPeerLeft: (id: string) => void = () => {}
   onLog: (line: string) => void = () => {}
   private ws: WebSocket | null = null
   // Signal handling is async (setRemoteDescription etc); process strictly in
@@ -64,6 +54,7 @@ export class Net {
     this.id = 'solo' + Math.random().toString(36).slice(2, 6)
     this.order = 1000 + Math.floor(Math.random() * 1e6)
     this.onLog('signaling unavailable, running solo')
+    this.onJoined(this.id, this.order)
   }
 
   private async onSignal(msg: any) {
@@ -72,6 +63,7 @@ export class Net {
         this.id = msg.id
         this.order = msg.order
         this.onLog(`joined as ${msg.id} (#${msg.order})`)
+        this.onJoined(this.id, this.order)
         for (const p of msg.peers) this.makePeer(p.id, p.order, true)
         break
       case 'peer-joined':
@@ -80,10 +72,10 @@ export class Net {
       case 'peer-left': {
         const p = this.peers.get(msg.id)
         if (p) {
-          clearInterval(p.pingTimer)
           p.pc.close()
           this.peers.delete(msg.id)
           this.onLog(`${msg.id} left`)
+          this.onPeerLeft(msg.id)
         }
         break
       }
@@ -112,11 +104,7 @@ export class Net {
 
   private async makePeer(id: string, order: number, initiator: boolean) {
     const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
-    const peer: Peer = {
-      id, order, rtt: 0, offset: 0, strikes: 0, excluded: false, checked: false,
-      divergedAt: null,
-      connected: false, pc, dc: null, samples: [], pingTimer: 0,
-    }
+    const peer: Peer = { id, order, connected: false, pc, dc: null }
     this.peers.set(id, peer)
     pc.onicecandidate = ev => { if (ev.candidate) this.sendSignal(id, { candidate: ev.candidate }) }
     if (initiator) {
@@ -134,36 +122,16 @@ export class Net {
     dc.onopen = () => {
       peer.connected = true
       this.onLog(`connected to ${peer.id} (#${peer.order})`)
-      peer.pingTimer = window.setInterval(
-        () => this.sendTo(peer, { kind: 'ping', t0: wallNow() }), PING_MS)
-      this.sendTo(peer, { kind: 'ping', t0: wallNow() })
       this.onPeerConnected(peer)
     }
     dc.onclose = () => {
       peer.connected = false
-      clearInterval(peer.pingTimer)
     }
     dc.onmessage = ev => {
       let msg: DcMessage
       try { msg = JSON.parse(String(ev.data)) } catch { return }
-      if (msg.kind === 'ping') {
-        this.sendTo(peer, { kind: 'pong', t0: msg.t0, t1: wallNow() })
-        return
-      }
-      if (msg.kind === 'pong') {
-        this.clockSample(peer, msg.t0, msg.t1, wallNow())
-        return
-      }
       this.onMessage(peer, msg)
     }
-  }
-
-  private clockSample(peer: Peer, t0: number, t1: number, t3: number) {
-    peer.samples.push({ rtt: t3 - t0, offset: t1 - (t0 + t3) / 2 })
-    if (peer.samples.length > SAMPLES) peer.samples.shift()
-    const best = peer.samples.reduce((a, b) => (b.rtt < a.rtt ? b : a))
-    peer.rtt = best.rtt
-    peer.offset = best.offset
   }
 
   sendTo(peer: Peer, msg: DcMessage) {
@@ -174,6 +142,11 @@ export class Net {
     const delay = clockMsg && !this.lagPings ? 0 : this.sendDelayMs
     if (delay > 0) setTimeout(() => { if (dc.readyState === 'open') dc.send(data) }, delay)
     else dc.send(data)
+  }
+
+  sendToId(id: string, msg: DcMessage) {
+    const p = this.peers.get(id)
+    if (p) this.sendTo(p, msg)
   }
 
   broadcast(msg: DcMessage) {

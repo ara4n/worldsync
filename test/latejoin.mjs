@@ -61,7 +61,7 @@ console.log('waiting for settled-hash comparison on both sides...')
 
 for (const [name, page] of [['a', a], ['b', b]]) {
   const compared = await page.waitForFunction(
-    () => [...window.__jig.net.peers.values()].every(q => q.checked),
+    () => [...window.__jig.session.peers.values()].every(q => q.checked),
     null, { timeout: 30000 }).then(() => true).catch(() => false)
   if (!compared) fail(`${name} never compared settled hashes`)
 }
@@ -70,7 +70,7 @@ await b.waitForTimeout(8000) // several more hash exchanges to catch a late latc
 for (const [name, page] of [['a', a], ['b', b]]) {
   const s = await page.evaluate(() => ({
     entities: window.__jig.sim.bodies.size,
-    peers: [...window.__jig.net.peers.values()].map(p => ({ id: p.id, checked: p.checked, divergedAt: p.divergedAt })),
+    peers: [...window.__jig.session.peers.values()].map(p => ({ id: p.id, checked: p.checked, divergedAt: p.divergedAt })),
     anomalies: window.__jig.sim.anomalies,
     verify: window.__jig.sim.verifyReplay(60),
   }))
