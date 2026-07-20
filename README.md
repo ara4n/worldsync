@@ -54,15 +54,34 @@ waiting forever. In widget mode every diagnostic line is mirrored to the
 console with a `[worldsync]` prefix, including a notice when input is
 ignored because the session has not started.
 
+Widget mode also carries **MSC3815 world scenes** (Third Room's worlds
+proposal): the panel's "load glTF scene" button uploads a GLB through the
+host's MSC4039 media actions, points the room's
+`org.matrix.msc3815.world` state event (`scene_url`) at it, and folds a
+`scene` op into the shared timeline, stamped ahead like a boot seam so
+every peer swaps in the scene's colliders on the same tick. Each peer
+bakes the GLB's meshes into one fixed trimesh (deterministically: same
+bytes, same traversal, f64 transforms rounded to f32 identically), so
+boxes rest on and roll off the scene bit-identically everywhere. The
+scene rides history snapshots and the boot seam like any other sim state;
+late joiners fetch and adopt it from room state before tick calibration,
+and a peer whose download outlives the op's lead applies the op hollow
+(one logged anomaly) and heals by folding from the op's tick once the
+geometry arrives. Requires widget mode - the classic ws demo has no media
+repo to share bytes through, so its button just explains that.
+
 For the dev loop, `/mock.html?room=x` is a mock widget host: the real
 `ClientWidgetApi` against an in-memory widget driver whose room state is
 replicated across tabs via BroadcastChannel, with a BroadcastChannel
 transport standing in for LiveKit. Two tabs mesh exactly like the classic
 demo - no Element Web, homeserver, or SFU required - while exercising the
 genuine widget handshake (same waitForIframeLoad semantics as EW),
-RoomWidgetClient, and MatrixRTC membership machinery. `node
+RoomWidgetClient, and MatrixRTC membership machinery, plus an in-memory
+MSC4039 media repo gossiped between tabs so scene upload works too. `node
 test/mockwidget.mjs` asserts bit-exact convergence through this stack,
-late join included.
+late join included; `node test/scene.mjs` runs the full scene flow across
+three tabs (upload, live fetch, late-join preload) and asserts the healed
+peer converges to the bit.
 
 To embed for real, serve the app (dev server works: `npm run dev --
 --host`) and add it to a room in Element Web with
@@ -100,9 +119,10 @@ into the joiner's past). All run headed.
 `npm run test:headless` needs no browser and no server: the whole protocol
 stack (Session + Sim) runs on an in-process hub with a virtual clock and
 per-link one-way latencies, covering laggy drags, late joins, three-peer
-meshes, wildly skewed local clocks, ops racing a join, and a backdating
-cheater - ~72 virtual seconds, bit-exact assertions, a third of a real
-second. The hub delivers messages through a JSON round-trip so wire
+meshes, wildly skewed local clocks, ops racing a join, glTF scene
+collider swaps (slow-download heal and late-join adoption included), and
+a backdating cheater - ~72 virtual seconds, bit-exact assertions, a
+third of a real second. The hub delivers messages through a JSON round-trip so wire
 serialisation hazards stay exercised.
 
 ## How it works
@@ -310,3 +330,8 @@ serialisation hazards stay exercised.
 - Widget mode: tick calibration waits on the lowest-order membership even
   if that peer is unreachable (ghost membership); needs a reachable-senior
   fallback with a timeout.
+- Scenes are single-file `.glb` only, colliders are a raw bake of every
+  mesh (no OMI_collider / physics extensions, no exclusions), and a
+  joiner whose scene preload FAILS joins without colliders and diverges
+  on scene contacts until a new scene op arrives; the failure is logged
+  but not retried.
