@@ -17,16 +17,21 @@ async function measure(query) {
   // at three heights collapses into one contact-rich resting pile.
   await page.evaluate(n => {
     const { sim, net } = window.__jig
+    // Square-ish grid sized to n, capped at the 40x40 ground; overflow goes
+    // into extra height layers.
+    const side = Math.min(Math.ceil(Math.sqrt(n)), 36)
     let k = 0
-    for (let gx = 0; gx < 15 && k < n; gx++)
-      for (let gz = 0; gz < 10 && k < n; gz++, k++)
-        sim.insert({
-          peer: net.id, order: net.order, seq: 500000 + k,
-          t: performance.timeOrigin + performance.now(),
-          type: 'spawn', netId: `perf-${k}`,
-          pos: { x: (gx - 7) * 1.05, y: 2.5 + (k % 3), z: (gz - 5) * 1.05 },
-          color: 0x888888,
-        })
+    while (k < n) {
+      const gx = k % side, gz = Math.floor(k / side) % side, layer = Math.floor(k / (side * side))
+      sim.insert({
+        peer: net.id, order: net.order, seq: 500000 + k,
+        t: performance.timeOrigin + performance.now(),
+        type: 'spawn', netId: `perf-${k}`,
+        pos: { x: (gx - side / 2) * 1.05, y: 2.5 + (k % 3) + layer * 1.5, z: (gz - side / 2) * 1.05 },
+        color: 0x888888,
+      })
+      k++
+    }
   }, boxes)
   await page.waitForTimeout(12000) // land, settle, let the EMAs converge
   const s = await page.evaluate(() => ({
