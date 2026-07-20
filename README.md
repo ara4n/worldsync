@@ -70,6 +70,52 @@ and a peer whose download outlives the op's lead applies the op hollow
 geometry arrives. Requires widget mode - the classic ws demo has no media
 repo to share bytes through, so its button just explains that.
 
+**MSC3815 `script_url` (WebSG scripts)** is supported too: the panel's
+"load world script" button uploads a JS file and merges `script_url` into
+the world state event. The script runs in a QuickJS-in-WASM sandbox
+(quickjs-emscripten, singlefile variant) with a 32MB memory limit, 1MB
+stack, and a 20ms interrupt deadline per hook call - tighter than
+thirdroom's runtime, which relies on its fixed 64MiB WASM heap alone. The
+API is a WebSG-flavoured subset: `world.onload` / `world.onenter` /
+`world.onupdate(dt, time)`, `world.createNode({translation, color})`,
+`world.findNodeByName`, `world.boxes()`, `node.translation`, plus
+worldsync extensions `node.grab()` / `node.moveTo()` / `node.release(vel)`
+for driving bodies through the grab pipeline. `examples/stir.js` is an
+uploadable demo.
+
+The execution model deliberately differs from thirdroom. There, every
+peer runs the script with its own wall-clock `dt` and networking is
+owner-authoritative replication plus interpolation - fine for that
+engine, fatal for deterministic lockstep (each peer's sandbox would read
+rolled-back state and diverge, and QuickJS heaps cannot be snapshotted
+into the rollback history). Here the script runs ONLY on the current
+root peer, and everything it does leaves the sandbox as ordinary ops
+(spawn / grab / pose / release) on the shared tick grid: remote peers
+fold script effects exactly like human input, so determinism is
+preserved without the sandbox ever being rollback state. The trade: the
+script is a singleton with local state - a root handover (root closes or
+becomes unreachable) restarts it from scratch on the successor, and
+during a network partition both sides can briefly run it (split-brain,
+doubled effects) until connectivity settles. Script authority follows
+the senior-most *reachable* peer, so a ghost membership does not hold
+the script hostage even though it still blocks tick calibration.
+
+WebSG API gaps against thirdroom's surface, and how they collide with
+the world model: materials, lights, meshes, UI canvases, the action bar,
+ECS component stores, and collision listeners are all absent - worldsync
+has no deterministic backend for them, since the op vocabulary is the
+only mutation channel (a script-created material would exist on the root
+alone). `node.translation` is a read-only snapshot, not thirdroom's
+live write-through wrapper: writing a transform directly would bypass
+the tick grid, so movement must go through grab/moveTo/release.
+Collision events would need deterministic contact extraction from
+Rapier, which differs across peers inside the unsettled window; physics
+impulses (`PhysicsBody.applyImpulse`) would need a new op type to be
+foldable. `network.*` (host detection, broadcast, replicators) is
+unnecessary by construction - replication IS the sim - but that also
+means scripts cannot yet react to per-peer input, and raw-WASM scripts
+(which thirdroom accepts alongside JS) are not supported.
+
 For the dev loop, `/mock.html?room=x` is a mock widget host: the real
 `ClientWidgetApi` against an in-memory widget driver whose room state is
 replicated across tabs via BroadcastChannel, with a BroadcastChannel
@@ -81,7 +127,9 @@ MSC4039 media repo gossiped between tabs so scene upload works too. `node
 test/mockwidget.mjs` asserts bit-exact convergence through this stack,
 late join included; `node test/scene.mjs` runs the full scene flow across
 three tabs (upload, live fetch, late-join preload) and asserts the healed
-peer converges to the bit.
+peer converges to the bit; `node test/script.mjs` uploads a world script,
+asserts only the root runs it (with no divergence), then closes the root
+tab and asserts the survivor takes the script over.
 
 To embed for real, serve the app (dev server works: `npm run dev --
 --host`) and add it to a room in Element Web with
@@ -120,9 +168,10 @@ into the joiner's past). All run headed.
 stack (Session + Sim) runs on an in-process hub with a virtual clock and
 per-link one-way latencies, covering laggy drags, late joins, three-peer
 meshes, wildly skewed local clocks, ops racing a join, glTF scene
-collider swaps (slow-download heal and late-join adoption included), and
-a backdating cheater - ~72 virtual seconds, bit-exact assertions, a
-third of a real second. The hub delivers messages through a JSON round-trip so wire
+collider swaps (slow-download heal and late-join adoption included), a
+sandboxed world script driving the sim through ops, and a backdating
+cheater - ~72 virtual seconds, bit-exact assertions, a third of a real
+second. The hub delivers messages through a JSON round-trip so wire
 serialisation hazards stay exercised.
 
 ## How it works
@@ -335,3 +384,9 @@ serialisation hazards stay exercised.
   joiner whose scene preload FAILS joins without colliders and diverges
   on scene contacts until a new scene op arrives; the failure is logged
   but not retried.
+- World scripts are root-singleton with unreplicated state: a root
+  handover restarts the script from scratch, and a partition can run it
+  on both sides at once (doubled effects) until connectivity settles.
+  The sandbox has no clock/network access, so a hostile script is
+  bounded to what ops can do - but ops are exactly what a hostile PEER
+  can already do, so the trust model is unchanged.
