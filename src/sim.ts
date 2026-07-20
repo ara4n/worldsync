@@ -1,6 +1,6 @@
 import RAPIER from '@dimforge/rapier3d-deterministic-compat'
 import { wallNow, type BootEntity, type Interaction, type Quat, type Vec3 } from './types'
-import { ensureEntity, entityFor, Position, Rotation, PrevPosition, PrevRotation, Tint } from './ecs'
+import { createEcsStore } from './ecs'
 
 export const TICK_HZ = 60
 export const TICK_MS = 1000 / TICK_HZ
@@ -139,6 +139,8 @@ function resetSolvers(world: RAPIER.World) {
  */
 export class Sim {
   world!: RAPIER.World
+  /** This sim's private ECS universe (render-facing mirror of body state). */
+  ecs = createEcsStore()
   tick = 0
   bodies = new Map<string, number>()
   grabs = new Map<string, Grab>()
@@ -502,7 +504,7 @@ export class Sim {
           RAPIER.RigidBodyDesc.dynamic().setCanSleep(false).setTranslation(i.pos.x, i.pos.y, i.pos.z))
         ctx.world.createCollider(boxCollider(), body)
         ctx.bodies.set(i.netId, body.handle)
-        ensureEntity(i.netId, i.color ?? 0xffffff)
+        this.ecs.ensureEntity(i.netId, i.color ?? 0xffffff)
         return
       }
       case 'grab': {
@@ -552,7 +554,7 @@ export class Sim {
             .setAngvel(i.angvel ?? ZERO))
         ctx.world.createCollider(boxCollider(), body)
         ctx.bodies.set(i.netId, body.handle)
-        ensureEntity(i.netId, i.color ?? 0xffffff)
+        this.ecs.ensureEntity(i.netId, i.color ?? 0xffffff)
         return
       }
     }
@@ -567,9 +569,10 @@ export class Sim {
     for (const [netId, h] of this.bodies) {
       const b = this.world.getRigidBody(h)
       if (!b) continue
-      const eid = entityFor(netId)
+      const eid = this.ecs.entityFor(netId)
       if (eid === undefined) continue
       const p = b.translation(), q = b.rotation()
+      const { PrevPosition, PrevRotation } = this.ecs
       PrevPosition.x[eid] = p.x; PrevPosition.y[eid] = p.y; PrevPosition.z[eid] = p.z
       PrevRotation.x[eid] = q.x; PrevRotation.y[eid] = q.y; PrevRotation.z[eid] = q.z; PrevRotation.w[eid] = q.w
     }
@@ -580,9 +583,10 @@ export class Sim {
     for (const [netId, h] of this.bodies) {
       const b = this.world.getRigidBody(h)
       if (!b) continue
-      const eid = entityFor(netId)
+      const eid = this.ecs.entityFor(netId)
       if (eid === undefined) continue
       const p = b.translation(), q = b.rotation()
+      const { Position, Rotation } = this.ecs
       Position.x[eid] = p.x; Position.y[eid] = p.y; Position.z[eid] = p.z
       Rotation.x[eid] = q.x; Rotation.y[eid] = q.y; Rotation.z[eid] = q.z; Rotation.w[eid] = q.w
     }
@@ -592,13 +596,13 @@ export class Sim {
     const out: BootEntity[] = []
     for (const [netId, h] of this.bodies) {
       const b = this.world.getRigidBody(h)
-      const eid = entityFor(netId)
+      const eid = this.ecs.entityFor(netId)
       if (!b || eid === undefined) continue
       const q = b.rotation()
       const g = this.grabs.get(netId)
       out.push({
         netId,
-        color: Tint.value[eid],
+        color: this.ecs.Tint.value[eid],
         pos: vec(b.translation()),
         rot: { x: q.x, y: q.y, z: q.z, w: q.w },
         linvel: vec(b.linvel()),

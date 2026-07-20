@@ -1,6 +1,5 @@
 import * as THREE from 'three'
 import { BOX_HALF, TICK_MS } from './sim'
-import { netIdFor } from './ecs'
 import type { Vec3, Quat, InteractionType } from './types'
 import type { View } from './render'
 
@@ -67,7 +66,7 @@ export class Input {
     if (!hit) return
     const mesh = hit.object as THREE.Mesh
     const eid = mesh.userData.eid as number
-    const netId = netIdFor(eid)
+    const netId = this.view.ecs.netIdFor(eid)
     // Grab authority follows the presented (rendered) pose, not the raw sim
     // pose: if the box was mid rubber-band, we teleport it to where the user
     // sees it and broadcast that as truth.

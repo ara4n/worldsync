@@ -4,7 +4,6 @@ import { Net, type Peer } from './net'
 import { View } from './render'
 import { Input, type Emitter } from './input'
 import { UI } from './ui'
-import { entityFor } from './ecs'
 import { wallNow, type Interaction } from './types'
 
 const HASH_EVERY_TICKS = 60
@@ -25,7 +24,7 @@ async function main() {
   const cad = Math.floor(Number(params.get('cad') ?? '0'))
   if (cad >= 1) sim.cadence = cad
   await sim.init()
-  const view = new View(document.body)
+  const view = new View(document.body, sim.ecs)
   const net = new Net()
   // Off by default so arbitrary fake latency folds instead of dropping;
   // dropped interactions are a guaranteed permanent divergence.
@@ -227,7 +226,7 @@ async function main() {
       return { x: p.x, y: p.y, z: p.z }
     },
     screenPos: (netId: string) => {
-      const eid = entityFor(netId)
+      const eid = sim.ecs.entityFor(netId)
       const m = eid === undefined ? undefined : view.meshes.get(eid)
       if (!m) return null
       const v = m.position.clone().project(view.camera)

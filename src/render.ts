@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
-import { ecs, newBoxes, Position, Rotation, PrevPosition, PrevRotation, Tint } from './ecs'
+import type { EcsStore } from './ecs'
 
 const IDENTITY = new THREE.Quaternion()
 const tmpQ = new THREE.Quaternion()
@@ -21,7 +21,7 @@ export class View {
   private geo = new THREE.BoxGeometry(1, 1, 1)
   private mats = new Map<number, THREE.MeshStandardMaterial>()
 
-  constructor(parent: HTMLElement) {
+  constructor(parent: HTMLElement, public ecs: EcsStore) {
     this.renderer.setSize(innerWidth, innerHeight)
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
     parent.appendChild(this.renderer.domElement)
@@ -71,8 +71,8 @@ export class View {
   }
 
   private syncNew() {
-    for (const eid of newBoxes(ecs)) {
-      const mesh = new THREE.Mesh(this.geo, this.matFor(Tint.value[eid]))
+    for (const eid of this.ecs.newBoxes()) {
+      const mesh = new THREE.Mesh(this.geo, this.matFor(this.ecs.Tint.value[eid]))
       mesh.userData.eid = eid
       this.scene.add(mesh)
       this.meshes.set(eid, mesh)
@@ -93,6 +93,7 @@ export class View {
    * The locally dragged box is skipped: the pointer has authority there.
    */
   applyCorrections(presented: Map<number, Presented>, now: number, skipEid: number | null) {
+    const { Position, Rotation } = this.ecs
     for (const [eid, was] of presented) {
       if (eid === skipEid) { this.errors.delete(eid); continue }
       const sp = new THREE.Vector3(Position.x[eid], Position.y[eid], Position.z[eid])
@@ -111,6 +112,7 @@ export class View {
    */
   frame(now: number, alpha: number) {
     this.syncNew()
+    const { Position, Rotation, PrevPosition, PrevRotation } = this.ecs
     for (const [eid, mesh] of this.meshes) {
       mesh.position.set(
         PrevPosition.x[eid] + (Position.x[eid] - PrevPosition.x[eid]) * alpha,
