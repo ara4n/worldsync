@@ -6,7 +6,7 @@ import type { WidgetParams } from './params'
 import { initWidgetClient } from './widget'
 import type { WidgetApi } from 'matrix-widget-api'
 import { BroadcastTransport, LiveKitTransport, type DataTransport } from './transport'
-import { readWorldSceneUrl } from './world'
+import { readWorldSceneUrl, readWorldScriptUrl, worldUrls, WORLD_EVENT_TYPE } from './world'
 
 /** Transport-level peer view, mirroring the old Net.Peer surface. */
 export interface MatrixPeer {
@@ -43,6 +43,12 @@ export class MatrixNet {
    * seniors' worlds contain its colliders, and a joiner whose first
    * snapshot lacked them could never converge across the boot seam. */
   onPreloadScene: (sceneUrl: string) => Promise<void> = async () => {}
+  /** The room's MSC3815 script_url, reported once after connect and again
+   * whenever the world state event changes (null = no script). Scripts are
+   * NOT tick-grid state: only the current root peer runs one, and its
+   * effects enter the timeline as ordinary ops, so a plain state watch is
+   * enough (no op, no seam handling). */
+  onWorldScript: (scriptUrl: string | null) => void = () => {}
 
   /** the widget-api handle (media upload/download) and proxied client
    * (state events), exposed for the MSC3815 world plumbing in main */
@@ -85,6 +91,10 @@ export class MatrixNet {
     // Poke the session directly when a membership event arrives, then
     // reconcile either way.
     client.on(ClientEvent.Event, (ev: MatrixEvent) => {
+      if (ev.getType() === WORLD_EVENT_TYPE) {
+        this.onWorldScript(worldUrls(ev.getContent() as Record<string, unknown>).scriptUrl)
+        return
+      }
       if (ev.getType() !== EventType.GroupCallMemberPrefix) return
       const poke = (this.rtc as unknown as { _onRTCSessionMemberUpdate?: () => Promise<void> })._onRTCSessionMemberUpdate
       void poke?.call(this.rtc).then(() => this.reconcile())
@@ -111,6 +121,7 @@ export class MatrixNet {
       try { await this.onPreloadScene(sceneUrl) }
       catch (e) { this.onLog(`scene preload failed (continuing without): ${e}`) }
     }
+    this.onWorldScript(readWorldScriptUrl(client, p.roomId))
 
     this.rtc.joinRTCSession(
       { userId: p.userId, deviceId: p.deviceId, memberId: this.id },

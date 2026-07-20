@@ -103,6 +103,8 @@ export class BroadcastTransport implements DataTransport {
   onParticipants: (identities: Set<string>) => void = () => {}
   private ch: BroadcastChannel
   private present = new Set<string>()
+  private lastSeen = new Map<string, number>()
+  private beat: ReturnType<typeof setInterval> | null = null
   private closed = false
 
   constructor(room: string, private identity: string) {
@@ -113,6 +115,7 @@ export class BroadcastTransport implements DataTransport {
     this.ch.onmessage = ev => {
       const m = ev.data as { t: 'hello' | 'ack' | 'bye' | 'data'; from: string; to?: string | null; data?: string }
       if (m.from === this.identity) return
+      this.lastSeen.set(m.from, Date.now())
       switch (m.t) {
         case 'hello':
           this.ch.postMessage({ t: 'ack', from: this.identity })
@@ -132,6 +135,19 @@ export class BroadcastTransport implements DataTransport {
     }
     this.ch.postMessage({ t: 'hello', from: this.identity })
     addEventListener('pagehide', () => this.close())
+    // Liveness, like a real SFU's ParticipantDisconnected: a killed tab
+    // often never sends bye (hard close, crash), so re-announce every
+    // second and evict anyone silent for 3s. Any message counts as life.
+    this.beat = setInterval(() => {
+      this.ch.postMessage({ t: 'hello', from: this.identity })
+      const cutoff = Date.now() - 3000
+      for (const id of this.present) {
+        if ((this.lastSeen.get(id) ?? 0) < cutoff) {
+          this.present.delete(id)
+          this.onParticipants(new Set(this.present))
+        }
+      }
+    }, 1000)
   }
 
   private add(id: string) {
@@ -147,6 +163,7 @@ export class BroadcastTransport implements DataTransport {
   close() {
     if (this.closed) return
     this.closed = true
+    if (this.beat) clearInterval(this.beat)
     this.ch.postMessage({ t: 'bye', from: this.identity })
     this.ch.close()
   }

@@ -1,7 +1,7 @@
 import { Vector3 } from 'three'
 import { BOOT_LEAD_TICKS, Sim } from './sim'
 import { cachedScene, cacheScene, parseGlb } from './scene'
-import { fetchWorldScene, uploadWorldScene } from './matrix/world'
+import { fetchWorldAsset, uploadWorldAsset } from './matrix/world'
 import { Net } from './net'
 import { Session } from './session'
 import { View } from './render'
@@ -80,7 +80,7 @@ async function main() {
       try {
         const parsed = await parseGlb(await file.arrayBuffer()) // validate before it can land in room state
         log(`uploading ${file.name} (${(file.size / 1024).toFixed(0)} kB, ${parsed.geometry.indices.length / 3} tris)...`)
-        const mxc = await uploadWorldScene(m.api, m.client, wp.roomId, file)
+        const mxc = await uploadWorldAsset(m.api, m.client, wp.roomId, file, 'scene')
         cacheScene(mxc, parsed)
         sim.registerSceneGeometry(mxc, parsed.geometry)
         // Stamped ahead like a boot seam so no peer has passed the tick when
@@ -89,6 +89,22 @@ async function main() {
         log(`scene set: ${mxc}`)
       } catch (e) {
         log(`scene upload failed: ${e}`)
+        console.error('[worldsync]', e)
+      }
+    },
+    // MSC3815 script_url: upload the JS, merge it into the world state
+    // event; the state echo (ours and every other peer's watch) feeds the
+    // script driver below, which runs it only on the current root peer.
+    onScriptFile: async file => {
+      if (!wp) { log('world scripts need Matrix (run as a widget; the mock host works: /mock.html)'); return }
+      const m = net as import('./matrix/net').MatrixNet
+      try {
+        log(`uploading ${file.name} (${(file.size / 1024).toFixed(1)} kB)...`)
+        const mxc = await uploadWorldAsset(m.api, m.client, wp.roomId, file, 'script')
+        log(`world script set: ${mxc}`)
+        worldScriptChanged(mxc) // don't wait for our own state echo
+      } catch (e) {
+        log(`script upload failed: ${e}`)
         console.error('[worldsync]', e)
       }
     },
@@ -140,12 +156,13 @@ async function main() {
     // the sim's first tick (connect() awaits this before joining the RTC
     // session, so calibration cannot start early).
     m.onPreloadScene = async url => {
-      const parsed = await parseGlb(await fetchWorldScene(m.api, url))
+      const parsed = await parseGlb(await fetchWorldAsset(m.api, url))
       cacheScene(url, parsed)
       sim.registerSceneGeometry(url, parsed.geometry)
       sim.adoptScene(url)
       log(`scene preloaded (${parsed.geometry.indices.length / 3} tris)`)
     }
+    m.onWorldScript = url => worldScriptChanged(url)
   }
 
   // Keep the rendered scene in step with the sim's active scene (which can
@@ -159,7 +176,7 @@ async function main() {
     sceneFetches.add(url)
     const m = net as import('./matrix/net').MatrixNet
     ;(async () => {
-      const parsed = await parseGlb(await fetchWorldScene(m.api, url))
+      const parsed = await parseGlb(await fetchWorldAsset(m.api, url))
       cacheScene(url, parsed)
       sim.registerSceneGeometry(url, parsed.geometry) // schedules the healing fold
       log(`scene fetched (${parsed.geometry.indices.length / 3} tris)`)
@@ -167,6 +184,142 @@ async function main() {
       sceneFetches.delete(url) // retried next frame
       log(`scene fetch failed: ${e}`)
     })
+  }
+
+  // --- MSC3815 script_url: WebSG-subset scripts, root-peer authority ---
+  // The script runs ONLY on the current root peer (lowest join order);
+  // everything it does leaves the sandbox as ordinary ops, which is what
+  // keeps remote peers deterministic. Every peer tracks the url so a root
+  // handover just starts the script on the successor (state resets).
+  let scriptUrl: string | null = null
+  let script: import('./websg').WorldScript | null = null
+  let scriptFor: string | null = null
+  let scriptStarting = false
+  let lastScriptTick = 0
+  const scriptSrc = new Map<string, string>()
+  const scriptFetches = new Set<string>()
+  const worldScriptChanged = (url: string | null) => {
+    if (url === scriptUrl) return
+    scriptUrl = url
+    log(url ? `world script in room state: ${url}` : 'world script cleared')
+  }
+  // Script authority goes to the senior-most REACHABLE peer, not the senior
+  // membership: a ghost membership (dead tab, killed session) must not hold
+  // the script hostage. During a partition both sides can briefly believe
+  // they are root (split-brain: doubled script effects) - a real fix needs
+  // consensus, which the jig deliberately does not have.
+  const isRoot = () => {
+    if (!session.ready()) return false
+    for (const p of session.peers.values()) {
+      if (p.order < session.order && (net.peers.get(p.id)?.connected ?? false)) return false
+    }
+    return true
+  }
+  const scriptHost: import('./websg').ScriptHost = {
+    log: l => log(`[script] ${l}`),
+    boxes: () => {
+      const out = []
+      for (const netId of sim.bodies.keys()) {
+        const b = sim.body(netId)
+        if (!b) continue
+        const p = b.translation()
+        const g = sim.grabs.get(netId)
+        out.push({ id: netId, x: p.x, y: p.y, z: p.z, grabbed: !!g, mine: g?.holder === session.id })
+      }
+      return out
+    },
+    box: id => {
+      const b = sim.body(id)
+      if (!b) return null
+      const p = b.translation()
+      const g = sim.grabs.get(id)
+      return { x: p.x, y: p.y, z: p.z, grabbed: !!g, mine: g?.holder === session.id }
+    },
+    sceneNode: name => {
+      const url = sim.sceneUrl
+      const obj = url ? cachedScene(url)?.object.getObjectByName(name) : null
+      if (!obj) return null
+      const v = new Vector3()
+      obj.getWorldPosition(v)
+      return { x: v.x, y: v.y, z: v.z }
+    },
+    spawn: (x, y, z, color) => {
+      const id = session.nextNetId()
+      session.emit('spawn', id, { pos: { x, y, z }, color })
+      return id
+    },
+    grab: id => {
+      const b = sim.body(id)
+      if (!b || sim.grabs.has(id)) return false
+      const p = b.translation()
+      session.emit('grab', id, { pos: { x: p.x, y: p.y, z: p.z } })
+      return true
+    },
+    moveTo: (id, x, y, z) => {
+      const g = sim.grabs.get(id)
+      if (!g || g.holder !== session.id) return false
+      session.streamPose(id, { x, y, z })
+      return true
+    },
+    release: (id, vx, vy, vz) => {
+      const g = sim.grabs.get(id)
+      if (!g || g.holder !== session.id) return false
+      const b = sim.body(id)
+      const p = b ? b.translation() : { x: 0, y: 0, z: 0 }
+      session.emit('release', id, { pos: { x: p.x, y: p.y, z: p.z }, vel: { x: vx, y: vy, z: vz } })
+      return true
+    },
+  }
+  const syncScript = () => {
+    const want = scriptUrl !== null && wp !== null && isRoot()
+    if (script && (!want || scriptFor !== scriptUrl)) {
+      script.dispose()
+      script = null
+      log(!want ? 'world script stopped (not root here)' : 'world script replaced')
+    }
+    if (!want) return
+    const url = scriptUrl!
+    const src = scriptSrc.get(url)
+    if (src === undefined) {
+      if (scriptFetches.has(url)) return
+      scriptFetches.add(url)
+      const m = net as import('./matrix/net').MatrixNet
+      fetchWorldAsset(m.api, url)
+        .then(buf => { scriptSrc.set(url, new TextDecoder().decode(buf)) })
+        .catch(e => { scriptFetches.delete(url); log(`script fetch failed: ${e}`) })
+      return
+    }
+    if (!script && !scriptStarting) {
+      scriptStarting = true
+      import('./websg')
+        .then(({ WorldScript }) => WorldScript.create(src, scriptHost))
+        .then(s => {
+          scriptStarting = false
+          if (scriptUrl !== url || !isRoot()) { s.dispose(); return }
+          script = s
+          scriptFor = url
+          lastScriptTick = sim.tick
+          s.enter()
+          log('world script running (this peer is root)')
+        })
+        .catch(e => {
+          scriptStarting = false
+          scriptSrc.delete(url) // don't retry a broken script in a loop
+          log(`world script failed to start: ${e}`)
+        })
+      return
+    }
+    if (script && sim.tick > lastScriptTick) {
+      const dt = (sim.tick - lastScriptTick) / 60
+      lastScriptTick = sim.tick
+      script.update(dt, (sim.tick - session.startTick) / 60)
+      if (script.dead) {
+        script.dispose()
+        script = null
+        scriptSrc.delete(scriptFor!)
+        log('world script disabled after repeated errors')
+      }
+    }
   }
 
   let lastNotReady = 0
@@ -204,6 +357,7 @@ async function main() {
     session.advance()
     sim.mirror()
     syncScene()
+    syncScript()
     const alpha = session.calibrated
       ? Math.min(Math.max(session.tickTimeNow(now) - sim.tick, 0), 1)
       : 0
@@ -235,6 +389,7 @@ async function main() {
     session.advance()
     sim.mirror()
     syncScene() // scene fetches must not stall while the tab is hidden
+    syncScript() // nor the script, if the hidden tab is the root
   }
 
   // Hooks for automated smoke tests and console poking.

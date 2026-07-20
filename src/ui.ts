@@ -30,6 +30,7 @@ export interface Hooks {
   onDumpInputs(): void
   onVerify(): void
   onSceneFile(f: File): void
+  onScriptFile(f: File): void
 }
 
 export class UI {
@@ -50,6 +51,8 @@ export class UI {
         <button id="verify">verify replay determinism</button>
         <button id="scene">load glTF scene (.glb)</button>
         <input id="scenefile" type="file" accept=".glb,model/gltf-binary" style="display:none">
+        <button id="script">load world script (.js)</button>
+        <input id="scriptfile" type="file" accept=".js,text/javascript" style="display:none">
       </div>
       <div id="status"></div>
       <div id="log"></div>
@@ -73,13 +76,17 @@ export class UI {
     rb.oninput = () => hooks.onRubber(Number(rb.value))
     ;(root.querySelector('#dump') as HTMLButtonElement).onclick = () => hooks.onDumpInputs()
     ;(root.querySelector('#verify') as HTMLButtonElement).onclick = () => hooks.onVerify()
-    const sceneFile = root.querySelector('#scenefile') as HTMLInputElement
-    ;(root.querySelector('#scene') as HTMLButtonElement).onclick = () => sceneFile.click()
-    sceneFile.onchange = () => {
-      const f = sceneFile.files?.[0]
-      if (f) hooks.onSceneFile(f)
-      sceneFile.value = '' // allow re-picking the same file
+    const filePick = (btn: string, input: string, cb: (f: File) => void) => {
+      const inp = root.querySelector(input) as HTMLInputElement
+      ;(root.querySelector(btn) as HTMLButtonElement).onclick = () => inp.click()
+      inp.onchange = () => {
+        const f = inp.files?.[0]
+        if (f) cb(f)
+        inp.value = '' // allow re-picking the same file
+      }
     }
+    filePick('#scene', '#scenefile', f => hooks.onSceneFile(f))
+    filePick('#script', '#scriptfile', f => hooks.onScriptFile(f))
   }
 
   log(line: string) {
