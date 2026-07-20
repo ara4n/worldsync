@@ -35,7 +35,10 @@ export class View {
     // cmd (or ctrl) is held, which turns it into orbit for mac trackpads.
     this.controls.mouseButtons = { MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE } as any
     const setOrbit = (on: boolean) => {
-      (this.controls.mouseButtons as any).LEFT = on ? THREE.MOUSE.ROTATE : undefined
+      // PAN, not ROTATE: OrbitControls swaps rotate<->pan while
+      // ctrl/meta/shift is down, and this binding is only ever active
+      // with cmd/ctrl held, so PAN is what actually orbits here.
+      (this.controls.mouseButtons as any).LEFT = on ? THREE.MOUSE.PAN : undefined
     }
     addEventListener('keydown', e => { if (e.key === 'Meta' || e.key === 'Control') setOrbit(true) })
     addEventListener('keyup', e => { if (e.key === 'Meta' || e.key === 'Control') setOrbit(false) })
