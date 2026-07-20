@@ -9,8 +9,12 @@ import { BroadcastTransport, LiveKitTransport, type DataTransport } from './tran
 import { readWorldSceneUrl, readWorldScriptUrl, worldUrls, WORLD_EVENT_TYPE } from './world'
 
 /** How long a senior membership may stay unreachable on the transport
- * before a calibrating joiner writes it off as a ghost and self-roots. */
-const GHOST_GRACE_MS = 12000
+ * before a calibrating joiner writes it off as a ghost and self-roots.
+ * Short on purpose: SFU presence is continuous, so a live senior is
+ * visible almost immediately after we connect, and a false write-off
+ * (senior joining at the exact same moment) heals via the hard-resync +
+ * boot-seam path. This bounds how long a refresh feels dead. */
+const GHOST_GRACE_MS = 3000
 
 /** Transport-level peer view, mirroring the old Net.Peer surface. */
 export interface MatrixPeer {
@@ -141,6 +145,10 @@ export class MatrixNet {
       { userId: p.userId, deviceId: p.deviceId, memberId: this.id },
       p.mockTransport || !serviceUrl ? [] : [{ type: 'livekit', livekit_service_url: serviceUrl }],
     )
+    // Best-effort clean leave on refresh/close, so our membership does not
+    // linger as a ghost for everyone else (the server-side delayed leave
+    // event remains the backstop when this postMessage never lands).
+    addEventListener('pagehide', () => this.leave())
     await this.transport.connect()
     this.reconcile()
 
