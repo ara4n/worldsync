@@ -8,12 +8,17 @@ const base = process.env.URL ?? 'http://localhost:5173'
 const room = 'smoke-' + Math.random().toString(36).slice(2, 8)
 const errors = []
 
-const browser = await chromium.launch()
+const browser = await chromium.launch({ headless: false })
 
 async function open(name) {
   const page = await browser.newPage()
   page.on('pageerror', e => errors.push(`${name}: ${e}`))
-  page.on('console', m => { if (m.type() === 'error') errors.push(`${name}: ${m.text()}`) })
+  page.on('console', m => {
+    if (m.type() !== 'error') return
+    const url = m.location()?.url ?? ''
+    if (/favicon/.test(url) || /favicon/.test(m.text())) return
+    errors.push(`${name}: ${m.text()} (${url})`)
+  })
   await page.goto(`${base}/?room=${room}`)
   await page.waitForFunction(() => window.__jig && window.__jig.net.id !== '', null, { timeout: 15000 })
   return page

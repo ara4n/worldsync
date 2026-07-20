@@ -1,3 +1,4 @@
+import { Vector3 } from 'three'
 import { Sim, TICK_MS } from './sim'
 import { Net, type Peer } from './net'
 import { View } from './render'
@@ -7,6 +8,10 @@ import { entityFor } from './ecs'
 import { wallNow, type Interaction } from './types'
 
 const HASH_EVERY_TICKS = 30
+// Only compare tick hashes older than this: both sides must have folded all
+// in-flight interactions for a tick before its hash is meaningful. Sized for
+// max fake latency (1s = 30 ticks) plus fold-storm processing backlog.
+const SETTLE_TICKS = 105
 
 async function main() {
   const room = new URLSearchParams(location.search).get('room') ?? 'default'
@@ -22,6 +27,7 @@ async function main() {
     onLagPings: v => { net.lagPings = v },
     onRubber: v => { view.rubberMs = v },
     onEnforceStale: v => { enforceStale = v },
+    onVerify: () => ui.log(`replay self-check: ${JSON.stringify(sim.verifyReplay(60))}`),
     onDumpInputs: () => {
       const blob = new Blob(
         [JSON.stringify({ peer: net.id, order: net.order, tick: sim.tick, log: sim.inputLog }, null, 1)],
@@ -38,7 +44,6 @@ async function main() {
 
   let seq = 0
   let spawnCount = 0
-  let ownHash = 0
   let bootAsked = false
 
   // JSON round-trips doubles exactly except that -0 becomes 0, so normalise
@@ -94,9 +99,44 @@ async function main() {
         sim.mirror()
         ui.log(`bootstrapped ${msg.entities.length} entities from ${peer.id}`)
         break
-      case 'hash':
-        peer.hashMatch = msg.h === ownHash
+      case 'hashes': {
+        for (let j = 0; j < msg.hs.length; j++) {
+          const t = msg.start + j
+          if (msg.bs?.[j] && peer.bytesDivergedAt === null) {
+            const oursB = sim.byteHashes.get(t)
+            if (oursB !== undefined && oursB !== msg.bs[j]) {
+              peer.bytesDivergedAt = t
+              ui.log(`internal state DIVERGED from ${peer.id} at tick ${t - startTick} (poses may still agree)`)
+            }
+          }
+          const theirs = msg.hs[j]
+          if (!theirs) continue
+          const ours = sim.hashes.get(t)
+          if (ours === undefined) continue
+          peer.checked = true
+          if (ours !== theirs && peer.divergedAt === null) {
+            peer.divergedAt = t
+            ui.log(`DIVERGED from ${peer.id} at tick ${t - startTick}`)
+            ui.log(`replay self-check: ${JSON.stringify(sim.verifyReplay(60))}`)
+            // Stash bit-level dumps of our state at (and just before) the
+            // divergent tick for cross-peer post-mortem diffing.
+            const b64 = (u: Uint8Array | null) => {
+              if (!u) return null
+              let s = ''
+              for (let i = 0; i < u.length; i += 0x8000) s += String.fromCharCode(...u.subarray(i, i + 0x8000))
+              return btoa(s)
+            }
+            ;(window as any).__divergence = {
+              peer: peer.id, tick: t,
+              state: sim.stateAt(t), statePrev: sim.stateAt(t - 1),
+              snapPrev: b64(sim.snapshotAt(t - 1)), snap: b64(sim.snapshotAt(t)),
+              inputsAt: sim.inputLog.filter(e => e.tick >= t - 1 && e.tick <= t),
+            }
+            break
+          }
+        }
         break
+      }
     }
   }
 
@@ -109,22 +149,6 @@ async function main() {
   }
 
   net.connect(room)
-
-  // Coarse FNV-style hash of quantised body positions, broadcast every second.
-  // Sims in flight rarely match (they run out of phase); matching at rest is
-  // the "have we diverged" signal shown in the peer table.
-  function stateHash(): number {
-    let h = 0x811c9dc5
-    const mix = (n: number) => { h = Math.imul(h ^ (n & 0xffff), 0x01000193) }
-    for (const id of [...sim.bodies.keys()].sort()) {
-      for (let i = 0; i < id.length; i++) mix(id.charCodeAt(i))
-      const b = sim.body(id)
-      if (!b) continue
-      const p = b.translation()
-      mix(Math.round(p.x * 10)); mix(Math.round(p.y * 10)); mix(Math.round(p.z * 10))
-    }
-    return h >>> 0
-  }
 
   const startTick = sim.tick // global grid ticks are huge; display relative
   let nextHashTick = sim.tick + HASH_EVERY_TICKS
@@ -143,16 +167,25 @@ async function main() {
     view.frame(now, alpha)
     if (sim.tick >= nextHashTick) {
       nextHashTick = sim.tick + HASH_EVERY_TICKS
-      ownHash = stateHash()
-      net.broadcast({ kind: 'hash', h: ownHash })
+      const start = sim.tick - SETTLE_TICKS - 2 * HASH_EVERY_TICKS
+      const hs: number[] = []
+      const bs: number[] = []
+      for (let t = start; t < sim.tick - SETTLE_TICKS; t++) {
+        hs.push(sim.hashes.get(t) ?? 0)
+        bs.push(sim.byteHashes.get(t) ?? 0)
+      }
+      net.broadcast({ kind: 'hashes', start, hs, bs })
     }
     ui.maybe(now, () => ({
       room, id: net.id, order: net.order,
-      entities: sim.bodies.size, tick: sim.tick - startTick,
+      entities: sim.bodies.size, tick: sim.tick - startTick, stepMs: sim.stepMs,
       rollbacks: sim.rollbacks, lastDepth: sim.lastReplayDepth,
       peers: [...net.peers.values()].map(p => ({
         id: p.id, order: p.order, connected: p.connected, rtt: p.rtt,
-        offset: p.offset, strikes: p.strikes, excluded: p.excluded, hashMatch: p.hashMatch,
+        offset: p.offset, strikes: p.strikes, excluded: p.excluded,
+        sync: p.divergedAt !== null ? `≠@${p.divergedAt - startTick}`
+          : p.bytesDivergedAt !== null ? `b≠@${p.bytesDivergedAt - startTick}`
+          : p.checked ? '=' : '-',
       })),
     }))
     requestAnimationFrame(frame)
@@ -188,6 +221,18 @@ async function main() {
       const el = view.renderer.domElement
       return { x: ((v.x + 1) / 2) * el.clientWidth, y: ((1 - v.y) / 2) * el.clientHeight }
     },
+    screenOfGround: (x: number, zz: number) => {
+      const v = new Vector3(x, 0, zz).project(view.camera)
+      const el = view.renderer.domElement
+      return { x: ((v.x + 1) / 2) * el.clientWidth, y: ((1 - v.y) / 2) * el.clientHeight }
+    },
+    screenOfWorld: (x: number, y: number, zz: number) => {
+      const v = new Vector3(x, y, zz).project(view.camera)
+      const el = view.renderer.domElement
+      return { x: ((v.x + 1) / 2) * el.clientWidth, y: ((1 - v.y) / 2) * el.clientHeight }
+    },
+    verify: (depth?: number) => sim.verifyReplay(depth ?? 60),
+    roundTrip: () => sim.roundTrip(),
   }
 }
 

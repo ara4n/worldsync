@@ -6,7 +6,7 @@ export interface PeerRow {
   offset: number
   strikes: number
   excluded: boolean
-  hashMatch: boolean | null
+  sync: string
 }
 
 export interface Stats {
@@ -15,6 +15,7 @@ export interface Stats {
   order: number
   entities: number
   tick: number
+  stepMs: number
   rollbacks: number
   lastDepth: number
   peers: PeerRow[]
@@ -26,6 +27,7 @@ export interface Hooks {
   onRubber(v: number): void
   onEnforceStale(v: boolean): void
   onDumpInputs(): void
+  onVerify(): void
 }
 
 export class UI {
@@ -43,6 +45,7 @@ export class UI {
         <label><input id="stale" type="checkbox"> enforce staleness limit (drop and strike too-old interactions)</label>
         <label>rubber-band <input id="rubber" type="number" min="0" max="2000" step="25" value="100"> ms</label>
         <button id="dump">download input log</button>
+        <button id="verify">verify replay determinism</button>
       </div>
       <div id="status"></div>
       <div id="log"></div>`
@@ -58,6 +61,7 @@ export class UI {
     const st = root.querySelector('#stale') as HTMLInputElement
     st.onchange = () => hooks.onEnforceStale(st.checked)
     ;(root.querySelector('#dump') as HTMLButtonElement).onclick = () => hooks.onDumpInputs()
+    ;(root.querySelector('#verify') as HTMLButtonElement).onclick = () => hooks.onVerify()
   }
 
   log(line: string) {
@@ -76,15 +80,15 @@ export class UI {
         <td>${p.connected ? p.rtt.toFixed(0) + 'ms' : '...'}</td>
         <td>${p.connected ? p.offset.toFixed(0) : '-'}</td>
         <td>${p.strikes}</td>
-        <td>${p.hashMatch === null ? '-' : p.hashMatch ? '=' : '&ne;'}</td>
+        <td>${esc(p.sync)}</td>
         <td>${p.excluded ? 'EXCLUDED' : p.connected ? 'ok' : 'connecting'}</td>
       </tr>`).join('')
     this.statusEl.innerHTML = `
       <div>room <b>${esc(s.room)}</b> as <b>${esc(s.id || '...')}</b> (#${s.order})</div>
       <div class="hint">open this URL in another tab or browser to join (?room=name picks a room)</div>
-      <div>entities ${s.entities} | tick ${s.tick} | rollbacks ${s.rollbacks} (last depth ${s.lastDepth})</div>
+      <div>entities ${s.entities} | tick ${s.tick} | step ${s.stepMs.toFixed(1)}ms | rollbacks ${s.rollbacks} (last depth ${s.lastDepth})</div>
       ${s.peers.length
-        ? `<table><tr><th>peer</th><th>join</th><th>rtt</th><th>skew</th><th>strk</th><th>hash</th><th>status</th></tr>${rows}</table>`
+        ? `<table><tr><th>peer</th><th>join</th><th>rtt</th><th>skew</th><th>strk</th><th>sync</th><th>status</th></tr>${rows}</table>`
         : '<div class="hint">no peers yet</div>'}`
   }
 }

@@ -39,4 +39,7 @@ export type DcMessage =
   | { kind: 'i'; i: Interaction }
   | { kind: 'boot-req' }
   | { kind: 'boot'; entities: BootEntity[] }
-  | { kind: 'hash'; h: number }
+  // Bit-exact per-tick hashes for a settled range of the global tick grid:
+  // hs[j] hashes poses/velocities at tick start+j, bs[j] hashes the full
+  // snapshot bytes (solver internals included). 0 = not yet known.
+  | { kind: 'hashes'; start: number; hs: number[]; bs: number[] }

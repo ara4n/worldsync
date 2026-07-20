@@ -10,7 +10,12 @@ export interface Peer {
   offset: number // measured wall-clock skew (peer minus us, ms); reported, not corrected for
   strikes: number
   excluded: boolean
-  hashMatch: boolean | null
+  /** true once at least one settled tick hash has been compared */
+  checked: boolean
+  /** first settled tick at which our pose hash disagreed with theirs */
+  divergedAt: number | null
+  /** first settled tick at which the full snapshot bytes disagreed */
+  bytesDivergedAt: number | null
   connected: boolean
   pc: RTCPeerConnection
   dc: RTCDataChannel | null
@@ -110,7 +115,8 @@ export class Net {
   private async makePeer(id: string, order: number, initiator: boolean) {
     const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] })
     const peer: Peer = {
-      id, order, rtt: 0, offset: 0, strikes: 0, excluded: false, hashMatch: null,
+      id, order, rtt: 0, offset: 0, strikes: 0, excluded: false, checked: false,
+      divergedAt: null, bytesDivergedAt: null,
       connected: false, pc, dc: null, samples: [], pingTimer: 0,
     }
     this.peers.set(id, peer)
