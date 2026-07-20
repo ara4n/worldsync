@@ -54,7 +54,8 @@ export class Input {
   }
 
   private onDown(e: PointerEvent) {
-    if (e.button !== 0 || !this.out.ready()) return
+    // cmd/ctrl-drag belongs to the orbit controls
+    if (e.button !== 0 || e.metaKey || e.ctrlKey || !this.out.ready()) return
     const hit = this.pickBox(e)
     this.down = { x: e.clientX, y: e.clientY, t: performance.now(), onBox: !!hit }
     if (!hit) return

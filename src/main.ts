@@ -4,7 +4,7 @@ import { View } from './render'
 import { Input, type Emitter } from './input'
 import { UI } from './ui'
 import { entityFor } from './ecs'
-import type { Interaction } from './types'
+import { wallNow, type Interaction } from './types'
 
 const HASH_EVERY_TICKS = 60
 
@@ -31,10 +31,10 @@ async function main() {
     nextNetId: () => `${net.id}-${spawnCount++}`,
     emit(type, netId, data) {
       const i: Interaction = {
-        peer: net.id, order: net.order, seq: seq++, t: performance.now(),
+        peer: net.id, order: net.order, seq: seq++, t: wallNow(),
         type, netId, pos: data.pos, vel: data.vel, color: data.color,
       }
-      sim.insert(i, i.t)
+      sim.insert(i)
       net.broadcast({ kind: 'i', i })
     },
   }
@@ -56,11 +56,12 @@ async function main() {
     switch (msg.kind) {
       case 'i': {
         if (peer.excluded) return
-        const localT = msg.i.t - peer.offset
-        const age = performance.now() - localT
+        // The claimed timestamp is trusted as-is; age against our own wall
+        // clock decides staleness (peer.offset is reported, not applied).
+        const age = wallNow() - msg.i.t
         const limit = staleLimit(peer)
         if (age > limit) { strike(peer, `${age.toFixed(0)}ms old, limit ${limit.toFixed(0)}ms`); return }
-        if (!sim.insert(msg.i, localT)) strike(peer, 'beyond rollback history')
+        if (!sim.insert(msg.i)) strike(peer, 'beyond rollback history')
         break
       }
       case 'boot-req':
@@ -105,7 +106,7 @@ async function main() {
 
   let nextHashTick = HASH_EVERY_TICKS
   function frame() {
-    const now = performance.now()
+    const now = wallNow()
     if (sim.needsResim) {
       const presented = view.capture()
       if (sim.fold()) {

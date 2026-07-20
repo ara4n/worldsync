@@ -23,7 +23,8 @@ else to start. `npm run build && npm run preview` serves the production build
 with the same signaling.
 
 Controls: click the ground to spawn a box, drag a box to move it (physics
-resumes on release, with throw velocity), right-drag orbits, wheel zooms.
+resumes on release, with throw velocity), cmd-drag or right-drag orbits,
+wheel zooms.
 
 Test hooks: `npm run dev` then `node test/smoke.mjs` runs a two-browser
 Playwright smoke test (spawn replication plus a laggy drag that must converge).
@@ -35,15 +36,26 @@ Playwright smoke test (spawn replication plus a laggy drag that must converge).
   map, and the grab table into a 2 second ring buffer.
 - **Interactions, not state.** Each user action is `{peer, seq, t, type,
   netId, pos, vel?, color?}`, applied locally and broadcast on an ordered
-  reliable data channel. Sequence numbers dedupe; (tick, joinOrder, seq) gives
-  every peer the same total order.
-- **Clock sync.** Per-peer NTP-style ping/pong every second; the minimum-RTT
-  sample gives the clock offset used to map remote timestamps onto the local
-  tick timeline.
-- **Rollback.** A remote interaction older than the current tick restores the
-  snapshot at its tick and re-steps to the present, applying every timeline
-  entry (local and remote) on its tick. Body handles can change during a
-  replay, which is why the handle map is snapshotted too.
+  reliable data channel. Sequence numbers dedupe.
+- **Timestamps decide what happened when.** `t` is wall-clock epoch ms with
+  sub-ms precision (`performance.timeOrigin + performance.now()`; browsers do
+  not expose true nanoseconds). The claimed timestamp is trusted as-is to
+  place the event in a tick and to order events within a tick, with
+  (joinOrder, seq) breaking exact ties so all peers converge on one total
+  order. Clock skew is measured (NTP-style ping/pong, minimum-RTT sample) and
+  shown in the panel but deliberately not corrected for; the future plan is
+  to stamp interactions with a tick number and calibrate tick timelines
+  across peers instead.
+- **Rollback.** An interaction claiming a past tick restores the snapshot at
+  that tick and re-steps to the present, applying every timeline entry (local
+  and remote) on its tick, so it takes effect at the time the sender claimed.
+  An interaction claiming a time inside the current not-yet-simulated tick
+  needs no rollback (it is a depth-0 fold: that tick has not run yet); with
+  60Hz ticks that only happens for sub-16ms delivery, so any real network RTT
+  forces a genuine rollback for every received interaction. Claimed-future
+  timestamps are scheduled for their tick (clamped to 500ms ahead). Body
+  handles can change during a replay, which is why the handle map is
+  snapshotted alongside the physics state.
 - **Rubber-banding.** When a rollback rewrites the present, each mesh keeps an
   error offset (old presented pose minus corrected sim pose) that decays to
   zero over 100ms (tunable in the panel, 0 disables it).

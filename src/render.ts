@@ -29,8 +29,15 @@ export class View {
     this.controls.target.set(0, 0.5, 0)
     this.controls.enableDamping = true
     this.controls.maxPolarAngle = Math.PI / 2 - 0.05
-    // Left button is reserved for spawning and dragging boxes.
+    // Left button is reserved for spawning and dragging boxes, except while
+    // cmd (or ctrl) is held, which turns it into orbit for mac trackpads.
     this.controls.mouseButtons = { MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE } as any
+    const setOrbit = (on: boolean) => {
+      (this.controls.mouseButtons as any).LEFT = on ? THREE.MOUSE.ROTATE : undefined
+    }
+    addEventListener('keydown', e => { if (e.key === 'Meta' || e.key === 'Control') setOrbit(true) })
+    addEventListener('keyup', e => { if (e.key === 'Meta' || e.key === 'Control') setOrbit(false) })
+    addEventListener('blur', () => setOrbit(false))
 
     this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x30281e, 0.9))
     const sun = new THREE.DirectionalLight(0xffffff, 1.6)

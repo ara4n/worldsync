@@ -77,7 +77,7 @@ export class UI {
       <div class="hint">open this URL in another tab or browser to join (?room=name picks a room)</div>
       <div>entities ${s.entities} | tick ${s.tick} | rollbacks ${s.rollbacks} (last depth ${s.lastDepth})</div>
       ${s.peers.length
-        ? `<table><tr><th>peer</th><th>join</th><th>rtt</th><th>clk</th><th>strk</th><th>hash</th><th>status</th></tr>${rows}</table>`
+        ? `<table><tr><th>peer</th><th>join</th><th>rtt</th><th>skew</th><th>strk</th><th>hash</th><th>status</th></tr>${rows}</table>`
         : '<div class="hint">no peers yet</div>'}`
   }
 }

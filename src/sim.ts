@@ -1,19 +1,25 @@
 import RAPIER from '@dimforge/rapier3d-compat'
-import type { BootEntity, Interaction, Vec3 } from './types'
+import { wallNow, type BootEntity, type Interaction, type Vec3 } from './types'
 import { ensureEntity, entityFor, Position, Rotation, Tint } from './ecs'
 
 export const TICK_MS = 1000 / 60
 export const HISTORY_TICKS = 120 // 2s rollback window
 export const BOX_HALF = 0.5
 const MAX_CATCHUP = 15
+const MAX_FUTURE_TICKS = 30 // tolerate this much claimed-future clock skew
 const ZERO: Vec3 = { x: 0, y: 0, z: 0 }
 
 interface Grab { holder: string; order: number; target: Vec3 }
 interface HistoryRec { snap: Uint8Array; bodies: Map<string, number>; grabs: Map<string, Grab> }
-interface Entry { tick: number; order: number; seq: number; i: Interaction }
+interface Entry { tick: number; t: number; order: number; seq: number; i: Interaction }
 
+// The claimed wall-clock timestamp decides what happened when, both across
+// and within ticks; (order, seq) only breaks exact-timestamp ties so every
+// peer still converges on one total order.
 const before = (a: Entry, b: Entry) =>
-  a.tick !== b.tick ? a.tick < b.tick : a.order !== b.order ? a.order < b.order : a.seq < b.seq
+  a.tick !== b.tick ? a.tick < b.tick :
+  a.t !== b.t ? a.t < b.t :
+  a.order !== b.order ? a.order < b.order : a.seq < b.seq
 
 function cloneGrabs(m: Map<string, Grab>): Map<string, Grab> {
   const out = new Map<string, Grab>()
@@ -58,7 +64,7 @@ export class Sim {
     this.world.timestep = 1 / 60
     const ground = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed())
     this.world.createCollider(RAPIER.ColliderDesc.cuboid(20, 0.5, 20).setTranslation(0, -0.5, 0), ground)
-    this.epoch = performance.now()
+    this.epoch = wallNow()
   }
 
   get needsResim() { return this.resimFrom !== null }
@@ -72,17 +78,20 @@ export class Sim {
   }
 
   /**
-   * Queue an interaction at the tick matching its (already clock-mapped)
-   * local time. Returns false if it is older than the rollback window.
+   * Queue an interaction at the tick its claimed timestamp falls in. A past
+   * tick schedules a rollback; the current (not yet simulated) tick and
+   * claimed-future ticks are simply applied when that tick is stepped, which
+   * still honours the claimed time. Returns false if it is older than the
+   * rollback window.
    */
-  insert(i: Interaction, localT: number): boolean {
+  insert(i: Interaction): boolean {
     const key = `${i.peer}:${i.seq}`
     if (this.seen.has(key)) return true
-    let k = this.tickOf(localT)
-    if (k >= this.tick) k = this.tick // slightly-future (clock skew): apply asap
+    let k = this.tickOf(i.t)
+    if (k > this.tick + MAX_FUTURE_TICKS) k = this.tick + MAX_FUTURE_TICKS
     if (k < this.tick && !this.history.has(k)) return false
     this.seen.add(key)
-    const entry: Entry = { tick: k, order: i.order, seq: i.seq, i }
+    const entry: Entry = { tick: k, t: i.t, order: i.order, seq: i.seq, i }
     let lo = 0, hi = this.timeline.length
     while (lo < hi) { const m = (lo + hi) >> 1; if (before(this.timeline[m], entry)) lo = m + 1; else hi = m }
     this.timeline.splice(lo, 0, entry)

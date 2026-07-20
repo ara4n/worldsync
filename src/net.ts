@@ -1,4 +1,4 @@
-import type { DcMessage } from './types'
+import { wallNow, type DcMessage } from './types'
 
 const PING_MS = 1000
 const SAMPLES = 8
@@ -7,7 +7,7 @@ export interface Peer {
   id: string
   order: number
   rtt: number
-  offset: number // peer clock minus ours, ms
+  offset: number // measured wall-clock skew (peer minus us, ms); reported, not corrected for
   strikes: number
   excluded: boolean
   hashMatch: boolean | null
@@ -21,9 +21,11 @@ export interface Peer {
 /**
  * Full-mesh WebRTC data channels with ws signaling at /signal.
  * The joiner initiates offers to everyone already in the room, so there is
- * never offer glare. Also owns per-peer clock sync (NTP-style over ping/pong,
- * taking the minimum-RTT sample) and the artificial outgoing latency used to
- * provoke rollbacks when testing on one machine.
+ * never offer glare. Ping/pong measures per-peer RTT (for the staleness
+ * limit) and wall-clock skew (NTP-style, minimum-RTT sample; displayed but
+ * deliberately not corrected for, since claimed timestamps are trusted as-is
+ * for now). Also owns the artificial outgoing latency used to provoke
+ * rollbacks when testing on one machine.
  */
 export class Net {
   id = ''
@@ -129,8 +131,8 @@ export class Net {
       peer.connected = true
       this.onLog(`connected to ${peer.id} (#${peer.order})`)
       peer.pingTimer = window.setInterval(
-        () => this.sendTo(peer, { kind: 'ping', t0: performance.now() }), PING_MS)
-      this.sendTo(peer, { kind: 'ping', t0: performance.now() })
+        () => this.sendTo(peer, { kind: 'ping', t0: wallNow() }), PING_MS)
+      this.sendTo(peer, { kind: 'ping', t0: wallNow() })
       this.onPeerConnected(peer)
     }
     dc.onclose = () => {
@@ -141,11 +143,11 @@ export class Net {
       let msg: DcMessage
       try { msg = JSON.parse(String(ev.data)) } catch { return }
       if (msg.kind === 'ping') {
-        this.sendTo(peer, { kind: 'pong', t0: msg.t0, t1: performance.now() })
+        this.sendTo(peer, { kind: 'pong', t0: msg.t0, t1: wallNow() })
         return
       }
       if (msg.kind === 'pong') {
-        this.clockSample(peer, msg.t0, msg.t1, performance.now())
+        this.clockSample(peer, msg.t0, msg.t1, wallNow())
         return
       }
       this.onMessage(peer, msg)
