@@ -383,15 +383,15 @@ export class Sim {
     ctx.grabs.clear()
   }
 
-  // Grabbed bodies are pinned to their drag target each tick; contacts still
-  // resolve, so a held box shoves others out of the way.
+  // Held bodies are kinematic and follow their drag target each tick via
+  // setNextKinematicTranslation, so the solver integrates them WITH a
+  // velocity: contacts resolve against real motion and a held box plows
+  // through the pile instead of teleporting.
   private pinAndStep(ctx: Ctx) {
     for (const [netId, g] of ctx.grabs) {
       const b = bodyOf(ctx, netId)
       if (!b) continue
-      b.setTranslation(g.target, true)
-      b.setLinvel(ZERO, true)
-      b.setAngvel(ZERO, true)
+      b.setNextKinematicTranslation(g.target)
     }
     ctx.world.step()
   }
@@ -563,10 +563,12 @@ export class Sim {
         const b = bodyOf(ctx, i.netId)
         if (!b) return
         // The grabber teleports the body to their presented pose, which is the
-        // "override the rubber-banded view" rule from the design.
+        // "override the rubber-banded view" rule from the design. Held bodies
+        // become kinematic: the solver then sees their real velocity each
+        // tick (from setNextKinematicTranslation), so a held box shoves the
+        // pile properly instead of being a zero-velocity teleport.
+        b.setBodyType(RAPIER.RigidBodyType.KinematicPositionBased, true)
         b.setTranslation(i.pos, true)
-        b.setLinvel(ZERO, true)
-        b.setAngvel(ZERO, true)
         ctx.grabs.set(i.netId, { holder: i.peer, order: i.order, target: { ...i.pos } })
         return
       }
@@ -582,7 +584,12 @@ export class Sim {
         if (!g || g.holder !== i.peer) return
         ctx.grabs.delete(i.netId)
         const b = bodyOf(ctx, i.netId)
-        if (b && i.vel) b.setLinvel(i.vel, true)
+        if (!b) return
+        // Physics takes back over from the author's authoritative state.
+        b.setBodyType(RAPIER.RigidBodyType.Dynamic, true)
+        b.setTranslation(i.pos, true)
+        if (i.vel) b.setLinvel(i.vel, true)
+        b.setAngvel(ZERO, true)
         return
       }
       case 'boot': {
@@ -591,23 +598,25 @@ export class Sim {
         // no entities yet.
         if (!i.netId) return
         // The grab table crosses the seam too: a body mid-drag at boot time
-        // must be pinned from the same tick on every peer.
+        // must be pinned (kinematic) from the same tick on every peer.
         if (i.grab) ctx.grabs.set(i.netId, { holder: i.grab.holder, order: i.grab.order, target: { ...i.grab.target } })
         else ctx.grabs.delete(i.netId)
         const b = bodyOf(ctx, i.netId)
         if (b) {
+          b.setBodyType(i.grab ? RAPIER.RigidBodyType.KinematicPositionBased : RAPIER.RigidBodyType.Dynamic, true)
           b.setTranslation(i.pos, true)
           if (i.rot) b.setRotation(i.rot, true)
           if (i.vel) b.setLinvel(i.vel, true)
           if (i.angvel) b.setAngvel(i.angvel, true)
           return
         }
-        const body = ctx.world.createRigidBody(
-          RAPIER.RigidBodyDesc.dynamic().setCanSleep(false)
-            .setTranslation(i.pos.x, i.pos.y, i.pos.z)
-            .setRotation(i.rot ?? { x: 0, y: 0, z: 0, w: 1 })
-            .setLinvel(i.vel?.x ?? 0, i.vel?.y ?? 0, i.vel?.z ?? 0)
-            .setAngvel(i.angvel ?? ZERO))
+        const desc = (i.grab ? RAPIER.RigidBodyDesc.kinematicPositionBased() : RAPIER.RigidBodyDesc.dynamic())
+          .setCanSleep(false)
+          .setTranslation(i.pos.x, i.pos.y, i.pos.z)
+          .setRotation(i.rot ?? { x: 0, y: 0, z: 0, w: 1 })
+          .setLinvel(i.vel?.x ?? 0, i.vel?.y ?? 0, i.vel?.z ?? 0)
+          .setAngvel(i.angvel ?? ZERO)
+        const body = ctx.world.createRigidBody(desc)
         ctx.world.createCollider(boxCollider(), body)
         ctx.bodies.set(i.netId, body.handle)
         this.ecs.ensureEntity(i.netId, i.color ?? 0xffffff)
