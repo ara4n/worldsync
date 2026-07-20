@@ -20,7 +20,7 @@ async function open(name) {
     errors.push(`${name}: ${m.text()} (${url})`)
   })
   await page.goto(`${base}/?room=${room}`)
-  await page.waitForFunction(() => window.__jig && window.__jig.net.id !== '', null, { timeout: 15000 })
+  await page.waitForFunction(() => window.__jig && window.__jig.session && window.__jig.session.ready(), null, { timeout: 15000 })
   return page
 }
 
@@ -69,7 +69,7 @@ console.log(`divergence ${dist.toFixed(3)}m, rollbacks on b: ${rollbacksB}`)
 
 const getLog = page => page.evaluate(() =>
   JSON.stringify([...window.__jig.sim.inputLog].sort((x, y) =>
-    x.tick - y.tick || x.t - y.t || x.order - y.order || x.seq - y.seq)))
+    x.tick - y.tick || x.order - y.order || x.seq - y.seq)))
 const [logA, logB] = await Promise.all([getLog(a), getLog(b)])
 console.log(`input logs ${logA === logB ? 'identical' : 'DIFFER'} (${JSON.parse(logA).length} entries)`)
 

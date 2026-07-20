@@ -1,9 +1,8 @@
 /**
- * Shared timebase for interaction timestamps: wall-clock epoch ms with
- * sub-ms precision. Browsers cap out around microsecond granularity (no true
- * nanoseconds), which is plenty to order events. Peers trust each other's
- * wall clocks for tick placement for now; a future version should carry the
- * tick number instead and calibrate tick timelines explicitly.
+ * Local monotonic-ish clock in ms, used only as the raw material the
+ * TickClock maps onto the room's shared tick grid. Never trusted across the
+ * wire: interactions carry tick numbers, and each peer calibrates its tick
+ * clock against the room's senior peer instead of trusting wall stamps.
  */
 export const wallNow = () => performance.timeOrigin + performance.now()
 
@@ -21,7 +20,7 @@ export interface Interaction {
   peer: string
   order: number // join order of the sender, used as a deterministic tie-break
   seq: number   // per-sender sequence number, used for dedup
-  t: number     // claimed wall-clock time of the interaction (wallNow ms)
+  tick: number  // author-stamped tick this op belongs to, on the shared grid
   type: InteractionType
   netId: string
   pos: Vec3
@@ -29,6 +28,7 @@ export interface Interaction {
   rot?: Quat    // boot only
   angvel?: Vec3 // boot only
   grab?: { holder: string; order: number; target: Vec3 } // boot only
+  from?: number // boot only: tick of the snapshot the dump was read from
   color?: number
 }
 
@@ -44,7 +44,10 @@ export interface BootEntity {
 
 export type DcMessage =
   | { kind: 'ping'; t0: number }
-  | { kind: 'pong'; t0: number; t1: number }
+  // t1 is the responder's local ms (for NTP-style skew display); tt is its
+  // fractional tick-clock reading at the same instant, the datum a joiner
+  // calibrates its own tick clock against.
+  | { kind: 'pong'; t0: number; t1: number; tt: number }
   | { kind: 'i'; i: Interaction }
   | { kind: 'boot-req' }
   // Bit-exact per-tick hashes for a settled range of the global tick grid:

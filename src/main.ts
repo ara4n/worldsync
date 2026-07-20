@@ -1,5 +1,5 @@
 import { Vector3 } from 'three'
-import { Sim, TICK_MS } from './sim'
+import { Sim } from './sim'
 import { Net } from './net'
 import { Session } from './session'
 import { View } from './render'
@@ -62,7 +62,7 @@ async function main() {
     }
   }
 
-  net.onJoined = (id, order) => session.identity(id, order)
+  net.onJoined = (id, order, alone) => session.identity(id, order, alone)
   net.onMessage = (peer, msg) => session.receive(peer.id, msg)
   net.onPeerConnected = peer => session.peerConnected(peer.id, peer.order)
   net.onPeerLeft = id => session.peerLeft(id)
@@ -76,7 +76,6 @@ async function main() {
 
   net.connect(room)
 
-  const startTick = session.startTick
   function frame() {
     const now = wallNow()
     if (sim.needsResim) {
@@ -86,20 +85,22 @@ async function main() {
         view.applyCorrections(presented, now, input.draggedEid)
       }
     }
-    session.advance(now)
+    session.advance()
     sim.mirror()
-    const alpha = Math.min(Math.max((now - sim.tick * TICK_MS) / TICK_MS, 0), 1)
+    const alpha = session.calibrated
+      ? Math.min(Math.max(session.tickTimeNow(now) - sim.tick, 0), 1)
+      : 0
     view.frame(now, alpha)
     ui.maybe(now, () => ({
       room, id: session.id, order: session.order,
-      entities: sim.bodies.size, tick: sim.tick - startTick, stepMs: sim.stepMs,
+      entities: sim.bodies.size, tick: sim.tick - session.startTick, stepMs: sim.stepMs,
       perf: sim.perf, norm: sim.cadence > 1 ? `${sim.normalizeMode}/${sim.cadence}` : sim.normalizeMode,
       rollbacks: sim.rollbacks, lastDepth: sim.lastReplayDepth,
       peers: [...session.peers.values()].map(p => ({
         id: p.id, order: p.order,
         connected: net.peers.get(p.id)?.connected ?? false,
         rtt: p.rtt, offset: p.offset, strikes: p.strikes, excluded: p.excluded,
-        sync: p.divergedAt !== null ? `≠@${p.divergedAt - startTick}` : p.checked ? '=' : '-',
+        sync: p.divergedAt !== null ? `≠@${p.divergedAt - session.startTick}` : p.checked ? '=' : '-',
       })),
     }))
     requestAnimationFrame(frame)
@@ -114,7 +115,7 @@ async function main() {
   ticker.onmessage = () => {
     if (!document.hidden) return
     session.foldIfNeeded()
-    session.advance(wallNow())
+    session.advance()
     sim.mirror()
   }
 

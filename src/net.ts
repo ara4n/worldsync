@@ -24,7 +24,8 @@ export class Net {
   sendDelayMs = 0
   lagPings = true // uncheck in the UI to make our lag look like backdating
   peers = new Map<string, Peer>()
-  onJoined: (id: string, order: number) => void = () => {}
+  /** alone: the room had no other members at join time */
+  onJoined: (id: string, order: number, alone: boolean) => void = () => {}
   onMessage: (peer: Peer, msg: DcMessage) => void = () => {}
   onPeerConnected: (peer: Peer) => void = () => {}
   onPeerLeft: (id: string) => void = () => {}
@@ -54,7 +55,7 @@ export class Net {
     this.id = 'solo' + Math.random().toString(36).slice(2, 6)
     this.order = 1000 + Math.floor(Math.random() * 1e6)
     this.onLog('signaling unavailable, running solo')
-    this.onJoined(this.id, this.order)
+    this.onJoined(this.id, this.order, true)
   }
 
   private async onSignal(msg: any) {
@@ -63,7 +64,7 @@ export class Net {
         this.id = msg.id
         this.order = msg.order
         this.onLog(`joined as ${msg.id} (#${msg.order})`)
-        this.onJoined(this.id, this.order)
+        this.onJoined(this.id, this.order, msg.peers.length === 0)
         for (const p of msg.peers) this.makePeer(p.id, p.order, true)
         break
       case 'peer-joined':

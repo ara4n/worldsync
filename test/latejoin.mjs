@@ -12,7 +12,7 @@ const browser = await chromium.launch({ headless: false })
 async function open() {
   const page = await browser.newPage()
   await page.goto(`${base}/?room=${room}`)
-  await page.waitForFunction(() => window.__jig && window.__jig.net.id !== '', null, { timeout: 15000 })
+  await page.waitForFunction(() => window.__jig && window.__jig.session && window.__jig.session.ready(), null, { timeout: 15000 })
   return page
 }
 
@@ -23,11 +23,8 @@ function fail(msg) {
 
 const a = await open()
 await a.evaluate(() => {
-  const { sim, net } = window.__jig
-  for (let k = 0; k < 8; k++) sim.insert({
-    peer: net.id, order: net.order, seq: 90000 + k,
-    t: performance.timeOrigin + performance.now(),
-    type: 'spawn', netId: `lj-${k}`,
+  const { session } = window.__jig
+  for (let k = 0; k < 8; k++) session.emit('spawn', `lj-${k}`, {
     pos: { x: (k % 4) * 1.2 - 2, y: 2 + Math.floor(k / 4), z: 0 },
     color: 0x888888,
   })
@@ -48,14 +45,8 @@ await b.waitForFunction(() => [...window.__jig.net.peers.values()].some(p => p.c
 // Post-seam activity: B drops a box onto the pile.
 await b.waitForTimeout(1500)
 await b.evaluate(() => {
-  const { sim, net } = window.__jig
-  const i = {
-    peer: net.id, order: net.order, seq: 91000,
-    t: performance.timeOrigin + performance.now(),
-    type: 'spawn', netId: `${net.id}-lj`, pos: { x: -1.4, y: 3, z: 0.3 }, color: 0x22cc88,
-  }
-  sim.insert(i)
-  net.broadcast({ kind: 'i', i })
+  const { session } = window.__jig
+  session.emit('spawn', `${session.id}-lj`, { pos: { x: -1.4, y: 3, z: 0.3 }, color: 0x22cc88 })
 })
 console.log('waiting for settled-hash comparison on both sides...')
 

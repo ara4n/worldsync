@@ -18,7 +18,7 @@ async function open(name) {
   const page = await browser.newPage()
   page.on('pageerror', e => console.error(`${name} pageerror:`, String(e)))
   await page.goto(`${base}/?room=${room}&norm=${norm}&cad=${cad}`)
-  await page.waitForFunction(() => window.__jig && window.__jig.net.id !== '', null, { timeout: 15000 })
+  await page.waitForFunction(() => window.__jig && window.__jig.session && window.__jig.session.ready(), null, { timeout: 15000 })
   return page
 }
 

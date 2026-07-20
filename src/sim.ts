@@ -1,10 +1,14 @@
 import RAPIER from '@dimforge/rapier3d-deterministic-compat'
-import { wallNow, type BootEntity, type Interaction, type Quat, type Vec3 } from './types'
+import { type BootEntity, type Interaction, type Quat, type Vec3 } from './types'
 import { createEcsStore } from './ecs'
 
 export const TICK_HZ = 60
 export const TICK_MS = 1000 / TICK_HZ
 export const HISTORY_TICKS = 300 // 5s rollback window, so high fake latency still folds correctly
+// Boot seams are stamped this far ahead of the sender's present so no peer
+// has already passed the seam tick when it arrives. Kept below
+// MAX_FUTURE_TICKS so third peers never clamp it.
+export const BOOT_LEAD_TICKS = 12
 export const BOX_HALF = 0.5
 const MAX_CATCHUP = 120
 const MAX_FUTURE_TICKS = 30 // tolerate ~500ms of claimed-future clock skew
@@ -14,7 +18,6 @@ const INPUT_LOG_MAX = 100000
 export interface InputLogEntry {
   tick: number
   claimedTick: number // differs from tick only when clamped (anomaly)
-  t: number
   peer: string
   order: number
   seq: number
@@ -30,7 +33,7 @@ const ZERO: Vec3 = { x: 0, y: 0, z: 0 }
 
 interface Grab { holder: string; order: number; target: Vec3 }
 interface HistoryRec { snap: Uint8Array; bodies: Map<string, number>; grabs: Map<string, Grab> }
-interface Entry { tick: number; t: number; order: number; seq: number; i: Interaction }
+interface Entry { tick: number; order: number; seq: number; i: Interaction }
 
 /** Everything a simulation step touches; the live sim and scratch replay
  * verification worlds both step through the same code via one of these. */
@@ -63,12 +66,11 @@ function hashCtx(ctx: Ctx): number {
   return h >>> 0
 }
 
-// The claimed wall-clock timestamp decides what happened when, both across
-// and within ticks; (order, seq) only breaks exact-timestamp ties so every
-// peer still converges on one total order.
+// Total order on the shared timeline: the author-stamped tick decides what
+// happened when; (order, seq) breaks within-tick ties deterministically.
+// All-integer keys, so no float formatting can perturb the order.
 const before = (a: Entry, b: Entry) =>
   a.tick !== b.tick ? a.tick < b.tick :
-  a.t !== b.t ? a.t < b.t :
   a.order !== b.order ? a.order < b.order : a.seq < b.seq
 
 function cloneGrabs(m: Map<string, Grab>): Map<string, Grab> {
@@ -122,11 +124,12 @@ function resetSolvers(world: RAPIER.World) {
 /**
  * Locally simulated Rapier world with a rollback window.
  *
- * The tick grid is global: tick K covers wall-clock time [K*TICK_MS,
- * (K+1)*TICK_MS), so every peer bins a claimed timestamp into the same tick
- * (to the extent wall clocks agree). Combined with the deterministic Rapier
- * build and physics being driven only by timeline interactions, peers step
- * the same inputs on the same ticks and should converge exactly.
+ * The tick grid is shared by the whole room: ops carry the tick number they
+ * belong to, stamped by their author, and every peer folds an op at exactly
+ * that tick. What tick "now" is comes from the Session's calibrated tick
+ * clock, not from wall time. Combined with the deterministic Rapier build
+ * and physics being driven only by timeline interactions, peers step the
+ * same inputs on the same ticks and converge exactly.
  *
  * Convention: `tick` is the tick about to be simulated; world state is "the
  * beginning of tick N". history[N] snapshots that state, so folding in an
@@ -190,17 +193,31 @@ export class Sim {
   private seen = new Set<string>()
   private resimFrom: number | null = null
 
-  async init(now = wallNow()) {
+  async init() {
     await RAPIER.init()
     this.world = buildWorld()
     PipelineCtor = this.world.physicsPipeline.constructor as typeof PipelineCtor
     CcdCtor = this.world.ccdSolver.constructor as typeof CcdCtor
-    this.tick = this.tickOf(now)
+  }
+
+  /** First tick this sim ever simulated; ops stamped earlier are pre-history
+   * here (the boot seam covers their effects) and are logged but not run. */
+  startTick = 0
+
+  /** Begin simulating at a calibrated grid tick; call once, before stepping.
+   * Snapshots immediately (start ticks are rarely cadence-aligned) so folds
+   * have a floor from the first tick, not from the next cadence point. */
+  startAt(tick: number) {
+    this.tick = tick
+    this.startTick = tick
+    this.history.set(tick, {
+      snap: this.world.takeSnapshot(),
+      bodies: new Map(this.bodies),
+      grabs: cloneGrabs(this.grabs),
+    })
   }
 
   get needsResim() { return this.resimFrom !== null }
-
-  tickOf(t: number) { return Math.floor(t / TICK_MS) }
 
   body(netId: string): RAPIER.RigidBody | null {
     const h = this.bodies.get(netId)
@@ -209,22 +226,27 @@ export class Sim {
   }
 
   /**
-   * Queue an interaction at the tick its claimed timestamp falls in. A past
-   * tick schedules a rollback; the current (not yet simulated) tick and
-   * claimed-future ticks are simply applied when that tick is stepped, which
-   * still honours the claimed time. Ticks older than the available snapshot
-   * history (young sim, just after a sleep jump) clamp to the oldest
-   * snapshot; genuinely stale peers are already filtered by the RTT-based
-   * age check before this is called.
+   * Queue an interaction at its author-stamped tick. A past tick schedules a
+   * rollback; the current (not yet simulated) tick and claimed-future ticks
+   * are simply applied when that tick is stepped. Ticks older than the
+   * available snapshot history (young sim, just after a sleep jump) clamp to
+   * the oldest snapshot; genuinely stale peers are filtered by attestation
+   * before this is called.
    * Returns the tick the interaction was scheduled at (null for a dup).
    */
   insert(i: Interaction): number | null {
     const key = `${i.peer}:${i.seq}`
     if (this.seen.has(key)) return null
-    const claimedTick = this.tickOf(i.t)
+    const claimedTick = i.tick
     let k = claimedTick
     if (k > this.tick + MAX_FUTURE_TICKS) k = this.tick + MAX_FUTURE_TICKS
-    if (k < this.tick) {
+    // Ops predating our start are pre-history: their effects reach us via
+    // the boot seam instead, so they enter the log and timeline at their
+    // true tick but are never applied (no fold can reach below startTick).
+    // This keeps the input log identical across peers with different join
+    // times. Clamping is reserved for genuine window overruns.
+    const preHistory = k < this.startTick
+    if (!preHistory && k < this.tick) {
       const oldest = this.oldestSnapTick()
       k = oldest === null ? this.tick : Math.max(k, oldest)
     }
@@ -234,15 +256,15 @@ export class Sim {
     this.seen.add(key)
     if (this.inputLog.length < INPUT_LOG_MAX) {
       this.inputLog.push({
-        tick: k, claimedTick, t: i.t, peer: i.peer, order: i.order, seq: i.seq,
+        tick: k, claimedTick, peer: i.peer, order: i.order, seq: i.seq,
         type: i.type, netId: i.netId, pos: i.pos, vel: i.vel, rot: i.rot, angvel: i.angvel, color: i.color,
       })
     }
-    const entry: Entry = { tick: k, t: i.t, order: i.order, seq: i.seq, i }
+    const entry: Entry = { tick: k, order: i.order, seq: i.seq, i }
     let lo = 0, hi = this.timeline.length
     while (lo < hi) { const m = (lo + hi) >> 1; if (before(this.timeline[m], entry)) lo = m + 1; else hi = m }
     this.timeline.splice(lo, 0, entry)
-    if (k < this.tick) this.resimFrom = this.resimFrom === null ? k : Math.min(this.resimFrom, k)
+    if (!preHistory && k < this.tick) this.resimFrom = this.resimFrom === null ? k : Math.min(this.resimFrom, k)
     return k
   }
 
@@ -256,10 +278,11 @@ export class Sim {
   /** Roll back and replay if any past-tick interactions arrived. Returns true if state was rewritten. */
   fold(): boolean {
     if (this.resimFrom === null) return false
-    // Round down to a cadence point: insert() clamped to >= the oldest
-    // snapshot tick, which is itself aligned, so the aligned tick has a
-    // snapshot too.
-    const k = this.resimFrom - (this.resimFrom % this.cadence)
+    // Round down to a cadence point, but never below the oldest snapshot:
+    // the startAt() snapshot is usually off-grid, so a young sim's floor is
+    // the start tick itself. Replays from there normalise at the same
+    // aligned ticks the live path did, so the paths stay bit-identical.
+    const k = Math.max(this.resimFrom - (this.resimFrom % this.cadence), this.oldestSnapTick()!)
     this.resimFrom = null
     const target = this.tick
     const rec = this.history.get(k)!
@@ -275,15 +298,17 @@ export class Sim {
     return true
   }
 
-  advance(now: number) {
+  /** Step to the calibrated tick clock's current reading (fractional ticks). */
+  advance(tickTime: number) {
+    const target = Math.floor(tickTime)
     let n = 0
-    while (this.tickOf(now) > this.tick && n < MAX_CATCHUP) { this.step(); n++ }
-    // Stalled hard: jump to the current global tick instead of grinding
+    while (target > this.tick && n < MAX_CATCHUP) { this.step(); n++ }
+    // Stalled hard: jump to the current grid tick instead of grinding
     // through the backlog. Old snapshots are from before the gap and cannot
     // seed a replay across it, so drop them.
-    if (this.tickOf(now) > this.tick) {
-      const skipped = this.tickOf(now) - this.tick
-      this.tick = this.tickOf(now)
+    if (target > this.tick) {
+      const skipped = target - this.tick
+      this.tick = target
       this.history.clear()
       this.anomaly(`jumped ${skipped} ticks without simulating; sims will diverge`)
     }
@@ -292,6 +317,33 @@ export class Sim {
   private liveCtx(): Ctx { return { world: this.world, bodies: this.bodies, grabs: this.grabs } }
 
   private applyTick(ctx: Ctx, tick: number) {
+    if (this.tickHasBoot(tick)) {
+      // A boot seam: the world was just rebuilt from scratch (see step).
+      // First the boot entries recreate the dump (state at its `from`
+      // snapshot tick), then every non-boot op stamped in [from, seam) is
+      // applied AGAIN: their first application was erased by the rebuild
+      // (or, on the joiner, never ran at all because the op predates its
+      // start), so this is where ops that raced the join take effect. The
+      // timeline is identical on every peer, so so is this replay.
+      let from = tick - BOOT_LEAD_TICKS
+      for (const e of this.timeline) {
+        if (e.tick > tick) break
+        if (e.tick === tick && e.i.type === 'boot' && e.i.from !== undefined) from = Math.min(from, e.i.from)
+      }
+      for (const e of this.timeline) {
+        if (e.tick > tick) break
+        if (e.tick === tick && e.i.type === 'boot') this.applyTo(ctx, e.i)
+      }
+      for (const e of this.timeline) {
+        if (e.tick >= tick) break
+        if (e.tick >= from && e.i.type !== 'boot') this.applyTo(ctx, e.i)
+      }
+      for (const e of this.timeline) {
+        if (e.tick > tick) break
+        if (e.tick === tick && e.i.type !== 'boot') this.applyTo(ctx, e.i)
+      }
+      return
+    }
     for (const e of this.timeline) {
       if (e.tick > tick) break
       if (e.tick === tick) this.applyTo(ctx, e.i)
@@ -534,6 +586,10 @@ export class Sim {
         return
       }
       case 'boot': {
+        // An empty netId is the seam marker for an empty dump: it exists so
+        // the seam (rebuild + raced-op replay) happens even in a room with
+        // no entities yet.
+        if (!i.netId) return
         // The grab table crosses the seam too: a body mid-drag at boot time
         // must be pinned from the same tick on every peer.
         if (i.grab) ctx.grabs.set(i.netId, { holder: i.grab.holder, order: i.grab.order, target: { ...i.grab.target } })
@@ -592,25 +648,40 @@ export class Sim {
     }
   }
 
-  dump(): BootEntity[] {
+  /**
+   * Boot dump for a joiner, read from the NEWEST stored snapshot rather than
+   * the live world: the live world's state can be mid-tick relative to the
+   * timeline (an op inserted but not yet stepped would be silently missing),
+   * while a snapshot is exactly "state at start of tick `from`". Ops stamped
+   * at or after `from` are re-applied on top of the seam by applyTick, so
+   * nothing that races the join is lost.
+   */
+  dumpSeam(): { from: number; entities: BootEntity[] } {
+    let from = this.tick
+    let rec: HistoryRec | null = null
+    for (const [k, r] of this.history) { if (k <= this.tick) { from = k; rec = r } }
     const out: BootEntity[] = []
-    for (const [netId, h] of this.bodies) {
-      const b = this.world.getRigidBody(h)
-      const eid = this.ecs.entityFor(netId)
-      if (!b || eid === undefined) continue
-      const q = b.rotation()
-      const g = this.grabs.get(netId)
-      out.push({
-        netId,
-        color: this.ecs.Tint.value[eid],
-        pos: vec(b.translation()),
-        rot: { x: q.x, y: q.y, z: q.z, w: q.w },
-        linvel: vec(b.linvel()),
-        angvel: vec(b.angvel()),
-        grab: g && { holder: g.holder, order: g.order, target: { ...g.target } },
-      })
+    if (rec) {
+      const world = RAPIER.World.restoreSnapshot(rec.snap)
+      for (const [netId, h] of rec.bodies) {
+        const b = world.getRigidBody(h)
+        const eid = this.ecs.entityFor(netId)
+        if (!b || eid === undefined) continue
+        const q = b.rotation()
+        const g = rec.grabs.get(netId)
+        out.push({
+          netId,
+          color: this.ecs.Tint.value[eid],
+          pos: vec(b.translation()),
+          rot: { x: q.x, y: q.y, z: q.z, w: q.w },
+          linvel: vec(b.linvel()),
+          angvel: vec(b.angvel()),
+          grab: g && { holder: g.holder, order: g.order, target: { ...g.target } },
+        })
+      }
+      world.free()
     }
-    return out
+    return { from, entities: out }
   }
 
 }

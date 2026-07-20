@@ -12,21 +12,18 @@ async function measure(query) {
   const page = await browser.newPage()
   const room = 'perf-' + Math.random().toString(36).slice(2, 8)
   await page.goto(`${base}/?room=${room}&${query}`)
-  await page.waitForFunction(() => window.__jig && window.__jig.net.id !== '', null, { timeout: 15000 })
+  await page.waitForFunction(() => window.__jig && window.__jig.session && window.__jig.session.ready(), null, { timeout: 15000 })
   // Inject spawns straight into the sim (no peer, no pointer): a 1.05m grid
   // at three heights collapses into one contact-rich resting pile.
   await page.evaluate(n => {
-    const { sim, net } = window.__jig
+    const { session } = window.__jig
     // Square-ish grid sized to n, capped at the 40x40 ground; overflow goes
     // into extra height layers.
     const side = Math.min(Math.ceil(Math.sqrt(n)), 36)
     let k = 0
     while (k < n) {
       const gx = k % side, gz = Math.floor(k / side) % side, layer = Math.floor(k / (side * side))
-      sim.insert({
-        peer: net.id, order: net.order, seq: 500000 + k,
-        t: performance.timeOrigin + performance.now(),
-        type: 'spawn', netId: `perf-${k}`,
+      session.emit('spawn', `perf-${k}`, {
         pos: { x: (gx - side / 2) * 1.05, y: 2.5 + (k % 3) + layer * 1.5, z: (gz - side / 2) * 1.05 },
         color: 0x888888,
       })

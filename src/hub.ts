@@ -43,10 +43,16 @@ export const createHub = (defaultLatencyMs = 0) => {
       links.set(a + '>' + b, ms)
       links.set(b + '>' + a, ms)
     },
-    /** create a peer and full-mesh it with everyone already present */
-    async join(id: string): Promise<HubPeer> {
+    /** one-way latency override (an asymmetric or lagging sender) */
+    linkOneWay(from: string, to: string, ms: number) {
+      links.set(from + '>' + to, ms)
+    },
+    /** create a peer and full-mesh it with everyone already present.
+     * clockWarp distorts this peer's LOCAL clock (skew, drift) to prove
+     * calibration absorbs it; the tick grid must not care. */
+    async join(id: string, clockWarp: (nowMs: number) => number = n => n): Promise<HubPeer> {
       const sim = new Sim()
-      await sim.init(now)
+      await sim.init()
       const me: HubPeer = { id, order: ++order, sim, session: null as unknown as Session }
       me.session = new Session(
         sim,
@@ -56,8 +62,8 @@ export const createHub = (defaultLatencyMs = 0) => {
             if (to === null || to === p.id) deliverTo(id, p, msg)
           }
         },
-        () => now)
-      me.session.identity(id, me.order)
+        () => clockWarp(now))
+      me.session.identity(id, me.order, peers.length === 0)
       for (const p of peers) {
         p.session.peerConnected(id, me.order)
         me.session.peerConnected(p.id, p.order)
@@ -78,7 +84,7 @@ export const createHub = (defaultLatencyMs = 0) => {
         }
         for (const p of peers) {
           p.session.foldIfNeeded()
-          p.session.advance(now)
+          p.session.advance()
         }
         onTick?.(i)
       }
