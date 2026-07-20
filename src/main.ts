@@ -191,6 +191,7 @@ async function main() {
   const syncScene = () => {
     const url = sim.sceneUrl
     view.setScene(url ? cachedScene(url)?.object ?? null : null)
+    view.setGroundVisible(!url)
     if (!url || cachedScene(url) || !wp || sceneFetches.has(url)) return
     sceneFetches.add(url)
     const m = net as import('./matrix/net').MatrixNet
@@ -375,6 +376,7 @@ async function main() {
     }
     session.advance()
     sim.mirror()
+    view.syncBodies(sim.bodies.keys())
     syncScene()
     syncScript()
     const alpha = session.calibrated

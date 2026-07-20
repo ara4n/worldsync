@@ -203,14 +203,40 @@ async function glbSceneConverges() {
   const y = a.sim.body(id)!.translation().y
   check(Math.abs(y - 1.5) < 0.05, `box rests on the scene shelf, not the ground (y=${y.toFixed(3)})`)
 
-  // late joiner adopts the scene from "room state" before calibrating, so
-  // its boot-seam world matches the seniors' from the first snapshot
+  // the ground plane yields to the scene: a box off the shelf falls forever
+  const off = a.session.nextNetId()
+  a.session.emit('spawn', off, { pos: { x: 10, y: 3, z: 0 } })
+  hub.run(2 * S)
+  check(a.sim.body(off)!.translation().y < -5,
+    `ground yields to the scene (off-shelf box fell to y=${a.sim.body(off)!.translation().y.toFixed(1)})`)
+
+  // clearing the scene is a deterministic world RESET: bodies dropped,
+  // ground back
+  a.session.emit('scene', '', { pos: { x: 0, y: 0, z: 0 } }, a.sim.tick + 12)
+  hub.run(1 * S)
+  check(a.sim.bodies.size === 0 && b.sim.bodies.size === 0,
+    `scene clear reset the world (a ${a.sim.bodies.size}, b ${b.sim.bodies.size} bodies)`)
+  const back = a.session.nextNetId()
+  a.session.emit('spawn', back, { pos: { x: 5, y: 2, z: 0 } })
+  hub.run(2 * S)
+  check(Math.abs(a.sim.body(back)!.translation().y - 0.5) < 0.05,
+    `ground returns when the scene clears (y=${a.sim.body(back)!.translation().y.toFixed(3)})`)
+
+  // reload the scene (the state event still names it), then a late joiner
+  // adopts it from "room state" before calibrating, so its boot-seam world
+  // matches the seniors' from the first snapshot
+  a.session.emit('scene', url, { pos: { x: 0, y: 0, z: 0 } }, a.sim.tick + 12)
+  hub.run(1 * S)
+  check(a.sim.bodies.size === 0, 'scene reload reset the world again')
   const c = await hub.join('c')
   c.sim.registerSceneGeometry(url, geom)
   c.sim.adoptScene(url)
-  hub.run(8 * S)
-  const cy = c.sim.body(id)!.translation().y
-  check(Math.abs(cy - 1.5) < 0.05, `joiner sees the box on the shelf too (y=${cy.toFixed(3)})`)
+  hub.run(2 * S)
+  const post = a.session.nextNetId()
+  a.session.emit('spawn', post, { pos: { x: 0, y: 3, z: 0 } })
+  hub.run(6 * S)
+  const cy = c.sim.body(post)!.translation().y
+  check(Math.abs(cy - 1.5) < 0.05, `joiner sees a box land on the shelf too (y=${cy.toFixed(3)})`)
   const settled = a.sim.tick - 400
   for (const [x, z, name] of [[a, b, 'a/b'], [a, c, 'a/c'], [b, c, 'b/c']] as const) {
     check(hashDiff(x, z, settled).length === 0, `${name}: no divergent settled ticks`)

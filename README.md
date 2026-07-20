@@ -62,8 +62,12 @@ host's MSC4039 media actions, points the room's
 every peer swaps in the scene's colliders on the same tick. Each peer
 bakes the GLB's meshes into one fixed trimesh (deterministically: same
 bytes, same traversal, f64 transforms rounded to f32 identically), so
-boxes rest on and roll off the scene bit-identically everywhere. The
-scene rides history snapshots and the boot seam like any other sim state;
+boxes rest on and roll off the scene bit-identically everywhere. A scene
+(re)load is a deterministic world RESET at the op's tick: every body is
+dropped (no stale pile floating inside the new world) and the default
+ground plane yields to the scene's own floors, returning when the scene
+is cleared. The scene rides history snapshots and the boot seam like any
+other sim state;
 late joiners fetch and adopt it from room state before tick calibration,
 and a peer whose download outlives the op's lead applies the op hollow
 (one logged anomaly) and heals by folding from the op's tick once the
@@ -367,8 +371,7 @@ serialisation hazards stay exercised.
   spurious strike (the 10-strike threshold absorbs it).
 - An op that folds below the boot dump's snapshot tick after the dump was
   sent is erased by the seam on every peer alike: consistent, but a
-  sufficiently laggy op racing a join can still vanish (its mesh lingers,
-  as nothing deletes render entities yet).
+  sufficiently laggy op racing a join can still vanish.
 - No resync after divergence; the hash column only reports it.
 - No kick mechanism; exclusion is local and one-way.
 - No entity deletion, no interest management, JSON on the wire: all fine at

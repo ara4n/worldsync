@@ -92,6 +92,10 @@ function boxCollider() {
 
 const vec = (v: { x: number; y: number; z: number }): Vec3 => ({ x: v.x, y: v.y, z: v.z })
 
+/** The ground body's handle: identical in every world buildWorld makes
+ * (first body in a fresh world) and stable across snapshot restore. */
+let GROUND_HANDLE = -1
+
 /** Fresh world with just the ground, the common ancestor every peer can
  * rebuild identically (init and boot-seam resets both start here). */
 function buildWorld(): RAPIER.World {
@@ -99,6 +103,7 @@ function buildWorld(): RAPIER.World {
   world.timestep = 1 / TICK_HZ
   const ground = world.createRigidBody(RAPIER.RigidBodyDesc.fixed())
   world.createCollider(RAPIER.ColliderDesc.cuboid(20, 0.5, 20).setTranslation(0, -0.5, 0), ground)
+  GROUND_HANDLE = ground.handle
   return world
 }
 
@@ -333,6 +338,16 @@ export class Sim {
 
   /** Swap the fixed trimesh in `ctx` to `url` ('' clears it). */
   private addScene(ctx: Ctx, url: string, tick: number) {
+    this.swapScene(ctx, url, tick)
+    // The ground plane yields to a loaded scene: real worlds bring their
+    // own floors, and a slab at y=0 would slice through them. Toggled
+    // rather than removed so every handle stays stable; the enabled flag
+    // is serialised, so fold restores preserve it, and this runs inside
+    // op application, so every peer flips it on the same tick.
+    ctx.world.getRigidBody(GROUND_HANDLE)?.collider(0)?.setEnabled(!(ctx.scene && ctx.scene.body !== -1))
+  }
+
+  private swapScene(ctx: Ctx, url: string, tick: number) {
     if (ctx.scene && ctx.scene.body !== -1) {
       const old = ctx.world.getRigidBody(ctx.scene.body)
       if (old) ctx.world.removeRigidBody(old)
@@ -611,12 +626,11 @@ export class Sim {
     }
     const t2 = performance.now()
     const ctx = this.liveCtx()
-    if (this.tickHasBoot(this.tick)) {
-      this.seamReset(ctx)
-      this.world = ctx.world
-    }
+    if (this.tickHasBoot(this.tick)) this.seamReset(ctx)
     this.applyTick(ctx, this.tick)
-    this.scene = ctx.scene // seamReset and scene ops replace the ref
+    // seam resets and scene ops replace the world and the scene ref
+    this.world = ctx.world
+    this.scene = ctx.scene
     this.writePrev()
     this.pinAndStep(ctx, this.tick)
     const t3 = performance.now()
@@ -769,6 +783,16 @@ export class Sim {
         // netId is the scene's mxc URL ('' clears). Idempotent for the
         // seam-window replay: seamReset has already re-added the same url.
         if ((ctx.scene?.url ?? '') === i.netId) return
+        // A scene (re)load deterministically RESETS the world at the op's
+        // tick: rebuild from scratch and drop every body, rather than
+        // leave the old pile floating wherever the new world's geometry
+        // happens to be. The ground comes back with buildWorld and is
+        // immediately yielded again when the trimesh lands (addScene).
+        ctx.world.free()
+        ctx.world = buildWorld()
+        ctx.bodies.clear()
+        ctx.grabs.clear()
+        ctx.scene = null
         this.addScene(ctx, i.netId, tick)
         return
       }

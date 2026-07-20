@@ -48,14 +48,14 @@ export class View {
     const sun = new THREE.DirectionalLight(0xffffff, 1.6)
     sun.position.set(8, 14, 6)
     this.scene.add(sun)
-    const ground = new THREE.Mesh(
+    this.ground = new THREE.Mesh(
       new THREE.PlaneGeometry(40, 40),
       new THREE.MeshStandardMaterial({ color: 0x1a1f26, roughness: 1 }))
-    ground.rotation.x = -Math.PI / 2
-    this.scene.add(ground)
-    const grid = new THREE.GridHelper(40, 40, 0x39414d, 0x252b33)
-    grid.position.y = 0.01
-    this.scene.add(grid)
+    this.ground.rotation.x = -Math.PI / 2
+    this.scene.add(this.ground)
+    this.grid = new THREE.GridHelper(40, 40, 0x39414d, 0x252b33)
+    this.grid.position.y = 0.01
+    this.scene.add(this.grid)
 
     addEventListener('resize', () => {
       this.camera.aspect = innerWidth / innerHeight
@@ -65,6 +65,8 @@ export class View {
   }
 
   private sceneRoot: THREE.Object3D | null = null
+  private ground!: THREE.Mesh
+  private grid!: THREE.GridHelper
 
   /** Swap the rendered glTF scene (null removes it). Idempotent per object. */
   setScene(obj: THREE.Object3D | null) {
@@ -72,6 +74,13 @@ export class View {
     if (this.sceneRoot) this.scene.remove(this.sceneRoot)
     this.sceneRoot = obj
     if (obj) this.scene.add(obj)
+  }
+
+  /** The ground plane and grid hide while a scene is active (tracks the
+   * SIM's scene, not the visual fetch: the colliders are already gone). */
+  setGroundVisible(on: boolean) {
+    this.ground.visible = on
+    this.grid.visible = on
   }
 
   private matFor(color: number) {
@@ -83,12 +92,29 @@ export class View {
     return m
   }
 
-  private syncNew() {
-    for (const eid of this.ecs.newBoxes()) {
+  /**
+   * Reconcile meshes against the sim's live bodies: create for new ones,
+   * remove for deleted ones (a scene swap resets the world and drops every
+   * box; ECS entities are never deleted, so liveness comes from the caller).
+   */
+  syncBodies(liveNetIds: Iterable<string>) {
+    const live = new Set<number>()
+    for (const id of liveNetIds) {
+      const eid = this.ecs.entityFor(id)
+      if (eid !== undefined) live.add(eid)
+    }
+    for (const eid of live) {
+      if (this.meshes.has(eid)) continue
       const mesh = new THREE.Mesh(this.geo, this.matFor(this.ecs.Tint.value[eid]))
       mesh.userData.eid = eid
       this.scene.add(mesh)
       this.meshes.set(eid, mesh)
+    }
+    for (const [eid, mesh] of this.meshes) {
+      if (live.has(eid)) continue
+      this.scene.remove(mesh)
+      this.meshes.delete(eid)
+      this.errors.delete(eid)
     }
   }
 
@@ -124,7 +150,6 @@ export class View {
    * one tick behind but smooth.
    */
   frame(now: number, alpha: number) {
-    this.syncNew()
     const { Position, Rotation, PrevPosition, PrevRotation } = this.ecs
     for (const [eid, mesh] of this.meshes) {
       mesh.position.set(
