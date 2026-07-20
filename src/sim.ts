@@ -211,17 +211,64 @@ export class Sim {
     arr.splice(i, 0, { tick, pos })
   }
 
-  /** latest pose from `peer` in [since, tick]; a fresh grab must not be
-   * driven by stragglers from an earlier drag of the same box */
-  private poseAt(netId: string, peer: string, since: number, tick: number): Vec3 | null {
-    const arr = this.tracks.get(netId)?.get(peer)
-    if (!arr) return null
+  /**
+   * The pin target for a held body at `tick`: velocity-faithful, not
+   * latest-wins. A latest-wins pin multiplies the held body's instantaneous
+   * velocity whenever samples and ticks misalign (the target holds still,
+   * then jumps N samples' worth in one tick - a 4:1 cadence mismatch was
+   * measured quadrupling it), and the infinite-mass kinematic body then
+   * rams the pile at that phantom speed. Instead the pin approaches the
+   * newest sample no faster than the hand's measured rate, spreading a
+   * sample that arrives after a gap over the ticks it actually covers.
+   *
+   * Crucially this reads ONLY samples stamped at or before `tick`: a pin
+   * that peeked at later samples (e.g. interpolating between brackets)
+   * would compute different values live than on replay, and the holder's
+   * own live history - which is never re-simulated, its own samples being
+   * always complete - would permanently diverge from what remote peers
+   * heal to. With samples-≤-tick only, heartbeat folds converge every peer
+   * onto the holder's exact path: each fold re-steps a window whose
+   * samples fully arrived before its beat, re-snapshotting as it goes, so
+   * the g.target recursion (carried from tick to tick, snapshotted with
+   * the grab table) is re-seeded correctly by induction.
+   * Samples from before this grab (`since`) never drive it.
+   */
+  private pinTarget(g: Grab, netId: string, tick: number): Vec3 {
+    const arr = this.tracks.get(netId)?.get(g.holder)
+    if (!arr || arr.length === 0) return g.target
+    let a = -1
     for (let i = arr.length - 1; i >= 0; i--) {
-      if (arr[i].tick > tick) continue
-      if (arr[i].tick < since) break
-      return arr[i].pos
+      const s = arr[i]
+      if (s.tick < g.since) break
+      if (s.tick > tick) continue
+      a = i
+      break
     }
-    return null
+    if (a < 0) return g.target
+    const sa = arr[a]
+    const mix = (u: Vec3, v: Vec3, f: number): Vec3 =>
+      ({ x: u.x + (v.x - u.x) * f, y: u.y + (v.y - u.y) * f, z: u.z + (v.z - u.z) * f })
+    // Rate-limit the catch-up to the hand's measured speed. This applies
+    // even when the newest sample is stamped at this very tick: a sample
+    // that arrives after a gap CONTAINS the gap's accumulated motion, and
+    // that tick is precisely when a latest-wins pin would spike.
+    // Rate baseline of several ticks: stamp jitter can land two samples on
+    // one tick (or none), which corrupts a one-tick rate estimate in either
+    // direction; a >=6-tick window averages it out. Fall back to the
+    // nearest distinct-tick sample for very young grabs.
+    let pi = a - 1
+    while (pi >= 0 && arr[pi].tick > sa.tick - 6 && arr[pi].tick >= g.since) pi--
+    if (pi < 0 || arr[pi].tick < g.since) {
+      pi = a - 1
+      while (pi >= 0 && arr[pi].tick === sa.tick) pi--
+    }
+    const prev = pi >= 0 && arr[pi].tick >= g.since ? arr[pi] : null
+    if (!prev) return sa.pos
+    const rate = Math.hypot(sa.pos.x - prev.pos.x, sa.pos.y - prev.pos.y, sa.pos.z - prev.pos.z)
+      / (sa.tick - prev.tick)
+    const d = Math.hypot(sa.pos.x - g.target.x, sa.pos.y - g.target.y, sa.pos.z - g.target.z)
+    if (d <= rate || rate === 0) return sa.pos
+    return mix(g.target, sa.pos, rate / d)
   }
 
   /** did `peer` stream any pose in (from, to]? The beat-fold guard: no
@@ -449,7 +496,9 @@ export class Sim {
     for (const [netId, g] of ctx.grabs) {
       const b = bodyOf(ctx, netId)
       if (!b) continue
-      b.setNextKinematicTranslation(this.poseAt(netId, g.holder, g.since, tick) ?? g.target)
+      const t = this.pinTarget(g, netId, tick)
+      g.target = { x: t.x, y: t.y, z: t.z } // persist: next tick approaches from here
+      b.setNextKinematicTranslation(g.target)
     }
     ctx.world.step()
   }
