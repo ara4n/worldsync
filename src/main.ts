@@ -57,8 +57,19 @@ async function main() {
       URL.revokeObjectURL(a.href)
     },
   })
-  session.onLog = l => ui.log(l)
-  sim.onAnomaly = m => ui.log(`ANOMALY: ${m}`)
+  // In widget mode the panel can be tiny or hidden, so mirror every
+  // diagnostic line to the console; debugging inside a host iframe with a
+  // silent panel is otherwise guesswork.
+  const log = (l: string) => {
+    ui.log(l)
+    if (wp) console.log('[worldsync]', l)
+  }
+  if (wp) console.log('[worldsync] widget mode', {
+    userId: wp.userId, deviceId: wp.deviceId, roomId: wp.roomId,
+    baseUrl: wp.baseUrl, mockTransport: wp.mockTransport,
+  })
+  session.onLog = log
+  sim.onAnomaly = m => log(`ANOMALY: ${m}`)
   // Stash bit-level dumps of our state at (and just before) the divergent
   // tick for cross-peer post-mortem diffing.
   session.onDiverged = (peerId, t) => {
@@ -81,18 +92,26 @@ async function main() {
     net.onMessage = (peer, msg) => session.receive(peer.id, msg)
     net.onPeerConnected = peer => session.peerConnected(peer.id, peer.order)
     net.onPeerLeft = id => session.peerLeft(id)
-    net.onLog = l => ui.log(l)
+    net.onLog = log
   } else {
     const m = net as import('./matrix/net').MatrixNet
-    m.onJoined = (id, order, alone) => session.identity(id, order, alone)
+    m.onJoined = (id, order, alone) => { log(`joined as ${id} (order ${order}${alone ? ', alone: rooting grid' : ''})`); session.identity(id, order, alone) }
     m.onMessage = (from, msg) => session.receive(from, msg)
-    m.onPeerConnected = (id, order) => session.peerConnected(id, order)
+    m.onPeerConnected = (id, order) => { log(`peer connected ${id} (#${order})`); session.peerConnected(id, order) }
     m.onPeerLeft = id => session.peerLeft(id)
-    m.onLog = l => ui.log(l)
+    m.onLog = log
   }
 
+  let lastNotReady = 0
   const out: Emitter = {
-    ready: () => session.ready(),
+    ready: () => {
+      const r = session.ready()
+      if (!r && performance.now() - lastNotReady > 2000) {
+        lastNotReady = performance.now()
+        log('input ignored: session not started (no identity yet, or waiting for a senior peer to calibrate against)')
+      }
+      return r
+    },
     nextNetId: () => session.nextNetId(),
     emit: (type, netId, data) => session.emit(type, netId, data),
     streamPose: (netId, pos) => session.streamPose(netId, pos),
@@ -103,7 +122,7 @@ async function main() {
   else {
     (net as import('./matrix/net').MatrixNet)
       .connect(wp!, params.get('lkService'))
-      .catch(e => ui.log(`matrix connect failed: ${e}`))
+      .catch(e => { log(`matrix connect failed: ${e}`); console.error('[worldsync]', e) })
   }
 
   function frame() {
