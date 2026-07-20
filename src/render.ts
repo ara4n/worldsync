@@ -61,6 +61,16 @@ export class View {
     })
   }
 
+  private sceneRoot: THREE.Object3D | null = null
+
+  /** Swap the rendered glTF scene (null removes it). Idempotent per object. */
+  setScene(obj: THREE.Object3D | null) {
+    if (this.sceneRoot === obj) return
+    if (this.sceneRoot) this.scene.remove(this.sceneRoot)
+    this.sceneRoot = obj
+    if (obj) this.scene.add(obj)
+  }
+
   private matFor(color: number) {
     let m = this.mats.get(color)
     if (!m) {

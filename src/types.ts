@@ -15,7 +15,12 @@ export interface Quat { x: number; y: number; z: number; w: number }
 // histories are bit-identical. A joiner-only side channel cannot be: its
 // poses are a snapshot from a different moment than the senior's own history.
 // Continuous drag motion is NOT an op: it travels on the pose plane.
-export type InteractionType = 'spawn' | 'grab' | 'release' | 'boot'
+// 'scene' swaps the room's glTF scene (MSC3815): netId carries the scene's
+// mxc URL (empty string clears it). The geometry itself travels out of band
+// (Matrix media repo); the op just fixes WHICH tick the collider swap
+// happens on, so every peer rebuilds the trimesh at the same point in
+// history and rollbacks re-apply it like any other op.
+export type InteractionType = 'spawn' | 'grab' | 'release' | 'boot' | 'scene'
 
 export interface Interaction {
   peer: string

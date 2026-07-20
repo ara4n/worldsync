@@ -28,6 +28,81 @@ Controls: click the ground to spawn a box, drag a box to move it (physics
 resumes on release, with throw velocity), cmd-drag or right-drag orbits,
 wheel zooms.
 
+## Matrix widget mode (matryoshka)
+
+With widget URL params present (`widgetId`, `parentUrl`, `roomId`, `userId`,
+`deviceId`, `baseUrl`, per element-call's convention) the app runs as a
+Matrix widget instead of the ws demo: matrix-widget-api + matrix-js-sdk's
+`createRoomWidgetClient` proxy everything through the host client, so
+identity and encryption are inherited from it. Room presence is MatrixRTC
+(`m.call.member` state events); each member's `createdTs` is its join
+order, and the oldest member roots the tick grid. Data travels as LiveKit
+text streams (topic `worldsync`), with the SFU url + JWT obtained via the
+OpenID exchange against an lk-jwt-service (element-call's flow; override
+the service url with `?lkService=`). The Session and Sim are identical in
+both modes - MatrixNet is just another transport behind the same seam.
+
+The handshake matches real Element Web semantics, learned the hard way
+against a live EW: widgets added with `/addwidget` run under the host
+default `waitForIframeLoad=true`, so the widget must NOT send
+ContentLoaded (such hosts answer it with a hard "Improper sequence"
+error, visible only in the parent frame's console), and the
+RoomWidgetClient must be constructed at module scope: the host fires its
+capabilities request at the iframe load event, and constructing after
+the Rapier wasm init loses that race by seconds, leaving startClient
+waiting forever. In widget mode every diagnostic line is mirrored to the
+console with a `[worldsync]` prefix, including a notice when input is
+ignored because the session has not started.
+
+Widget mode also carries **MSC3815 world scenes** (Third Room's worlds
+proposal): the panel's "load glTF scene" button uploads a GLB through the
+host's MSC4039 media actions, points the room's
+`org.matrix.msc3815.world` state event (`scene_url`) at it, and folds a
+`scene` op into the shared timeline, stamped ahead like a boot seam so
+every peer swaps in the scene's colliders on the same tick. Each peer
+bakes the GLB's meshes into one fixed trimesh (deterministically: same
+bytes, same traversal, f64 transforms rounded to f32 identically), so
+boxes rest on and roll off the scene bit-identically everywhere. The
+scene rides history snapshots and the boot seam like any other sim state;
+late joiners fetch and adopt it from room state before tick calibration,
+and a peer whose download outlives the op's lead applies the op hollow
+(one logged anomaly) and heals by folding from the op's tick once the
+geometry arrives. Requires widget mode - the classic ws demo has no media
+repo to share bytes through, so its button just explains that.
+
+For the dev loop, `/mock.html?room=x` is a mock widget host: the real
+`ClientWidgetApi` against an in-memory widget driver whose room state is
+replicated across tabs via BroadcastChannel, with a BroadcastChannel
+transport standing in for LiveKit. Two tabs mesh exactly like the classic
+demo - no Element Web, homeserver, or SFU required - while exercising the
+genuine widget handshake (same waitForIframeLoad semantics as EW),
+RoomWidgetClient, and MatrixRTC membership machinery, plus an in-memory
+MSC4039 media repo gossiped between tabs so scene upload works too. `node
+test/mockwidget.mjs` asserts bit-exact convergence through this stack,
+late join included; `node test/scene.mjs` runs the full scene flow across
+three tabs (upload, live fetch, late-join preload) and asserts the healed
+peer converges to the bit.
+
+To embed for real, serve the app (dev server works: `npm run dev --
+--host`) and add it to a room in Element Web with
+
+```
+/addwidget http://HOST:5173/?widgetId=$matrix_widget_id&userId=$matrix_user_id&deviceId=$org.matrix.msc3819.matrix_device_id&baseUrl=$org.matrix.msc4039.matrix_base_url&roomId=$matrix_room_id
+```
+
+(Element Web substitutes the `$`-templates and appends `parentUrl`
+itself; add `&lkService=` if the homeserver's `.well-known` does not
+advertise `org.matrix.msc4143.rtc_foci`.) Status: against a live Element
+Web + matrix.org the widget params and handshake are verified up to the
+capability exchange; the LiveKit transport follows element-call's sdk
+patterns but has not yet been exercised against a real SFU
+(element-call's `pnpm backend` provides one), and LiveKit text streams
+are not yet end-to-end encrypted - wiring the MatrixRTC key events into
+payload encryption is the natural next step. A known trap: a ghost
+`m.call.member` from a killed session makes a solo joiner wait for a
+senior peer that will never answer calibration pings; until the
+reachable-senior fallback lands, use a fresh room.
+
 Test hooks: `npm run dev` then `node test/smoke.mjs` runs a two-browser
 Playwright smoke test (spawn replication plus a laggy drag that must
 converge, with identical input logs). `MINUTES=2 BOXES=150 node
@@ -44,9 +119,10 @@ into the joiner's past). All run headed.
 `npm run test:headless` needs no browser and no server: the whole protocol
 stack (Session + Sim) runs on an in-process hub with a virtual clock and
 per-link one-way latencies, covering laggy drags, late joins, three-peer
-meshes, wildly skewed local clocks, ops racing a join, and a backdating
-cheater - ~72 virtual seconds, bit-exact assertions, a third of a real
-second. The hub delivers messages through a JSON round-trip so wire
+meshes, wildly skewed local clocks, ops racing a join, glTF scene
+collider swaps (slow-download heal and late-join adoption included), and
+a backdating cheater - ~72 virtual seconds, bit-exact assertions, a
+third of a real second. The hub delivers messages through a JSON round-trip so wire
 serialisation hazards stay exercised.
 
 ## How it works
@@ -182,7 +258,14 @@ serialisation hazards stay exercised.
   away. Held bodies are kinematic: the solver integrates them toward the
   holder's pose with a real velocity, so a held box shoves the pile
   properly; release returns the body to dynamic with the author's
-  authoritative pose and throw velocity.
+  authoritative pose and throw velocity. The pin is velocity-faithful,
+  not latest-wins: it approaches the newest sample no faster than the
+  hand's measured speed (over a >=6-tick baseline), reading only samples
+  stamped at or before the simulated tick so live and healed histories
+  agree. Without this, any sample/tick cadence mismatch multiplied the
+  held body's instantaneous velocity (a 4:1 mismatch measured 4x, and a
+  gentle 0.25 m/s touch ejected a resting box at 1 m/s; now 0.27 m/s,
+  the physical floor for an infinite-mass impact at restitution 0.3).
 - **Input log.** Every op fed into the local Rapier world is recorded with
   full float precision as `{tick, claimedTick, peer, order, seq, type,
   netId, pos, vel}`. "download input log" saves it as JSON; grab it from two
@@ -240,3 +323,15 @@ serialisation hazards stay exercised.
 - Hidden tabs keep simulating via an unthrottled worker heartbeat, but a hard
   stall of more than 2s (debugger pause, machine sleep) still jumps ticks and
   is reported as an ANOMALY rather than repaired.
+- Held bodies are infinite-mass kinematic while grabbed: even a slow touch
+  transfers (1+restitution) x hand speed to a 1kg box. A force-capped PD
+  controller on a dynamic body would give finite hand mass, at the cost of
+  a mushier hold.
+- Widget mode: tick calibration waits on the lowest-order membership even
+  if that peer is unreachable (ghost membership); needs a reachable-senior
+  fallback with a timeout.
+- Scenes are single-file `.glb` only, colliders are a raw bake of every
+  mesh (no OMI_collider / physics extensions, no exclusions), and a
+  joiner whose scene preload FAILS joins without colliders and diverges
+  on scene contacts until a new scene op arrives; the failure is logged
+  but not retried.

@@ -175,6 +175,53 @@ async function spawnRacesJoin() {
   }
 }
 
+async function glbSceneConverges() {
+  console.log('\n-- glTF scene colliders: op swap, slow-download heal, late joiner --')
+  const hub = createHub(30)
+  // a synthetic "GLB": a 4x4 horizontal shelf at y=1 (two triangles), the
+  // geometry every peer would get by parsing the same bytes
+  const geom = {
+    vertices: new Float32Array([-2, 1, -2, 2, 1, -2, 2, 1, 2, -2, 1, 2]),
+    indices: new Uint32Array([0, 2, 1, 0, 3, 2]),
+  }
+  const url = 'mxc://test/scene'
+  const a = await hub.join('a')
+  const b = await hub.join('b')
+  hub.run(1 * S)
+  a.sim.registerSceneGeometry(url, geom)
+  a.session.emit('scene', url, { pos: { x: 0, y: 0, z: 0 } }, a.sim.tick + 12)
+  // b's "download" completes half a second after the op applied: the op ran
+  // without geometry (anomaly logged), then registerSceneGeometry schedules
+  // the healing fold that replays it with the trimesh present
+  hub.run(0.5 * S)
+  b.sim.registerSceneGeometry(url, geom)
+  hub.run(0.5 * S)
+  const id = a.session.nextNetId()
+  a.session.emit('spawn', id, { pos: { x: 0, y: 3, z: 0 } })
+  hub.run(3 * S)
+  const y = a.sim.body(id)!.translation().y
+  check(Math.abs(y - 1.5) < 0.05, `box rests on the scene shelf, not the ground (y=${y.toFixed(3)})`)
+
+  // late joiner adopts the scene from "room state" before calibrating, so
+  // its boot-seam world matches the seniors' from the first snapshot
+  const c = await hub.join('c')
+  c.sim.registerSceneGeometry(url, geom)
+  c.sim.adoptScene(url)
+  hub.run(8 * S)
+  const cy = c.sim.body(id)!.translation().y
+  check(Math.abs(cy - 1.5) < 0.05, `joiner sees the box on the shelf too (y=${cy.toFixed(3)})`)
+  const settled = a.sim.tick - 400
+  for (const [x, z, name] of [[a, b, 'a/b'], [a, c, 'a/c'], [b, c, 'b/c']] as const) {
+    check(hashDiff(x, z, settled).length === 0, `${name}: no divergent settled ticks`)
+  }
+  for (const p of [a, b, c]) {
+    check([...p.session.peers.values()].every(q => q.checked && q.divergedAt === null), `${p.id}: hash exchange clean`)
+  }
+  check(a.sim.anomalies.length === 0 && c.sim.anomalies.length === 0, 'a and c: no anomalies')
+  check(b.sim.anomalies.every(m => m.includes('scene')) && b.sim.anomalies.length > 0,
+    `b: exactly the expected missing-geometry anomaly (${b.sim.anomalies.length})`)
+}
+
 async function backdaterStruck() {
   console.log('\n-- an op stamped before its author\'s own beat earns a strike --')
   const hub = createHub(10)
@@ -196,5 +243,6 @@ await lateJoin()
 await threePeerMesh()
 await skewedClocks()
 await spawnRacesJoin()
+await glbSceneConverges()
 await backdaterStruck()
 console.log(`\n${failures === 0 ? 'HEADLESS SUITE PASSED' : `${failures} FAILURES`} (${((Date.now() - t0) / 1000).toFixed(1)}s real for ~72s virtual)`)

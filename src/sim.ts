@@ -32,12 +32,19 @@ export interface InputLogEntry {
 const ZERO: Vec3 = { x: 0, y: 0, z: 0 }
 
 interface Grab { holder: string; order: number; target: Vec3; since: number }
-interface HistoryRec { snap: Uint8Array; bodies: Map<string, number>; grabs: Map<string, Grab> }
+/** Baked triangle soup for a glTF scene's fixed collider; every peer parses
+ * it from the same GLB bytes, so the arrays are bit-identical everywhere. */
+export interface SceneGeometry { vertices: Float32Array; indices: Uint32Array }
+/** The active scene: url keys the registered geometry, body is the fixed
+ * trimesh body's handle (-1 while the geometry has not arrived yet), tick
+ * is when the scene applied (the heal-fold target once it does arrive). */
+interface SceneRef { url: string; body: number; tick: number }
+interface HistoryRec { snap: Uint8Array; bodies: Map<string, number>; grabs: Map<string, Grab>; scene: SceneRef | null }
 interface Entry { tick: number; order: number; seq: number; i: Interaction }
 
 /** Everything a simulation step touches; the live sim and scratch replay
  * verification worlds both step through the same code via one of these. */
-interface Ctx { world: RAPIER.World; bodies: Map<string, number>; grabs: Map<string, Grab> }
+interface Ctx { world: RAPIER.World; bodies: Map<string, number>; grabs: Map<string, Grab>; scene: SceneRef | null }
 
 function bodyOf(ctx: Ctx, netId: string): RAPIER.RigidBody | null {
   const h = ctx.bodies.get(netId)
@@ -147,6 +154,11 @@ export class Sim {
   tick = 0
   bodies = new Map<string, number>()
   grabs = new Map<string, Grab>()
+  /** the active glTF scene (never in `bodies`: not hashed, not dumped) */
+  scene: SceneRef | null = null
+  private sceneGeoms = new Map<string, SceneGeometry>()
+  private sceneWarned = new Set<string>()
+  get sceneUrl(): string | null { return this.scene?.url ?? null }
   rollbacks = 0
   lastReplayDepth = 0
   /**
@@ -296,6 +308,50 @@ export class Sim {
     if (k < this.tick) this.resimFrom = this.resimFrom === null ? k : Math.min(this.resimFrom, k)
   }
 
+  /**
+   * Make a scene's collider geometry available. If the scene op already
+   * applied without it (slow download), heal by folding from the op's tick:
+   * the replay re-runs the op with the geometry present, so the world ends
+   * up as if the download had been instant.
+   */
+  registerSceneGeometry(url: string, geom: SceneGeometry) {
+    this.sceneGeoms.set(url, geom)
+    if (this.scene && this.scene.url === url && this.scene.body === -1) this.foldFrom(this.scene.tick)
+  }
+
+  /**
+   * Late-join path: the scene comes from room state rather than an op (any
+   * scene op predates our history and is never applied here). Call after
+   * registerSceneGeometry and BEFORE startAt, so the first snapshot already
+   * contains the colliders every senior peer's world has.
+   */
+  adoptScene(url: string) {
+    const ctx = this.liveCtx()
+    this.addScene(ctx, url, this.tick)
+    this.scene = ctx.scene
+  }
+
+  /** Swap the fixed trimesh in `ctx` to `url` ('' clears it). */
+  private addScene(ctx: Ctx, url: string, tick: number) {
+    if (ctx.scene && ctx.scene.body !== -1) {
+      const old = ctx.world.getRigidBody(ctx.scene.body)
+      if (old) ctx.world.removeRigidBody(old)
+    }
+    if (!url) { ctx.scene = null; return }
+    const geom = this.sceneGeoms.get(url)
+    if (!geom || geom.indices.length === 0) {
+      ctx.scene = { url, body: -1, tick }
+      if (!geom && !this.sceneWarned.has(url)) {
+        this.sceneWarned.add(url)
+        this.anomaly(`scene ${url} applied before its geometry loaded; heals once fetched`)
+      }
+      return
+    }
+    const body = ctx.world.createRigidBody(RAPIER.RigidBodyDesc.fixed())
+    ctx.world.createCollider(RAPIER.ColliderDesc.trimesh(geom.vertices, geom.indices), body)
+    ctx.scene = { url, body: body.handle, tick }
+  }
+
   async init() {
     await RAPIER.init()
     this.world = buildWorld()
@@ -317,6 +373,7 @@ export class Sim {
       snap: this.world.takeSnapshot(),
       bodies: new Map(this.bodies),
       grabs: cloneGrabs(this.grabs),
+      scene: this.scene && { ...this.scene },
     })
   }
 
@@ -394,6 +451,8 @@ export class Sim {
     this.world.timestep = 1 / TICK_HZ
     this.bodies = new Map(rec.bodies)
     this.grabs = cloneGrabs(rec.grabs)
+    // handles are stable across snapshot restore, so the stored ref is valid
+    this.scene = rec.scene && { ...rec.scene }
     this.tick = k
     while (this.tick < target) this.step()
     this.rollbacks++
@@ -417,7 +476,7 @@ export class Sim {
     }
   }
 
-  private liveCtx(): Ctx { return { world: this.world, bodies: this.bodies, grabs: this.grabs } }
+  private liveCtx(): Ctx { return { world: this.world, bodies: this.bodies, grabs: this.grabs, scene: this.scene } }
 
   private applyTick(ctx: Ctx, tick: number) {
     if (this.tickHasBoot(tick)) {
@@ -480,10 +539,16 @@ export class Sim {
   // from scratch and lets the boot entries recreate every body in dump
   // order, giving byte-identical worlds by construction.
   private seamReset(ctx: Ctx) {
+    // The scene crosses the seam: seniors know it from the op, the joiner
+    // adopted it from room state before starting, so every peer re-adds the
+    // same trimesh right after the ground and body creation order matches.
+    const scene = ctx.scene
     ctx.world.free()
     ctx.world = buildWorld()
     ctx.bodies.clear()
     ctx.grabs.clear()
+    ctx.scene = null
+    if (scene) this.addScene(ctx, scene.url, scene.tick)
   }
 
   // Held bodies are kinematic and follow their holder's pose stream via
@@ -515,6 +580,7 @@ export class Sim {
         snap,
         bodies: new Map(this.bodies),
         grabs: cloneGrabs(this.grabs),
+        scene: this.scene && { ...this.scene },
       })
       for (const key of this.history.keys()) {
         if (key > this.tick - HISTORY_TICKS) break
@@ -550,6 +616,7 @@ export class Sim {
       this.world = ctx.world
     }
     this.applyTick(ctx, this.tick)
+    this.scene = ctx.scene // seamReset and scene ops replace the ref
     this.writePrev()
     this.pinAndStep(ctx, this.tick)
     const t3 = performance.now()
@@ -590,6 +657,7 @@ export class Sim {
       world: RAPIER.World.restoreSnapshot(rec.snap),
       bodies: new Map(rec.bodies),
       grabs: cloneGrabs(rec.grabs),
+      scene: rec.scene && { ...rec.scene },
     }
     ctx.world.timestep = 1 / TICK_HZ
     for (let t = from; t < this.tick; t++) {
@@ -695,6 +763,13 @@ export class Sim {
         b.setTranslation(i.pos, true)
         if (i.vel) b.setLinvel(i.vel, true)
         b.setAngvel(ZERO, true)
+        return
+      }
+      case 'scene': {
+        // netId is the scene's mxc URL ('' clears). Idempotent for the
+        // seam-window replay: seamReset has already re-added the same url.
+        if ((ctx.scene?.url ?? '') === i.netId) return
+        this.addScene(ctx, i.netId, tick)
         return
       }
       case 'boot': {

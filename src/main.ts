@@ -1,15 +1,40 @@
 import { Vector3 } from 'three'
-import { Sim } from './sim'
+import { BOOT_LEAD_TICKS, Sim } from './sim'
+import { cachedScene, cacheScene, parseGlb } from './scene'
+import { fetchWorldScene, uploadWorldScene } from './matrix/world'
 import { Net } from './net'
 import { Session } from './session'
 import { View } from './render'
 import { Input, type Emitter } from './input'
 import { UI } from './ui'
-import { wallNow } from './types'
+import { wallNow, type DcMessage } from './types'
+import { widgetParams } from './matrix/params'
+import { initWidgetClient } from './matrix/widget'
+
+/** What main needs from a transport; Net (ws demo) and MatrixNet both fit. */
+interface NetLike {
+  sendDelayMs: number
+  lagPings: boolean
+  peers: Map<string, { connected: boolean }>
+  sendToId(id: string, msg: DcMessage): void
+  broadcast(msg: DcMessage): void
+}
+
+// The widget-api handshake must begin at module scope, before the window
+// 'load' event: hosts with waitForIframeLoad=true (Element Web's default
+// for /addwidget widgets) fire their capabilities request at iframe load,
+// and only a constructed RoomWidgetClient is listening. Module scripts
+// finish before 'load', so constructing here wins the race; waiting until
+// after the Rapier wasm init (seconds) loses it and the session never
+// starts. The stray-rejection guard keeps an early handshake failure
+// quiet until connect() awaits and reports it.
+const wp = widgetParams()
+const widgetBoot = wp ? initWidgetClient(wp) : null
+widgetBoot?.catch(() => {})
 
 async function main() {
   const params = new URLSearchParams(location.search)
-  const room = params.get('room') ?? 'default'
+  const room = wp ? wp.roomId : params.get('room') ?? 'default'
   const sim = new Sim()
   // ?norm=pipeline swaps per-tick world restore for per-tick solver reset
   // (refuted, kept as a demo); ?cad=K snapshots/normalises every K
@@ -19,7 +44,12 @@ async function main() {
   if (cad >= 1) sim.cadence = cad
   await sim.init()
   const view = new View(document.body, sim.ecs)
-  const net = new Net()
+  // In widget mode the transport is Matrix (identity from the host client,
+  // MatrixRTC membership, LiveKit or mock data path); otherwise the classic
+  // ws-signalled WebRTC mesh. The Session cannot tell them apart.
+  const net: NetLike = wp
+    ? new (await import('./matrix/net')).MatrixNet()
+    : new Net()
   const session = new Session(
     sim,
     (to, msg) => to === null ? net.broadcast(msg) : net.sendToId(to, msg),
@@ -40,10 +70,42 @@ async function main() {
       a.click()
       URL.revokeObjectURL(a.href)
     },
+    // MSC3815: upload a GLB to the media repo, point the room's world state
+    // event at it, and fold a 'scene' op into the shared timeline so every
+    // peer swaps colliders on the same tick.
+    onSceneFile: async file => {
+      if (!wp) { log('scene loading needs Matrix (run as a widget; the mock host works: /mock.html)'); return }
+      if (!session.ready()) { log('scene upload ignored: session not started yet'); return }
+      const m = net as import('./matrix/net').MatrixNet
+      try {
+        const parsed = await parseGlb(await file.arrayBuffer()) // validate before it can land in room state
+        log(`uploading ${file.name} (${(file.size / 1024).toFixed(0)} kB, ${parsed.geometry.indices.length / 3} tris)...`)
+        const mxc = await uploadWorldScene(m.api, m.client, wp.roomId, file)
+        cacheScene(mxc, parsed)
+        sim.registerSceneGeometry(mxc, parsed.geometry)
+        // Stamped ahead like a boot seam so no peer has passed the tick when
+        // it arrives; peers still downloading heal by folding once cached.
+        session.emit('scene', mxc, { pos: { x: 0, y: 0, z: 0 } }, sim.tick + BOOT_LEAD_TICKS)
+        log(`scene set: ${mxc}`)
+      } catch (e) {
+        log(`scene upload failed: ${e}`)
+        console.error('[worldsync]', e)
+      }
+    },
   })
-  net.onLog = l => ui.log(l)
-  session.onLog = l => ui.log(l)
-  sim.onAnomaly = m => ui.log(`ANOMALY: ${m}`)
+  // In widget mode the panel can be tiny or hidden, so mirror every
+  // diagnostic line to the console; debugging inside a host iframe with a
+  // silent panel is otherwise guesswork.
+  const log = (l: string) => {
+    ui.log(l)
+    if (wp) console.log('[worldsync]', l)
+  }
+  if (wp) console.log('[worldsync] widget mode', {
+    userId: wp.userId, deviceId: wp.deviceId, roomId: wp.roomId,
+    baseUrl: wp.baseUrl, mockTransport: wp.mockTransport,
+  })
+  session.onLog = log
+  sim.onAnomaly = m => log(`ANOMALY: ${m}`)
   // Stash bit-level dumps of our state at (and just before) the divergent
   // tick for cross-peer post-mortem diffing.
   session.onDiverged = (peerId, t) => {
@@ -61,20 +123,74 @@ async function main() {
     }
   }
 
-  net.onJoined = (id, order, alone) => session.identity(id, order, alone)
-  net.onMessage = (peer, msg) => session.receive(peer.id, msg)
-  net.onPeerConnected = peer => session.peerConnected(peer.id, peer.order)
-  net.onPeerLeft = id => session.peerLeft(id)
+  if (net instanceof Net) {
+    net.onJoined = (id, order, alone) => session.identity(id, order, alone)
+    net.onMessage = (peer, msg) => session.receive(peer.id, msg)
+    net.onPeerConnected = peer => session.peerConnected(peer.id, peer.order)
+    net.onPeerLeft = id => session.peerLeft(id)
+    net.onLog = log
+  } else {
+    const m = net as import('./matrix/net').MatrixNet
+    m.onJoined = (id, order, alone) => { log(`joined as ${id} (order ${order}${alone ? ', alone: rooting grid' : ''})`); session.identity(id, order, alone) }
+    m.onMessage = (from, msg) => session.receive(from, msg)
+    m.onPeerConnected = (id, order) => { log(`peer connected ${id} (#${order})`); session.peerConnected(id, order) }
+    m.onPeerLeft = id => session.peerLeft(id)
+    m.onLog = log
+    // Room already has an MSC3815 scene: fetch, parse, and adopt it before
+    // the sim's first tick (connect() awaits this before joining the RTC
+    // session, so calibration cannot start early).
+    m.onPreloadScene = async url => {
+      const parsed = await parseGlb(await fetchWorldScene(m.api, url))
+      cacheScene(url, parsed)
+      sim.registerSceneGeometry(url, parsed.geometry)
+      sim.adoptScene(url)
+      log(`scene preloaded (${parsed.geometry.indices.length / 3} tris)`)
+    }
+  }
 
+  // Keep the rendered scene in step with the sim's active scene (which can
+  // change via ops, rollbacks, and preloads), and fetch any scene the sim
+  // adopted before we have its GLB (another peer swapped it mid-session).
+  const sceneFetches = new Set<string>()
+  const syncScene = () => {
+    const url = sim.sceneUrl
+    view.setScene(url ? cachedScene(url)?.object ?? null : null)
+    if (!url || cachedScene(url) || !wp || sceneFetches.has(url)) return
+    sceneFetches.add(url)
+    const m = net as import('./matrix/net').MatrixNet
+    ;(async () => {
+      const parsed = await parseGlb(await fetchWorldScene(m.api, url))
+      cacheScene(url, parsed)
+      sim.registerSceneGeometry(url, parsed.geometry) // schedules the healing fold
+      log(`scene fetched (${parsed.geometry.indices.length / 3} tris)`)
+    })().catch(e => {
+      sceneFetches.delete(url) // retried next frame
+      log(`scene fetch failed: ${e}`)
+    })
+  }
+
+  let lastNotReady = 0
   const out: Emitter = {
-    ready: () => session.ready(),
+    ready: () => {
+      const r = session.ready()
+      if (!r && performance.now() - lastNotReady > 2000) {
+        lastNotReady = performance.now()
+        log('input ignored: session not started (no identity yet, or waiting for a senior peer to calibrate against)')
+      }
+      return r
+    },
     nextNetId: () => session.nextNetId(),
     emit: (type, netId, data) => session.emit(type, netId, data),
     streamPose: (netId, pos) => session.streamPose(netId, pos),
   }
   const input = new Input(view, out)
 
-  net.connect(room)
+  if (net instanceof Net) net.connect(room)
+  else {
+    (net as import('./matrix/net').MatrixNet)
+      .connect(wp!, params.get('lkService'), widgetBoot!)
+      .catch(e => { log(`matrix connect failed: ${e}`); console.error('[worldsync]', e) })
+  }
 
   function frame() {
     const now = wallNow()
@@ -87,6 +203,7 @@ async function main() {
     }
     session.advance()
     sim.mirror()
+    syncScene()
     const alpha = session.calibrated
       ? Math.min(Math.max(session.tickTimeNow(now) - sim.tick, 0), 1)
       : 0
@@ -117,6 +234,7 @@ async function main() {
     session.foldIfNeeded()
     session.advance()
     sim.mirror()
+    syncScene() // scene fetches must not stall while the tab is hidden
   }
 
   // Hooks for automated smoke tests and console poking.

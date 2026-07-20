@@ -58,6 +58,11 @@ function attachSignaling(httpServer: Server | null) {
 }
 
 export default defineConfig({
+  build: {
+    rollupOptions: {
+      input: { main: 'index.html', mock: 'mock.html' },
+    },
+  },
   server: {
     allowedHosts: ['pegasus.local'],
   },
@@ -65,5 +70,20 @@ export default defineConfig({
     name: 'signaling-server',
     configureServer(server) { attachSignaling(server.httpServer) },
     configurePreviewServer(server) { attachSignaling(server.httpServer as Server) },
+  }, {
+    // The mock widget host points baseUrl at this origin: matrix-js-sdk
+    // probes unauthenticated endpoints (/versions, for delayed-event
+    // support) over plain HTTP even in widget mode, so answer them here.
+    name: 'mock-homeserver',
+    configureServer(server) {
+      server.middlewares.use('/_matrix/client/versions', (_req, res) => {
+        res.setHeader('Content-Type', 'application/json')
+        res.setHeader('Access-Control-Allow-Origin', '*')
+        res.end(JSON.stringify({
+          versions: ['v1.11'],
+          unstable_features: { 'org.matrix.msc4140': true },
+        }))
+      })
+    },
   }],
 })
