@@ -1,6 +1,7 @@
 import { WidgetApi, MatrixCapabilities } from 'matrix-widget-api'
 import { createRoomWidgetClient, EventType, type MatrixClient, type ICapabilities } from 'matrix-js-sdk'
 import type { WidgetParams } from './params'
+import { WORLD_EVENT_TYPE } from './world'
 
 /**
  * Matryoshka bootstrap, after element-call's src/widget.ts: the WidgetApi
@@ -12,15 +13,24 @@ import type { WidgetParams } from './params'
 export async function initWidgetClient(p: WidgetParams): Promise<{ api: WidgetApi; client: MatrixClient }> {
   const api = new WidgetApi(p.widgetId, new URL(p.parentUrl).origin)
   api.requestCapability(MatrixCapabilities.AlwaysOnScreen)
+  // MSC4039 media actions: the glTF scene GLB is uploaded/downloaded through
+  // the host, since the widget has no access token for the media repo.
+  api.requestCapability(MatrixCapabilities.MSC4039UploadFile)
+  api.requestCapability(MatrixCapabilities.MSC4039DownloadFile)
 
-  // Everything MatrixRTC membership management needs, and nothing else:
-  // the m.call.member state events (ours to write, everyone's to read),
-  // room basics for the Room object to exist, and the encryption-key
-  // events MatrixRTC uses to distribute per-participant media keys.
+  // Everything MatrixRTC membership management needs, plus the MSC3815
+  // world state event that names the room's glTF scene: the m.call.member
+  // state events (ours to write, everyone's to read), room basics for the
+  // Room object to exist, and the encryption-key events MatrixRTC uses to
+  // distribute per-participant media keys.
   const capabilities: ICapabilities = {
-    sendState: [{ eventType: EventType.GroupCallMemberPrefix }],
+    sendState: [
+      { eventType: EventType.GroupCallMemberPrefix },
+      { eventType: WORLD_EVENT_TYPE, stateKey: '' },
+    ],
     receiveState: [
       { eventType: EventType.GroupCallMemberPrefix },
+      { eventType: WORLD_EVENT_TYPE },
       { eventType: EventType.RoomCreate },
       { eventType: EventType.RoomMember },
       { eventType: EventType.RoomEncryption },

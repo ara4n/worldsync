@@ -1,7 +1,7 @@
 import {
   ClientWidgetApi, Widget, WidgetDriver, WidgetApiToWidgetAction,
   type Capability, type IRoomEvent, type ISendEventDetails, type ISendDelayedEventDetails,
-  type IOpenIDUpdate, type SimpleObservable, OpenIDRequestState,
+  type IOpenIDUpdate, type SimpleObservable, type IGetMediaConfigResult, OpenIDRequestState,
 } from 'matrix-widget-api'
 
 /**
@@ -23,23 +23,31 @@ const deviceId = `MOCK${Math.random().toString(36).slice(2, 6).toUpperCase()}`
 type StateKey = string // `${eventType}|${stateKey}`
 interface HostSync { t: 'state'; ev: IRoomEvent }
 interface HostSyncReq { t: 'sync-req'; from: string }
-interface HostSyncRes { t: 'sync-res'; to: string; events: IRoomEvent[] }
+interface HostSyncRes { t: 'sync-res'; to: string; events: IRoomEvent[]; files?: [string, ArrayBuffer][] }
+/** mock media repo gossip: uploaded bytes replicated to every tab */
+interface HostFile { t: 'file'; uri: string; bytes: ArrayBuffer }
 
 class MockDriver extends WidgetDriver {
   state = new Map<StateKey, IRoomEvent>()
+  files = new Map<string, ArrayBuffer>()
   private ch = new BroadcastChannel(`worldsync-mockstate-${room}`)
   private api: ClientWidgetApi | null = null
   private delayed = new Map<string, { eventType: string; content: unknown; stateKey?: string | null }>()
   private nDelay = 0
   private nEvent = 0
+  private nFile = 0
 
   constructor() {
     super()
     this.ch.onmessage = ev => {
-      const m = ev.data as HostSync | HostSyncReq | HostSyncRes
+      const m = ev.data as HostSync | HostSyncReq | HostSyncRes | HostFile
       if (m.t === 'state') this.apply(m.ev, false)
-      else if (m.t === 'sync-req') this.ch.postMessage({ t: 'sync-res', to: m.from, events: [...this.state.values()] })
-      else if (m.t === 'sync-res' && m.to === userId) for (const e of m.events) this.apply(e, false)
+      else if (m.t === 'sync-req') {
+        this.ch.postMessage({ t: 'sync-res', to: m.from, events: [...this.state.values()], files: [...this.files] })
+      } else if (m.t === 'sync-res' && m.to === userId) {
+        for (const e of m.events) this.apply(e, false)
+        for (const [uri, bytes] of m.files ?? []) this.files.set(uri, bytes)
+      } else if (m.t === 'file') this.files.set(m.uri, m.bytes)
     }
     this.ch.postMessage({ t: 'sync-req', from: userId } satisfies HostSyncReq)
     // The room must minimally exist: a create event (local; newest-wins is
@@ -140,6 +148,26 @@ class MockDriver extends WidgetDriver {
   }
 
   readRoomEvents(): Promise<IRoomEvent[]> { return Promise.resolve([]) }
+
+  // MSC4039 media repo, in-memory: uploads are gossiped to every tab so a
+  // peer's widget can download a scene its neighbour uploaded.
+  getMediaConfig(): Promise<IGetMediaConfigResult> {
+    return Promise.resolve({ 'm.upload.size': 100 * 1024 * 1024 })
+  }
+
+  async uploadFile(file: XMLHttpRequestBodyInit): Promise<{ contentUri: string }> {
+    const bytes = await new Response(file as BodyInit).arrayBuffer()
+    const uri = `mxc://mock.localhost/${userId.slice(2, 8)}-${this.nFile++}`
+    this.files.set(uri, bytes)
+    this.ch.postMessage({ t: 'file', uri, bytes } satisfies HostFile)
+    return { contentUri: uri }
+  }
+
+  downloadFile(contentUri: string): Promise<{ file: XMLHttpRequestBodyInit }> {
+    const bytes = this.files.get(contentUri)
+    if (!bytes) return Promise.reject(new Error(`no such mock media: ${contentUri}`))
+    return Promise.resolve({ file: new Blob([bytes]) })
+  }
 
   askOpenID(observer: SimpleObservable<IOpenIDUpdate>): void {
     observer.update({

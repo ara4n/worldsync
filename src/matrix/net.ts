@@ -6,6 +6,7 @@ import type { WidgetParams } from './params'
 import { initWidgetClient } from './widget'
 import type { WidgetApi } from 'matrix-widget-api'
 import { BroadcastTransport, LiveKitTransport, type DataTransport } from './transport'
+import { readWorldSceneUrl } from './world'
 
 /** Transport-level peer view, mirroring the old Net.Peer surface. */
 export interface MatrixPeer {
@@ -37,8 +38,16 @@ export class MatrixNet {
   onPeerConnected: (id: string, order: number) => void = () => {}
   onPeerLeft: (id: string) => void = () => {}
   onLog: (line: string) => void = () => {}
+  /** Called with the room's MSC3815 scene url (if any) BEFORE joining the
+   * RTC session, so the sim can adopt the scene before its first tick:
+   * seniors' worlds contain its colliders, and a joiner whose first
+   * snapshot lacked them could never converge across the boot seam. */
+  onPreloadScene: (sceneUrl: string) => Promise<void> = async () => {}
 
-  private client!: MatrixClient
+  /** the widget-api handle (media upload/download) and proxied client
+   * (state events), exposed for the MSC3815 world plumbing in main */
+  api!: WidgetApi
+  client!: MatrixClient
   private rtc!: MatrixRTCSession
   private transport!: DataTransport
   private reachable = new Set<string>()
@@ -51,7 +60,8 @@ export class MatrixNet {
     boot: Promise<{ api: WidgetApi; client: MatrixClient }> = initWidgetClient(p),
   ) {
     this.id = `${p.userId}:${p.deviceId}`
-    const { client } = await boot
+    const { api, client } = await boot
+    this.api = api
     this.client = client
     this.onLog(`widget client up as ${p.userId} (${p.deviceId})`)
 
@@ -90,6 +100,16 @@ export class MatrixNet {
     this.transport.onParticipants = ids => {
       this.reachable = ids
       this.reconcile()
+    }
+
+    // Adopt the room's glTF scene before publishing our membership: nobody
+    // can be waiting on us yet, and the sim must not start (senior pongs
+    // begin once we are a member) until its world matches the seniors'.
+    const sceneUrl = readWorldSceneUrl(client, p.roomId)
+    if (sceneUrl) {
+      this.onLog(`world scene in room state: ${sceneUrl}`)
+      try { await this.onPreloadScene(sceneUrl) }
+      catch (e) { this.onLog(`scene preload failed (continuing without): ${e}`) }
     }
 
     this.rtc.joinRTCSession(

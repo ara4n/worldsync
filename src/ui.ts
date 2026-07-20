@@ -29,6 +29,7 @@ export interface Hooks {
   onRubber(v: number): void
   onDumpInputs(): void
   onVerify(): void
+  onSceneFile(f: File): void
 }
 
 export class UI {
@@ -47,6 +48,8 @@ export class UI {
         <label>rubber-band <input id="rubber" type="number" min="0" max="2000" step="25" value="100"> ms</label>
         <button id="dump">download input log</button>
         <button id="verify">verify replay determinism</button>
+        <button id="scene">load glTF scene (.glb)</button>
+        <input id="scenefile" type="file" accept=".glb,model/gltf-binary" style="display:none">
       </div>
       <div id="status"></div>
       <div id="log"></div>
@@ -70,6 +73,13 @@ export class UI {
     rb.oninput = () => hooks.onRubber(Number(rb.value))
     ;(root.querySelector('#dump') as HTMLButtonElement).onclick = () => hooks.onDumpInputs()
     ;(root.querySelector('#verify') as HTMLButtonElement).onclick = () => hooks.onVerify()
+    const sceneFile = root.querySelector('#scenefile') as HTMLInputElement
+    ;(root.querySelector('#scene') as HTMLButtonElement).onclick = () => sceneFile.click()
+    sceneFile.onchange = () => {
+      const f = sceneFile.files?.[0]
+      if (f) hooks.onSceneFile(f)
+      sceneFile.value = '' // allow re-picking the same file
+    }
   }
 
   log(line: string) {

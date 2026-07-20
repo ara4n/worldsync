@@ -1,5 +1,7 @@
 import { Vector3 } from 'three'
-import { Sim } from './sim'
+import { BOOT_LEAD_TICKS, Sim } from './sim'
+import { cachedScene, cacheScene, parseGlb } from './scene'
+import { fetchWorldScene, uploadWorldScene } from './matrix/world'
 import { Net } from './net'
 import { Session } from './session'
 import { View } from './render'
@@ -68,6 +70,28 @@ async function main() {
       a.click()
       URL.revokeObjectURL(a.href)
     },
+    // MSC3815: upload a GLB to the media repo, point the room's world state
+    // event at it, and fold a 'scene' op into the shared timeline so every
+    // peer swaps colliders on the same tick.
+    onSceneFile: async file => {
+      if (!wp) { log('scene loading needs Matrix (run as a widget; the mock host works: /mock.html)'); return }
+      if (!session.ready()) { log('scene upload ignored: session not started yet'); return }
+      const m = net as import('./matrix/net').MatrixNet
+      try {
+        const parsed = await parseGlb(await file.arrayBuffer()) // validate before it can land in room state
+        log(`uploading ${file.name} (${(file.size / 1024).toFixed(0)} kB, ${parsed.geometry.indices.length / 3} tris)...`)
+        const mxc = await uploadWorldScene(m.api, m.client, wp.roomId, file)
+        cacheScene(mxc, parsed)
+        sim.registerSceneGeometry(mxc, parsed.geometry)
+        // Stamped ahead like a boot seam so no peer has passed the tick when
+        // it arrives; peers still downloading heal by folding once cached.
+        session.emit('scene', mxc, { pos: { x: 0, y: 0, z: 0 } }, sim.tick + BOOT_LEAD_TICKS)
+        log(`scene set: ${mxc}`)
+      } catch (e) {
+        log(`scene upload failed: ${e}`)
+        console.error('[worldsync]', e)
+      }
+    },
   })
   // In widget mode the panel can be tiny or hidden, so mirror every
   // diagnostic line to the console; debugging inside a host iframe with a
@@ -112,6 +136,37 @@ async function main() {
     m.onPeerConnected = (id, order) => { log(`peer connected ${id} (#${order})`); session.peerConnected(id, order) }
     m.onPeerLeft = id => session.peerLeft(id)
     m.onLog = log
+    // Room already has an MSC3815 scene: fetch, parse, and adopt it before
+    // the sim's first tick (connect() awaits this before joining the RTC
+    // session, so calibration cannot start early).
+    m.onPreloadScene = async url => {
+      const parsed = await parseGlb(await fetchWorldScene(m.api, url))
+      cacheScene(url, parsed)
+      sim.registerSceneGeometry(url, parsed.geometry)
+      sim.adoptScene(url)
+      log(`scene preloaded (${parsed.geometry.indices.length / 3} tris)`)
+    }
+  }
+
+  // Keep the rendered scene in step with the sim's active scene (which can
+  // change via ops, rollbacks, and preloads), and fetch any scene the sim
+  // adopted before we have its GLB (another peer swapped it mid-session).
+  const sceneFetches = new Set<string>()
+  const syncScene = () => {
+    const url = sim.sceneUrl
+    view.setScene(url ? cachedScene(url)?.object ?? null : null)
+    if (!url || cachedScene(url) || !wp || sceneFetches.has(url)) return
+    sceneFetches.add(url)
+    const m = net as import('./matrix/net').MatrixNet
+    ;(async () => {
+      const parsed = await parseGlb(await fetchWorldScene(m.api, url))
+      cacheScene(url, parsed)
+      sim.registerSceneGeometry(url, parsed.geometry) // schedules the healing fold
+      log(`scene fetched (${parsed.geometry.indices.length / 3} tris)`)
+    })().catch(e => {
+      sceneFetches.delete(url) // retried next frame
+      log(`scene fetch failed: ${e}`)
+    })
   }
 
   let lastNotReady = 0
@@ -148,6 +203,7 @@ async function main() {
     }
     session.advance()
     sim.mirror()
+    syncScene()
     const alpha = session.calibrated
       ? Math.min(Math.max(session.tickTimeNow(now) - sim.tick, 0), 1)
       : 0
@@ -178,6 +234,7 @@ async function main() {
     session.foldIfNeeded()
     session.advance()
     sim.mirror()
+    syncScene() // scene fetches must not stall while the tab is hidden
   }
 
   // Hooks for automated smoke tests and console poking.
