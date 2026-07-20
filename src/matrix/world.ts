@@ -33,12 +33,22 @@ export const worldUrls = (content: Record<string, unknown>) => ({
   scriptUrl: mxcField(content, 'script_url'),
 })
 
+const MIME = { scene: 'model/gltf-binary', script: 'text/javascript' }
+
 /** Upload an asset and merge it into the room's world state event (a
  * scene upload must not clobber script_url, and vice versa). */
 export async function uploadWorldAsset(
   api: WidgetApi, client: MatrixClient, roomId: string, file: File, kind: 'scene' | 'script',
 ): Promise<string> {
-  const { content_uri } = await api.uploadFile(file)
+  // Upload a MEMORY-BACKED copy, never the <input> File itself: that File
+  // is backed by its on-disk path, and Chromium's read grant for the path
+  // belongs to THIS renderer process only. After the postMessage hop the
+  // host's process (Element Desktop especially) gets net::ERR_ACCESS_DENIED
+  // trying to read it, and the upload leaves with an empty body. Reading
+  // the bytes here (where the grant is valid) and re-wrapping as a Blob
+  // makes them travel by value.
+  const blob = new Blob([await file.arrayBuffer()], { type: file.type || MIME[kind] })
+  const { content_uri } = await api.uploadFile(blob)
   const sendState = client.sendStateEvent.bind(client) as
     (roomId: string, type: string, content: unknown, stateKey: string) => Promise<unknown>
   const patch: Record<string, unknown> = kind === 'scene'
