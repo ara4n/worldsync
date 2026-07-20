@@ -5,11 +5,22 @@ import { Session } from './session'
 import { View } from './render'
 import { Input, type Emitter } from './input'
 import { UI } from './ui'
-import { wallNow } from './types'
+import { wallNow, type DcMessage } from './types'
+import { widgetParams } from './matrix/params'
+
+/** What main needs from a transport; Net (ws demo) and MatrixNet both fit. */
+interface NetLike {
+  sendDelayMs: number
+  lagPings: boolean
+  peers: Map<string, { connected: boolean }>
+  sendToId(id: string, msg: DcMessage): void
+  broadcast(msg: DcMessage): void
+}
 
 async function main() {
   const params = new URLSearchParams(location.search)
-  const room = params.get('room') ?? 'default'
+  const wp = widgetParams()
+  const room = wp ? wp.roomId : params.get('room') ?? 'default'
   const sim = new Sim()
   // ?norm=pipeline swaps per-tick world restore for per-tick solver reset
   // (refuted, kept as a demo); ?cad=K snapshots/normalises every K
@@ -19,7 +30,12 @@ async function main() {
   if (cad >= 1) sim.cadence = cad
   await sim.init()
   const view = new View(document.body, sim.ecs)
-  const net = new Net()
+  // In widget mode the transport is Matrix (identity from the host client,
+  // MatrixRTC membership, LiveKit or mock data path); otherwise the classic
+  // ws-signalled WebRTC mesh. The Session cannot tell them apart.
+  const net: NetLike = wp
+    ? new (await import('./matrix/net')).MatrixNet()
+    : new Net()
   const session = new Session(
     sim,
     (to, msg) => to === null ? net.broadcast(msg) : net.sendToId(to, msg),
@@ -41,7 +57,6 @@ async function main() {
       URL.revokeObjectURL(a.href)
     },
   })
-  net.onLog = l => ui.log(l)
   session.onLog = l => ui.log(l)
   sim.onAnomaly = m => ui.log(`ANOMALY: ${m}`)
   // Stash bit-level dumps of our state at (and just before) the divergent
@@ -61,10 +76,20 @@ async function main() {
     }
   }
 
-  net.onJoined = (id, order, alone) => session.identity(id, order, alone)
-  net.onMessage = (peer, msg) => session.receive(peer.id, msg)
-  net.onPeerConnected = peer => session.peerConnected(peer.id, peer.order)
-  net.onPeerLeft = id => session.peerLeft(id)
+  if (net instanceof Net) {
+    net.onJoined = (id, order, alone) => session.identity(id, order, alone)
+    net.onMessage = (peer, msg) => session.receive(peer.id, msg)
+    net.onPeerConnected = peer => session.peerConnected(peer.id, peer.order)
+    net.onPeerLeft = id => session.peerLeft(id)
+    net.onLog = l => ui.log(l)
+  } else {
+    const m = net as import('./matrix/net').MatrixNet
+    m.onJoined = (id, order, alone) => session.identity(id, order, alone)
+    m.onMessage = (from, msg) => session.receive(from, msg)
+    m.onPeerConnected = (id, order) => session.peerConnected(id, order)
+    m.onPeerLeft = id => session.peerLeft(id)
+    m.onLog = l => ui.log(l)
+  }
 
   const out: Emitter = {
     ready: () => session.ready(),
@@ -74,7 +99,12 @@ async function main() {
   }
   const input = new Input(view, out)
 
-  net.connect(room)
+  if (net instanceof Net) net.connect(room)
+  else {
+    (net as import('./matrix/net').MatrixNet)
+      .connect(wp!, params.get('lkService'))
+      .catch(e => ui.log(`matrix connect failed: ${e}`))
+  }
 
   function frame() {
     const now = wallNow()

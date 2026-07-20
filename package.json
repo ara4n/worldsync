@@ -12,6 +12,9 @@
   "dependencies": {
     "@dimforge/rapier3d-deterministic-compat": "^0.19.3",
     "bitecs": "0.3.40",
+    "livekit-client": "^2.20.2",
+    "matrix-js-sdk": "^42.0.0-rc.0",
+    "matrix-widget-api": "^1.17.0",
     "three": "^0.169.0"
   },
   "devDependencies": {
