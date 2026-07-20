@@ -58,6 +58,9 @@ function attachSignaling(httpServer: Server | null) {
 }
 
 export default defineConfig({
+  server: {
+    allowedHosts: ['pegasus.local'],
+  },
   plugins: [{
     name: 'signaling-server',
     configureServer(server) { attachSignaling(server.httpServer) },
