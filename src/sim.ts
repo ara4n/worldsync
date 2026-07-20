@@ -80,6 +80,32 @@ function boxCollider() {
 
 const vec = (v: { x: number; y: number; z: number }): Vec3 => ({ x: v.x, y: v.y, z: v.z })
 
+/**
+ * How the per-tick normalisation (invariant: every peer steps from the same
+ * effective state every tick) is achieved:
+ * - 'restore': free the world and rebuild it from the snapshot just taken.
+ *   Maximally paranoid; pays a full serialise + deserialise every tick.
+ * - 'pipeline': keep the world, but replace the two objects step() consults
+ *   that takeSnapshot() does NOT serialise (PhysicsPipeline, CCDSolver) with
+ *   fresh ones. A restored world differs from a live one only in getting
+ *   fresh copies of exactly these, so if serialisation is faithful this is
+ *   equivalent to 'restore' at a fraction of the cost.
+ * All peers in a room must use the same mode.
+ */
+export type NormalizeMode = 'restore' | 'pipeline'
+
+// The wrapper classes are not exported by the package; capture their
+// constructors from a live world (both take no args and build fresh raws).
+let PipelineCtor: new () => RAPIER.World['physicsPipeline']
+let CcdCtor: new () => RAPIER.World['ccdSolver']
+
+function resetSolvers(world: RAPIER.World) {
+  world.physicsPipeline.free()
+  world.physicsPipeline = new PipelineCtor()
+  world.ccdSolver.free()
+  world.ccdSolver = new CcdCtor()
+}
+
 function fnvBytes(u: Uint8Array): number {
   let h = 0x811c9dc5
   for (let i = 0; i < u.length; i++) h = Math.imul(h ^ u[i], 0x01000193)
@@ -128,6 +154,10 @@ export class Sim {
   byteHashes = new Map<number, number>()
   /** EMA of full tick cost in ms (snapshot + normalise restore + step). */
   stepMs = 0
+  /** EMA breakdown of stepMs: snapshot+history, normalise, physics step,
+   * hashes+bookkeeping. */
+  perf = { snap: 0, norm: 0, phys: 0, hash: 0 }
+  normalizeMode: NormalizeMode = 'restore'
   private history = new Map<number, HistoryRec>()
   private timeline: Entry[] = []
   private seen = new Set<string>()
@@ -137,6 +167,8 @@ export class Sim {
     await RAPIER.init()
     this.world = new RAPIER.World({ x: 0, y: -9.81, z: 0 })
     this.world.timestep = 1 / 30
+    PipelineCtor = this.world.physicsPipeline.constructor as typeof PipelineCtor
+    CcdCtor = this.world.ccdSolver.constructor as typeof CcdCtor
     const ground = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed())
     this.world.createCollider(RAPIER.ColliderDesc.cuboid(20, 0.5, 20).setTranslation(0, -0.5, 0), ground)
     this.tick = this.tickOf(wallNow())
@@ -249,27 +281,45 @@ export class Sim {
       grabs: cloneGrabs(this.grabs),
     })
     this.history.delete(this.tick - HISTORY_TICKS)
-    // Normalise: EVERY tick, on every peer, steps a freshly restored world.
-    // Rapier keeps solver-internal state (contact manifolds, warm starts)
-    // that evolves differently down a fold-then-replay path than down a
-    // continuous live path, and under contact stress that changes outcomes.
-    // Restoring from the snapshot we just took drops any non-serialised
-    // residue and rebuilds the rest identically everywhere, making live
-    // stepping and rollback replay the same operation by construction.
-    this.world.free()
-    this.world = RAPIER.World.restoreSnapshot(snap)
-    this.world.timestep = 1 / 30
+    const t1 = performance.now()
+    // Normalise: EVERY tick, on every peer, drops the solver state that
+    // takeSnapshot does not serialise. Rapier keeps such state in the
+    // PhysicsPipeline and CCDSolver; it evolves differently down a
+    // fold-then-replay path than down a continuous live path, and under
+    // contact stress that changes outcomes. Making every tick step from the
+    // same effective state makes live stepping and rollback replay the same
+    // operation by construction. 'restore' rebuilds the whole world from the
+    // snapshot just taken; 'pipeline' only replaces the two non-serialised
+    // objects, which is what a restore gives you fresh anyway.
+    if (this.normalizeMode === 'restore') {
+      this.world.free()
+      this.world = RAPIER.World.restoreSnapshot(snap)
+      this.world.timestep = 1 / 30
+    } else {
+      resetSolvers(this.world)
+    }
+    const t2 = performance.now()
     const ctx = this.liveCtx()
     this.applyTick(ctx, this.tick)
     this.writePrev()
     this.pinAndStep(ctx)
+    const t3 = performance.now()
+    // The byte hash for tick N covers the state at the START of tick N,
+    // which is exactly the snapshot this call just took: no second
+    // takeSnapshot needed.
+    this.byteHashes.set(this.tick, fnvBytes(snap))
     this.tick++
     this.hashes.set(this.tick, hashCtx(ctx))
     this.hashes.delete(this.tick - 2 * HISTORY_TICKS)
-    this.byteHashes.set(this.tick, fnvBytes(ctx.world.takeSnapshot()))
     this.byteHashes.delete(this.tick - 2 * HISTORY_TICKS)
     while (this.timeline.length && this.timeline[0].tick < this.tick - HISTORY_TICKS) this.timeline.shift()
-    this.stepMs = this.stepMs * 0.95 + (performance.now() - t0) * 0.05
+    const t4 = performance.now()
+    const ema = (old: number, v: number) => old * 0.95 + v * 0.05
+    this.perf.snap = ema(this.perf.snap, t1 - t0)
+    this.perf.norm = ema(this.perf.norm, t2 - t1)
+    this.perf.phys = ema(this.perf.phys, t3 - t2)
+    this.perf.hash = ema(this.perf.hash, t4 - t3)
+    this.stepMs = ema(this.stepMs, t4 - t0)
   }
 
   /**
@@ -293,10 +343,14 @@ export class Sim {
     ctx.world.timestep = 1 / 30
     for (let t = from; t < this.tick; t++) {
       // mirror the per-tick normalisation of step()
-      const s = ctx.world.takeSnapshot()
-      ctx.world.free()
-      ctx.world = RAPIER.World.restoreSnapshot(s)
-      ctx.world.timestep = 1 / 30
+      if (this.normalizeMode === 'restore') {
+        const s = ctx.world.takeSnapshot()
+        ctx.world.free()
+        ctx.world = RAPIER.World.restoreSnapshot(s)
+        ctx.world.timestep = 1 / 30
+      } else {
+        resetSolvers(ctx.world)
+      }
       this.applyTick(ctx, t)
       this.pinAndStep(ctx)
     }

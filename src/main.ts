@@ -14,8 +14,12 @@ const HASH_EVERY_TICKS = 30
 const SETTLE_TICKS = 105
 
 async function main() {
-  const room = new URLSearchParams(location.search).get('room') ?? 'default'
+  const params = new URLSearchParams(location.search)
+  const room = params.get('room') ?? 'default'
   const sim = new Sim()
+  // ?norm=pipeline swaps per-tick world restore for per-tick solver reset;
+  // every peer in a room must use the same mode.
+  if (params.get('norm') === 'pipeline') sim.normalizeMode = 'pipeline'
   await sim.init()
   const view = new View(document.body)
   const net = new Net()
@@ -179,6 +183,7 @@ async function main() {
     ui.maybe(now, () => ({
       room, id: net.id, order: net.order,
       entities: sim.bodies.size, tick: sim.tick - startTick, stepMs: sim.stepMs,
+      perf: sim.perf, norm: sim.normalizeMode,
       rollbacks: sim.rollbacks, lastDepth: sim.lastReplayDepth,
       peers: [...net.peers.values()].map(p => ({
         id: p.id, order: p.order, connected: p.connected, rtt: p.rtt,

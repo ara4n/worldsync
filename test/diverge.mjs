@@ -10,12 +10,13 @@ const base = process.env.URL ?? 'http://localhost:5173'
 const room = 'div-' + Math.random().toString(36).slice(2, 8)
 const minutes = Number(process.env.MINUTES ?? 1.5)
 const targetBoxes = Number(process.env.BOXES ?? 150)
+const norm = process.env.NORM ?? 'restore'
 const browser = await chromium.launch({ headless: false })
 
 async function open(name) {
   const page = await browser.newPage()
   page.on('pageerror', e => console.error(`${name} pageerror:`, String(e)))
-  await page.goto(`${base}/?room=${room}`)
+  await page.goto(`${base}/?room=${room}&norm=${norm}`)
   await page.waitForFunction(() => window.__jig && window.__jig.net.id !== '', null, { timeout: 15000 })
   return page
 }
@@ -25,7 +26,7 @@ const b = await open('b')
 const peered = p =>
   p.waitForFunction(() => [...window.__jig.net.peers.values()].some(x => x.connected), null, { timeout: 20000 })
 await Promise.all([peered(a), peered(b)])
-console.log('peered; 500ms send latency on a; running for', minutes, 'min')
+console.log(`peered; 500ms send latency on a; norm=${norm}; running for`, minutes, 'min')
 await a.evaluate(() => { window.__jig.net.sendDelayMs = 500 })
 
 const diverged = () => a.evaluate(() =>
