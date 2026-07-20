@@ -1,12 +1,12 @@
-import RAPIER from '@dimforge/rapier3d-compat'
+import RAPIER from '@dimforge/rapier3d-deterministic-compat'
 import { wallNow, type BootEntity, type Interaction, type Vec3 } from './types'
-import { ensureEntity, entityFor, Position, Rotation, Tint } from './ecs'
+import { ensureEntity, entityFor, Position, Rotation, PrevPosition, PrevRotation, Tint } from './ecs'
 
-export const TICK_MS = 1000 / 60
-export const HISTORY_TICKS = 120 // 2s rollback window
+export const TICK_MS = 1000 / 30
+export const HISTORY_TICKS = 60 // 2s rollback window
 export const BOX_HALF = 0.5
 const MAX_CATCHUP = 15
-const MAX_FUTURE_TICKS = 30 // tolerate this much claimed-future clock skew
+const MAX_FUTURE_TICKS = 15 // tolerate ~500ms of claimed-future clock skew
 const ZERO: Vec3 = { x: 0, y: 0, z: 0 }
 
 interface Grab { holder: string; order: number; target: Vec3 }
@@ -36,6 +36,12 @@ const vec = (v: { x: number; y: number; z: number }): Vec3 => ({ x: v.x, y: v.y,
 /**
  * Locally simulated Rapier world with a rollback window.
  *
+ * The tick grid is global: tick K covers wall-clock time [K*TICK_MS,
+ * (K+1)*TICK_MS), so every peer bins a claimed timestamp into the same tick
+ * (to the extent wall clocks agree). Combined with the deterministic Rapier
+ * build and physics being driven only by timeline interactions, peers step
+ * the same inputs on the same ticks and should converge exactly.
+ *
  * Convention: `tick` is the tick about to be simulated; world state is "the
  * beginning of tick N". history[N] snapshots that state, so folding in an
  * interaction at tick K means: restore history[K], insert it into the
@@ -47,7 +53,6 @@ const vec = (v: { x: number; y: number; z: number }): Vec3 => ({ x: v.x, y: v.y,
  */
 export class Sim {
   world!: RAPIER.World
-  epoch = 0
   tick = 0
   bodies = new Map<string, number>()
   grabs = new Map<string, Grab>()
@@ -61,15 +66,15 @@ export class Sim {
   async init() {
     await RAPIER.init()
     this.world = new RAPIER.World({ x: 0, y: -9.81, z: 0 })
-    this.world.timestep = 1 / 60
+    this.world.timestep = 1 / 30
     const ground = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed())
     this.world.createCollider(RAPIER.ColliderDesc.cuboid(20, 0.5, 20).setTranslation(0, -0.5, 0), ground)
-    this.epoch = wallNow()
+    this.tick = this.tickOf(wallNow())
   }
 
   get needsResim() { return this.resimFrom !== null }
 
-  tickOf(t: number) { return Math.floor((t - this.epoch) / TICK_MS) }
+  tickOf(t: number) { return Math.floor(t / TICK_MS) }
 
   body(netId: string): RAPIER.RigidBody | null {
     const h = this.bodies.get(netId)
@@ -81,22 +86,23 @@ export class Sim {
    * Queue an interaction at the tick its claimed timestamp falls in. A past
    * tick schedules a rollback; the current (not yet simulated) tick and
    * claimed-future ticks are simply applied when that tick is stepped, which
-   * still honours the claimed time. Returns false if it is older than the
-   * rollback window.
+   * still honours the claimed time. Ticks older than the available snapshot
+   * history (young sim, just after a sleep jump) clamp to the oldest
+   * snapshot; genuinely stale peers are already filtered by the RTT-based
+   * age check before this is called.
    */
-  insert(i: Interaction): boolean {
+  insert(i: Interaction) {
     const key = `${i.peer}:${i.seq}`
-    if (this.seen.has(key)) return true
+    if (this.seen.has(key)) return
     let k = this.tickOf(i.t)
     if (k > this.tick + MAX_FUTURE_TICKS) k = this.tick + MAX_FUTURE_TICKS
-    if (k < this.tick && !this.history.has(k)) return false
+    if (k < this.tick) k = Math.max(k, this.tick - this.history.size)
     this.seen.add(key)
     const entry: Entry = { tick: k, t: i.t, order: i.order, seq: i.seq, i }
     let lo = 0, hi = this.timeline.length
     while (lo < hi) { const m = (lo + hi) >> 1; if (before(this.timeline[m], entry)) lo = m + 1; else hi = m }
     this.timeline.splice(lo, 0, entry)
     if (k < this.tick) this.resimFrom = this.resimFrom === null ? k : Math.min(this.resimFrom, k)
-    return true
   }
 
   /** Roll back and replay if any past-tick interactions arrived. Returns true if state was rewritten. */
@@ -108,7 +114,7 @@ export class Sim {
     const rec = this.history.get(k)!
     this.world.free()
     this.world = RAPIER.World.restoreSnapshot(rec.snap)
-    this.world.timestep = 1 / 60
+    this.world.timestep = 1 / 30
     this.bodies = new Map(rec.bodies)
     this.grabs = cloneGrabs(rec.grabs)
     this.tick = k
@@ -121,8 +127,13 @@ export class Sim {
   advance(now: number) {
     let n = 0
     while (this.tickOf(now) > this.tick && n < MAX_CATCHUP) { this.step(); n++ }
-    // Tab was asleep: rebase the clock instead of grinding through the backlog.
-    if (this.tickOf(now) > this.tick) this.epoch = now - this.tick * TICK_MS
+    // Tab was asleep: jump to the current global tick instead of grinding
+    // through the backlog. Old snapshots are from before the gap and cannot
+    // seed a replay across it, so drop them.
+    if (this.tickOf(now) > this.tick) {
+      this.tick = this.tickOf(now)
+      this.history.clear()
+    }
   }
 
   private step() {
@@ -136,6 +147,7 @@ export class Sim {
       if (e.tick > this.tick) break
       if (e.tick === this.tick) this.apply(e.i)
     }
+    this.writePrev()
     // Grabbed bodies are pinned to their drag target each tick; contacts still
     // resolve, so a held box shoves others out of the way.
     for (const [netId, g] of this.grabs) {
@@ -190,10 +202,21 @@ export class Sim {
     }
   }
 
-  /** Smooth local-only drag target update between the 20Hz sampled move interactions. */
-  setGrabTarget(netId: string, pos: Vec3) {
-    const g = this.grabs.get(netId)
-    if (g) g.target = { ...pos }
+  /**
+   * Record the pre-step pose of every body so rendering can interpolate
+   * between tick N-1 and tick N. Runs inside step(), after interactions have
+   * applied (so a grab teleport does not smear) and before the world steps.
+   */
+  private writePrev() {
+    for (const [netId, h] of this.bodies) {
+      const b = this.world.getRigidBody(h)
+      if (!b) continue
+      const eid = entityFor(netId)
+      if (eid === undefined) continue
+      const p = b.translation(), q = b.rotation()
+      PrevPosition.x[eid] = p.x; PrevPosition.y[eid] = p.y; PrevPosition.z[eid] = p.z
+      PrevRotation.x[eid] = q.x; PrevRotation.y[eid] = q.y; PrevRotation.z[eid] = q.z; PrevRotation.w[eid] = q.w
+    }
   }
 
   /** Copy body poses into the bitECS Position/Rotation stores for rendering. */
@@ -239,7 +262,11 @@ export class Sim {
           .setAngvel(e.angvel))
       this.world.createCollider(boxCollider(), body)
       this.bodies.set(e.netId, body.handle)
-      ensureEntity(e.netId, e.color)
+      const eid = ensureEntity(e.netId, e.color)
+      // Seed both interpolation endpoints so the first frame does not smear
+      // the booted box in from the origin.
+      PrevPosition.x[eid] = e.pos.x; PrevPosition.y[eid] = e.pos.y; PrevPosition.z[eid] = e.pos.z
+      PrevRotation.x[eid] = e.rot.x; PrevRotation.y[eid] = e.rot.y; PrevRotation.z[eid] = e.rot.z; PrevRotation.w[eid] = e.rot.w
     }
   }
 }

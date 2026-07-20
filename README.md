@@ -31,9 +31,22 @@ Playwright smoke test (spawn replication plus a laggy drag that must converge).
 
 ## How it works
 
-- **Fixed 60Hz tick.** State is defined at tick boundaries. Before each tick
-  we snapshot the Rapier world (`world.takeSnapshot`), the netId to body-handle
-  map, and the grab table into a 2 second ring buffer.
+- **Fixed 30Hz tick on a global grid.** Tick K covers wall-clock time
+  [K*33.3ms, (K+1)*33.3ms), the same window on every peer, so a claimed
+  timestamp bins into the same tick everywhere (modulo wall-clock skew).
+  State is defined at tick boundaries; rendering interpolates between the
+  previous and current tick, one tick behind. Before each tick we snapshot
+  the Rapier world (`world.takeSnapshot`), the netId to body-handle map, and
+  the grab table into a 2 second ring buffer.
+- **Determinism.** Physics uses the `@dimforge/rapier3d-deterministic-compat`
+  build (Rapier's enhanced-determinism feature, reproducible across
+  platforms). All physics inputs flow through the interaction timeline, drags
+  included: the dragger's own sim is driven by the same tick-rate move
+  samples it broadcasts, never by raw pointer state. Identical inputs on an
+  identical tick grid through a deterministic engine means peers who have
+  seen the same interactions should agree exactly; body creation order (and
+  hence handle assignment) also converges because rollback replays recreate
+  bodies in timeline order.
 - **Interactions, not state.** Each user action is `{peer, seq, t, type,
   netId, pos, vel?, color?}`, applied locally and broadcast on an ordered
   reliable data channel. Sequence numbers dedupe.
@@ -51,8 +64,8 @@ Playwright smoke test (spawn replication plus a laggy drag that must converge).
   and remote) on its tick, so it takes effect at the time the sender claimed.
   An interaction claiming a time inside the current not-yet-simulated tick
   needs no rollback (it is a depth-0 fold: that tick has not run yet); with
-  60Hz ticks that only happens for sub-16ms delivery, so any real network RTT
-  forces a genuine rollback for every received interaction. Claimed-future
+  30Hz ticks that only happens for sub-33ms delivery, so most network RTTs
+  force a genuine rollback for every received interaction. Claimed-future
   timestamps are scheduled for their tick (clamped to 500ms ahead). Body
   handles can change during a replay, which is why the handle map is
   snapshotted alongside the physics state.
@@ -88,9 +101,12 @@ Playwright smoke test (spawn replication plus a laggy drag that must converge).
 
 ## Known gaps (deliberate, for now)
 
-- Replay is best effort, not bit-deterministic (Rapier is only deterministic
-  with identical builds and step sequences; local drag targets are sampled at
-  20Hz on the wire but per-frame locally).
+- Convergence still depends on trusted wall clocks: peers whose clocks
+  disagree bin events into different ticks. The fix is stamping interactions
+  with the tick number and calibrating tick timelines explicitly.
+- Late joiners bootstrap from a JSON state dump, not a byte-exact snapshot,
+  and miss in-flight interactions; founding peers should agree exactly, a
+  late joiner starts merely close.
 - No resync after divergence; the hash column only reports it.
 - No kick mechanism; exclusion is local and one-way.
 - No entity deletion, no interest management, JSON on the wire, snapshots

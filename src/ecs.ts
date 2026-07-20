@@ -2,6 +2,9 @@ import { createWorld, defineComponent, Types, addEntity, addComponent, defineQue
 
 export const Position = defineComponent({ x: Types.f32, y: Types.f32, z: Types.f32 })
 export const Rotation = defineComponent({ x: Types.f32, y: Types.f32, z: Types.f32, w: Types.f32 })
+// Pose one tick earlier, for fixed-timestep render interpolation.
+export const PrevPosition = defineComponent({ x: Types.f32, y: Types.f32, z: Types.f32 })
+export const PrevRotation = defineComponent({ x: Types.f32, y: Types.f32, z: Types.f32, w: Types.f32 })
 export const Tint = defineComponent({ value: Types.ui32 })
 export const Box = defineComponent()
 
@@ -24,8 +27,11 @@ export function ensureEntity(netId: string, color: number): number {
   addComponent(ecs, Box, eid)
   addComponent(ecs, Position, eid)
   addComponent(ecs, Rotation, eid)
+  addComponent(ecs, PrevPosition, eid)
+  addComponent(ecs, PrevRotation, eid)
   addComponent(ecs, Tint, eid)
   Rotation.w[eid] = 1
+  PrevRotation.w[eid] = 1
   Tint.value[eid] = color
   netToEid.set(netId, eid)
   eidToNet.set(eid, netId)

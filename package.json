@@ -9,7 +9,7 @@
     "check": "tsc --noEmit"
   },
   "dependencies": {
-    "@dimforge/rapier3d-compat": "^0.14.0",
+    "@dimforge/rapier3d-deterministic-compat": "^0.19.3",
     "bitecs": "0.3.40",
     "three": "^0.169.0"
   },

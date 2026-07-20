@@ -1,4 +1,4 @@
-import { Sim } from './sim'
+import { Sim, TICK_MS } from './sim'
 import { Net, type Peer } from './net'
 import { View } from './render'
 import { Input, type Emitter } from './input'
@@ -6,7 +6,7 @@ import { UI } from './ui'
 import { entityFor } from './ecs'
 import { wallNow, type Interaction } from './types'
 
-const HASH_EVERY_TICKS = 60
+const HASH_EVERY_TICKS = 30
 
 async function main() {
   const room = new URLSearchParams(location.search).get('room') ?? 'default'
@@ -38,7 +38,7 @@ async function main() {
       net.broadcast({ kind: 'i', i })
     },
   }
-  const input = new Input(view, sim, out)
+  const input = new Input(view, out)
 
   // "Too old" means significantly older than the round trip should allow.
   const staleLimit = (peer: Peer) => Math.max(250, peer.rtt * 1.5 + 120)
@@ -61,7 +61,7 @@ async function main() {
         const age = wallNow() - msg.i.t
         const limit = staleLimit(peer)
         if (age > limit) { strike(peer, `${age.toFixed(0)}ms old, limit ${limit.toFixed(0)}ms`); return }
-        if (!sim.insert(msg.i)) strike(peer, 'beyond rollback history')
+        sim.insert(msg.i)
         break
       }
       case 'boot-req':
@@ -104,7 +104,8 @@ async function main() {
     return h >>> 0
   }
 
-  let nextHashTick = HASH_EVERY_TICKS
+  const startTick = sim.tick // global grid ticks are huge; display relative
+  let nextHashTick = sim.tick + HASH_EVERY_TICKS
   function frame() {
     const now = wallNow()
     if (sim.needsResim) {
@@ -116,7 +117,8 @@ async function main() {
     }
     sim.advance(now)
     sim.mirror()
-    view.frame(now)
+    const alpha = Math.min(Math.max((now - sim.tick * TICK_MS) / TICK_MS, 0), 1)
+    view.frame(now, alpha)
     if (sim.tick >= nextHashTick) {
       nextHashTick = sim.tick + HASH_EVERY_TICKS
       ownHash = stateHash()
@@ -124,7 +126,7 @@ async function main() {
     }
     ui.maybe(now, () => ({
       room, id: net.id, order: net.order,
-      entities: sim.bodies.size, tick: sim.tick,
+      entities: sim.bodies.size, tick: sim.tick - startTick,
       rollbacks: sim.rollbacks, lastDepth: sim.lastReplayDepth,
       peers: [...net.peers.values()].map(p => ({
         id: p.id, order: p.order, connected: p.connected, rtt: p.rtt,

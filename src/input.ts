@@ -1,10 +1,13 @@
 import * as THREE from 'three'
-import { BOX_HALF, Sim } from './sim'
+import { BOX_HALF } from './sim'
 import { netIdFor } from './ecs'
 import type { Vec3, InteractionType } from './types'
 import type { View } from './render'
 
-const MOVE_SEND_MS = 50 // 20Hz drag samples on the wire (and in the replay timeline)
+// Drag samples go on the wire (and into our own timeline) at tick rate; the
+// interactions are the ONLY thing driving the physics, locally too, so every
+// peer steps identical inputs.
+const MOVE_SEND_MS = 33
 const CLICK_MAX_PX = 6
 const CLICK_MAX_MS = 400
 const GROUND_HALF = 19
@@ -35,7 +38,7 @@ export class Input {
   private ray = new THREE.Raycaster()
   private ndc = new THREE.Vector2()
 
-  constructor(private view: View, private sim: Sim, private out: Emitter) {
+  constructor(private view: View, private out: Emitter) {
     view.renderer.domElement.addEventListener('pointerdown', e => this.onDown(e))
     addEventListener('pointermove', e => this.onMove(e))
     addEventListener('pointerup', e => this.onUp(e))
@@ -96,7 +99,6 @@ export class Input {
     const now = performance.now()
     d.trail.push({ t: now, p: d.target.clone() })
     while (d.trail.length > 1 && now - d.trail[0].t > 150) d.trail.shift()
-    this.sim.setGrabTarget(d.netId, v3(d.target))
     if (now - d.lastSent >= MOVE_SEND_MS) {
       d.lastSent = now
       this.out.emit('move', d.netId, { pos: v3(d.target) })

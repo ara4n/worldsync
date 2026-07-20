@@ -1,9 +1,11 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
-import { ecs, newBoxes, Position, Rotation, Tint } from './ecs'
+import { ecs, newBoxes, Position, Rotation, PrevPosition, PrevRotation, Tint } from './ecs'
 
 const IDENTITY = new THREE.Quaternion()
 const tmpQ = new THREE.Quaternion()
+const prevQ = new THREE.Quaternion()
+const currQ = new THREE.Quaternion()
 
 export interface Presented { p: THREE.Vector3; q: THREE.Quaternion }
 
@@ -102,11 +104,21 @@ export class View {
     }
   }
 
-  frame(now: number) {
+  /**
+   * alpha in [0,1] interpolates from the previous tick's pose to the current
+   * one (the sim runs at 30Hz, displays usually at 60+), so motion is shown
+   * one tick behind but smooth.
+   */
+  frame(now: number, alpha: number) {
     this.syncNew()
     for (const [eid, mesh] of this.meshes) {
-      mesh.position.set(Position.x[eid], Position.y[eid], Position.z[eid])
-      mesh.quaternion.set(Rotation.x[eid], Rotation.y[eid], Rotation.z[eid], Rotation.w[eid])
+      mesh.position.set(
+        PrevPosition.x[eid] + (Position.x[eid] - PrevPosition.x[eid]) * alpha,
+        PrevPosition.y[eid] + (Position.y[eid] - PrevPosition.y[eid]) * alpha,
+        PrevPosition.z[eid] + (Position.z[eid] - PrevPosition.z[eid]) * alpha)
+      prevQ.set(PrevRotation.x[eid], PrevRotation.y[eid], PrevRotation.z[eid], PrevRotation.w[eid])
+      currQ.set(Rotation.x[eid], Rotation.y[eid], Rotation.z[eid], Rotation.w[eid])
+      mesh.quaternion.copy(prevQ.slerp(currQ, alpha))
       const err = this.errors.get(eid)
       if (err) {
         const k = this.rubberMs <= 0 ? 0 : Math.max(0, 1 - (now - err.t0) / this.rubberMs)
