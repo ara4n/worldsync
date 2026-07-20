@@ -1,12 +1,13 @@
 import RAPIER from '@dimforge/rapier3d-deterministic-compat'
-import { wallNow, type BootEntity, type Interaction, type Vec3 } from './types'
+import { wallNow, type BootEntity, type Interaction, type Quat, type Vec3 } from './types'
 import { ensureEntity, entityFor, Position, Rotation, PrevPosition, PrevRotation, Tint } from './ecs'
 
-export const TICK_MS = 1000 / 30
-export const HISTORY_TICKS = 150 // 5s rollback window, so high fake latency still folds correctly
+export const TICK_HZ = 60
+export const TICK_MS = 1000 / TICK_HZ
+export const HISTORY_TICKS = 300 // 5s rollback window, so high fake latency still folds correctly
 export const BOX_HALF = 0.5
-const MAX_CATCHUP = 60
-const MAX_FUTURE_TICKS = 15 // tolerate ~500ms of claimed-future clock skew
+const MAX_CATCHUP = 120
+const MAX_FUTURE_TICKS = 30 // tolerate ~500ms of claimed-future clock skew
 const INPUT_LOG_MAX = 100000
 
 /** One line of the input log: exactly what entered the sim, at which tick. */
@@ -21,6 +22,8 @@ export interface InputLogEntry {
   netId: string
   pos: Vec3
   vel?: Vec3
+  rot?: Quat
+  angvel?: Vec3
   color?: number
 }
 const ZERO: Vec3 = { x: 0, y: 0, z: 0 }
@@ -79,6 +82,16 @@ function boxCollider() {
 }
 
 const vec = (v: { x: number; y: number; z: number }): Vec3 => ({ x: v.x, y: v.y, z: v.z })
+
+/** Fresh world with just the ground, the common ancestor every peer can
+ * rebuild identically (init and boot-seam resets both start here). */
+function buildWorld(): RAPIER.World {
+  const world = new RAPIER.World({ x: 0, y: -9.81, z: 0 })
+  world.timestep = 1 / TICK_HZ
+  const ground = world.createRigidBody(RAPIER.RigidBodyDesc.fixed())
+  world.createCollider(RAPIER.ColliderDesc.cuboid(20, 0.5, 20).setTranslation(0, -0.5, 0), ground)
+  return world
+}
 
 /**
  * How the per-tick normalisation (invariant: every peer steps from the same
@@ -177,12 +190,9 @@ export class Sim {
 
   async init() {
     await RAPIER.init()
-    this.world = new RAPIER.World({ x: 0, y: -9.81, z: 0 })
-    this.world.timestep = 1 / 30
+    this.world = buildWorld()
     PipelineCtor = this.world.physicsPipeline.constructor as typeof PipelineCtor
     CcdCtor = this.world.ccdSolver.constructor as typeof CcdCtor
-    const ground = this.world.createRigidBody(RAPIER.RigidBodyDesc.fixed())
-    this.world.createCollider(RAPIER.ColliderDesc.cuboid(20, 0.5, 20).setTranslation(0, -0.5, 0), ground)
     this.tick = this.tickOf(wallNow())
   }
 
@@ -204,10 +214,11 @@ export class Sim {
    * history (young sim, just after a sleep jump) clamp to the oldest
    * snapshot; genuinely stale peers are already filtered by the RTT-based
    * age check before this is called.
+   * Returns the tick the interaction was scheduled at (null for a dup).
    */
-  insert(i: Interaction) {
+  insert(i: Interaction): number | null {
     const key = `${i.peer}:${i.seq}`
-    if (this.seen.has(key)) return
+    if (this.seen.has(key)) return null
     const claimedTick = this.tickOf(i.t)
     let k = claimedTick
     if (k > this.tick + MAX_FUTURE_TICKS) k = this.tick + MAX_FUTURE_TICKS
@@ -222,7 +233,7 @@ export class Sim {
     if (this.inputLog.length < INPUT_LOG_MAX) {
       this.inputLog.push({
         tick: k, claimedTick, t: i.t, peer: i.peer, order: i.order, seq: i.seq,
-        type: i.type, netId: i.netId, pos: i.pos, vel: i.vel, color: i.color,
+        type: i.type, netId: i.netId, pos: i.pos, vel: i.vel, rot: i.rot, angvel: i.angvel, color: i.color,
       })
     }
     const entry: Entry = { tick: k, t: i.t, order: i.order, seq: i.seq, i }
@@ -230,6 +241,7 @@ export class Sim {
     while (lo < hi) { const m = (lo + hi) >> 1; if (before(this.timeline[m], entry)) lo = m + 1; else hi = m }
     this.timeline.splice(lo, 0, entry)
     if (k < this.tick) this.resimFrom = this.resimFrom === null ? k : Math.min(this.resimFrom, k)
+    return k
   }
 
   /** Oldest tick with a stored snapshot; keys are inserted in ascending
@@ -251,7 +263,7 @@ export class Sim {
     const rec = this.history.get(k)!
     this.world.free()
     this.world = RAPIER.World.restoreSnapshot(rec.snap)
-    this.world.timestep = 1 / 30
+    this.world.timestep = 1 / TICK_HZ
     this.bodies = new Map(rec.bodies)
     this.grabs = cloneGrabs(rec.grabs)
     this.tick = k
@@ -282,6 +294,39 @@ export class Sim {
       if (e.tick > tick) break
       if (e.tick === tick) this.applyTo(ctx, e.i)
     }
+  }
+
+  private tickHasBoot(tick: number): boolean {
+    for (const e of this.timeline) {
+      if (e.tick > tick) break
+      if (e.tick === tick && e.i.type === 'boot') return true
+    }
+    return false
+  }
+
+  private normalizeCtx(ctx: Ctx) {
+    if (this.normalizeMode === 'restore') {
+      const s = ctx.world.takeSnapshot()
+      ctx.world.free()
+      ctx.world = RAPIER.World.restoreSnapshot(s)
+      ctx.world.timestep = 1 / TICK_HZ
+    } else {
+      resetSolvers(ctx.world)
+    }
+  }
+
+  // A boot seam reaches this tick via different routes on different peers:
+  // the senior has had the bodies for ages (warm contact manifolds and
+  // warmstart impulses, which takeSnapshot DOES serialise, so a
+  // snapshot+restore cannot equalise them), a joiner creates them cold.
+  // The only symmetric state is an empty one: every peer rebuilds the world
+  // from scratch and lets the boot entries recreate every body in dump
+  // order, giving byte-identical worlds by construction.
+  private seamReset(ctx: Ctx) {
+    ctx.world.free()
+    ctx.world = buildWorld()
+    ctx.bodies.clear()
+    ctx.grabs.clear()
   }
 
   // Grabbed bodies are pinned to their drag target each tick; contacts still
@@ -332,13 +377,17 @@ export class Sim {
       if (this.normalizeMode === 'restore') {
         this.world.free()
         this.world = RAPIER.World.restoreSnapshot(snap!)
-        this.world.timestep = 1 / 30
+        this.world.timestep = 1 / TICK_HZ
       } else {
         resetSolvers(this.world)
       }
     }
     const t2 = performance.now()
     const ctx = this.liveCtx()
+    if (this.tickHasBoot(this.tick)) {
+      this.seamReset(ctx)
+      this.world = ctx.world
+    }
     this.applyTick(ctx, this.tick)
     this.writePrev()
     this.pinAndStep(ctx)
@@ -376,19 +425,11 @@ export class Sim {
       bodies: new Map(rec.bodies),
       grabs: cloneGrabs(rec.grabs),
     }
-    ctx.world.timestep = 1 / 30
+    ctx.world.timestep = 1 / TICK_HZ
     for (let t = from; t < this.tick; t++) {
-      // mirror the cadence normalisation of step()
-      if (t % this.cadence === 0) {
-        if (this.normalizeMode === 'restore') {
-          const s = ctx.world.takeSnapshot()
-          ctx.world.free()
-          ctx.world = RAPIER.World.restoreSnapshot(s)
-          ctx.world.timestep = 1 / 30
-        } else {
-          resetSolvers(ctx.world)
-        }
-      }
+      // mirror the cadence normalisation and seam reset of step()
+      if (t % this.cadence === 0) this.normalizeCtx(ctx)
+      if (this.tickHasBoot(t)) this.seamReset(ctx)
       this.applyTick(ctx, t)
       this.pinAndStep(ctx)
     }
@@ -490,6 +531,30 @@ export class Sim {
         if (b && i.vel) b.setLinvel(i.vel, true)
         return
       }
+      case 'boot': {
+        // The grab table crosses the seam too: a body mid-drag at boot time
+        // must be pinned from the same tick on every peer.
+        if (i.grab) ctx.grabs.set(i.netId, { holder: i.grab.holder, order: i.grab.order, target: { ...i.grab.target } })
+        else ctx.grabs.delete(i.netId)
+        const b = bodyOf(ctx, i.netId)
+        if (b) {
+          b.setTranslation(i.pos, true)
+          if (i.rot) b.setRotation(i.rot, true)
+          if (i.vel) b.setLinvel(i.vel, true)
+          if (i.angvel) b.setAngvel(i.angvel, true)
+          return
+        }
+        const body = ctx.world.createRigidBody(
+          RAPIER.RigidBodyDesc.dynamic().setCanSleep(false)
+            .setTranslation(i.pos.x, i.pos.y, i.pos.z)
+            .setRotation(i.rot ?? { x: 0, y: 0, z: 0, w: 1 })
+            .setLinvel(i.vel?.x ?? 0, i.vel?.y ?? 0, i.vel?.z ?? 0)
+            .setAngvel(i.angvel ?? ZERO))
+        ctx.world.createCollider(boxCollider(), body)
+        ctx.bodies.set(i.netId, body.handle)
+        ensureEntity(i.netId, i.color ?? 0xffffff)
+        return
+      }
     }
   }
 
@@ -530,6 +595,7 @@ export class Sim {
       const eid = entityFor(netId)
       if (!b || eid === undefined) continue
       const q = b.rotation()
+      const g = this.grabs.get(netId)
       out.push({
         netId,
         color: Tint.value[eid],
@@ -537,34 +603,10 @@ export class Sim {
         rot: { x: q.x, y: q.y, z: q.z, w: q.w },
         linvel: vec(b.linvel()),
         angvel: vec(b.angvel()),
+        grab: g && { holder: g.holder, order: g.order, target: { ...g.target } },
       })
     }
     return out
   }
 
-  applyBoot(entities: BootEntity[]) {
-    for (const e of entities) {
-      if (this.bodies.has(e.netId)) continue
-      if (this.inputLog.length < INPUT_LOG_MAX) {
-        this.inputLog.push({
-          tick: this.tick, claimedTick: this.tick, t: 0, peer: 'boot', order: -1, seq: 0,
-          type: 'boot', netId: e.netId, pos: e.pos, vel: e.linvel, color: e.color,
-        })
-      }
-      const body = this.world.createRigidBody(
-        RAPIER.RigidBodyDesc.dynamic()
-          .setCanSleep(false)
-          .setTranslation(e.pos.x, e.pos.y, e.pos.z)
-          .setRotation(e.rot)
-          .setLinvel(e.linvel.x, e.linvel.y, e.linvel.z)
-          .setAngvel(e.angvel))
-      this.world.createCollider(boxCollider(), body)
-      this.bodies.set(e.netId, body.handle)
-      const eid = ensureEntity(e.netId, e.color)
-      // Seed both interpolation endpoints so the first frame does not smear
-      // the booted box in from the origin.
-      PrevPosition.x[eid] = e.pos.x; PrevPosition.y[eid] = e.pos.y; PrevPosition.z[eid] = e.pos.z
-      PrevRotation.x[eid] = e.rot.x; PrevRotation.y[eid] = e.rot.y; PrevRotation.z[eid] = e.rot.z; PrevRotation.w[eid] = e.rot.w
-    }
-  }
 }

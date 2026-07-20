@@ -7,12 +7,12 @@ import { UI } from './ui'
 import { entityFor } from './ecs'
 import { wallNow, type Interaction } from './types'
 
-const HASH_EVERY_TICKS = 30
+const HASH_EVERY_TICKS = 60
 // Only exchange tick hashes older than this. A fold can rewrite any tick in
 // the snapshot window (HISTORY_TICKS back), so anything younger can still
 // change after being sent, false-positiving the divergence latch; beyond the
 // window a rewrite is impossible without a clamp ANOMALY being logged.
-const SETTLE_TICKS = 165
+const SETTLE_TICKS = 330
 
 async function main() {
   const params = new URLSearchParams(location.search)
@@ -53,11 +53,17 @@ async function main() {
   let seq = 0
   let spawnCount = 0
   let bootAsked = false
+  // Ticks below this are excluded from the cross-peer hash exchange, in both
+  // directions. A late joiner's hashes before its boot seam describe a world
+  // the other peers never had (empty, then partially bootstrapped), so
+  // comparing them latches a false-positive divergence.
+  let compareFloor = 0
 
   // JSON round-trips doubles exactly except that -0 becomes 0, so normalise
   // negative zeros at the source to keep local and remote inputs bit-equal.
   const z = (n: number) => n + 0 === 0 ? 0 : n
   const zv = (v: { x: number; y: number; z: number }) => ({ x: z(v.x), y: z(v.y), z: z(v.z) })
+  const zq = (q: { x: number; y: number; z: number; w: number }) => ({ x: z(q.x), y: z(q.y), z: z(q.z), w: z(q.w) })
 
   const out: Emitter = {
     ready: () => net.id !== '',
@@ -65,7 +71,10 @@ async function main() {
     emit(type, netId, data) {
       const i: Interaction = {
         peer: net.id, order: net.order, seq: seq++, t: wallNow(),
-        type, netId, pos: zv(data.pos), vel: data.vel && zv(data.vel), color: data.color,
+        type, netId, pos: zv(data.pos), vel: data.vel && zv(data.vel),
+        rot: data.rot && zq(data.rot), angvel: data.angvel && zv(data.angvel),
+        grab: data.grab && { holder: data.grab.holder, order: data.grab.order, target: zv(data.grab.target) },
+        color: data.color,
       }
       sim.insert(i)
       net.broadcast({ kind: 'i', i })
@@ -96,20 +105,26 @@ async function main() {
           const limit = staleLimit(peer)
           if (age > limit) { strike(peer, `${age.toFixed(0)}ms old, limit ${limit.toFixed(0)}ms`); return }
         }
-        sim.insert(msg.i)
+        const k = sim.insert(msg.i)
+        // A boot seam folded into our timeline: hashes for anything older
+        // describe pre-seam worlds and are not comparable across peers.
+        if (msg.i.type === 'boot' && k !== null && k + 1 > compareFloor) {
+          compareFloor = k + 1
+          ui.log(`boot seam from ${peer.id} at tick ${k - startTick}`)
+        }
         break
       }
       case 'boot-req':
-        net.sendTo(peer, { kind: 'boot', entities: sim.dump() })
-        break
-      case 'boot':
-        sim.applyBoot(msg.entities)
-        sim.mirror()
-        ui.log(`bootstrapped ${msg.entities.length} entities from ${peer.id}`)
+        // Dump our world as ordinary interactions so every peer (us
+        // included, via emit) folds the identical seam at the same tick.
+        for (const e of sim.dump()) {
+          out.emit('boot', e.netId, { pos: e.pos, rot: e.rot, vel: e.linvel, angvel: e.angvel, grab: e.grab, color: e.color })
+        }
         break
       case 'hashes': {
         for (let j = 0; j < msg.hs.length; j++) {
           const t = msg.start + j
+          if (t < compareFloor) continue
           const theirs = msg.hs[j]
           if (!theirs) continue
           const ours = sim.hashes.get(t)
@@ -171,7 +186,7 @@ async function main() {
       const start = sim.tick - SETTLE_TICKS - 2 * HASH_EVERY_TICKS
       const hs: number[] = []
       for (let t = start; t < sim.tick - SETTLE_TICKS; t++) {
-        hs.push(sim.hashes.get(t) ?? 0)
+        hs.push(t < compareFloor ? 0 : sim.hashes.get(t) ?? 0)
       }
       net.broadcast({ kind: 'hashes', start, hs })
     }

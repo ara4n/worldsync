@@ -34,12 +34,15 @@ builds a big pile with tight click grids and drags boxes through it while
 the other folds everything via rollback; any disagreement triggers an
 automatic bit-level post-mortem (NORM/CAD env vars select the
 normalisation mode and cadence). `BOXES=150 node test/perf.mjs` prints the
-per-tick cost breakdown for each mode. All run headed.
+per-tick cost breakdown for each mode. `node test/latejoin.mjs` settles a
+pile on one page, joins a second page late, and asserts the boot seam
+bit-converges with no divergence latch (LAT=500 delays the boot so it folds
+into the joiner's past). All run headed.
 
 ## How it works
 
-- **Fixed 30Hz tick on a global grid.** Tick K covers wall-clock time
-  [K*33.3ms, (K+1)*33.3ms), the same window on every peer, so a claimed
+- **Fixed 60Hz tick on a global grid.** Tick K covers wall-clock time
+  [K*16.7ms, (K+1)*16.7ms), the same window on every peer, so a claimed
   timestamp bins into the same tick everywhere (modulo wall-clock skew).
   State is defined at tick boundaries; rendering interpolates between the
   previous and current tick, one tick behind. At every cadence point (every
@@ -125,7 +128,7 @@ per-tick cost breakdown for each mode. All run headed.
   effect at the time the sender claimed.
   An interaction claiming a time inside the current not-yet-simulated tick
   needs no rollback (it is a depth-0 fold: that tick has not run yet); with
-  30Hz ticks that only happens for sub-33ms delivery, so most network RTTs
+  60Hz ticks that only happens for sub-17ms delivery, so most network RTTs
   force a genuine rollback for every received interaction. Claimed-future
   timestamps are scheduled for their tick (clamped to 500ms ahead). Body
   handles can change during a replay, which is why the handle map is
@@ -158,8 +161,19 @@ per-tick cost breakdown for each mode. All run headed.
   (tick jumps after a hard stall, interactions clamped because they predate
   the snapshot window) are logged in the panel as ANOMALY lines and marked in
   the log via claimedTick.
-- **Late join.** A joiner requests a one-shot entity snapshot from the most
-  senior peer it connects to.
+- **Late join.** A joiner requests a boot from the most senior peer it
+  connects to. The senior dumps its world as `boot` interactions (full pose,
+  velocities and grab state per entity) broadcast to every peer, itself
+  included, so the seam is part of the one shared timeline. On the boot
+  tick every peer discards its world and rebuilds it from scratch, letting
+  the boot entries recreate each body in dump order: the senior's warm
+  contact manifolds and warmstart impulses are serialised world state, so a
+  reset-in-place there vs a cold create on the joiner steps differently;
+  rebuilding from empty on all peers is the only symmetric route, and makes
+  post-seam histories bit-identical (verified: a late joiner into a settled
+  pile converges to equal per-tick hashes, with and without latency). Hash
+  exchange is floored at the seam: a joiner neither sends nor compares
+  hashes for ticks it simulated before its world was seeded.
 
 ## Experiments to try
 
@@ -176,9 +190,10 @@ per-tick cost breakdown for each mode. All run headed.
 - Convergence still depends on trusted wall clocks: peers whose clocks
   disagree bin events into different ticks. The fix is stamping interactions
   with the tick number and calibrating tick timelines explicitly.
-- Late joiners bootstrap from a JSON state dump, not a byte-exact snapshot,
-  and miss in-flight interactions; founding peers should agree exactly, a
-  late joiner starts merely close.
+- A boot seam rebuilds the world for everyone, so an interaction ordered
+  within the boot tick but before the boot itself is wiped on every peer
+  alike: consistent, but a spawn racing the seam by milliseconds can vanish
+  (and its mesh linger, as nothing deletes render entities yet).
 - No resync after divergence; the hash column only reports it.
 - No kick mechanism; exclusion is local and one-way.
 - No entity deletion, no interest management, JSON on the wire: all fine at

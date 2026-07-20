@@ -1,13 +1,13 @@
 import * as THREE from 'three'
-import { BOX_HALF } from './sim'
+import { BOX_HALF, TICK_MS } from './sim'
 import { netIdFor } from './ecs'
-import type { Vec3, InteractionType } from './types'
+import type { Vec3, Quat, InteractionType } from './types'
 import type { View } from './render'
 
 // Drag samples go on the wire (and into our own timeline) at tick rate; the
 // interactions are the ONLY thing driving the physics, locally too, so every
 // peer steps identical inputs.
-const MOVE_SEND_MS = 33
+const MOVE_SEND_MS = TICK_MS
 const CLICK_MAX_PX = 6
 const CLICK_MAX_MS = 400
 const GROUND_HALF = 19
@@ -18,7 +18,10 @@ const PALETTE = [0xe63946, 0xf4a261, 0xe9c46a, 0x2a9d8f, 0x64b5f6, 0x9b5de5, 0xf
 export interface Emitter {
   ready(): boolean
   nextNetId(): string
-  emit(type: InteractionType, netId: string, data: { pos: Vec3; vel?: Vec3; color?: number }): void
+  emit(type: InteractionType, netId: string, data: {
+    pos: Vec3; vel?: Vec3; rot?: Quat; angvel?: Vec3
+    grab?: { holder: string; order: number; target: Vec3 }; color?: number
+  }): void
 }
 
 interface Drag {

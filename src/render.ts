@@ -106,7 +106,7 @@ export class View {
 
   /**
    * alpha in [0,1] interpolates from the previous tick's pose to the current
-   * one (the sim runs at 30Hz, displays usually at 60+), so motion is shown
+   * one (the sim runs at 60Hz, displays may differ), so motion is shown
    * one tick behind but smooth.
    */
   frame(now: number, alpha: number) {
