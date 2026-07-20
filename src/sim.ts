@@ -3,10 +3,26 @@ import { wallNow, type BootEntity, type Interaction, type Vec3 } from './types'
 import { ensureEntity, entityFor, Position, Rotation, PrevPosition, PrevRotation, Tint } from './ecs'
 
 export const TICK_MS = 1000 / 30
-export const HISTORY_TICKS = 60 // 2s rollback window
+export const HISTORY_TICKS = 150 // 5s rollback window, so high fake latency still folds correctly
 export const BOX_HALF = 0.5
-const MAX_CATCHUP = 15
+const MAX_CATCHUP = 60
 const MAX_FUTURE_TICKS = 15 // tolerate ~500ms of claimed-future clock skew
+const INPUT_LOG_MAX = 100000
+
+/** One line of the input log: exactly what entered the sim, at which tick. */
+export interface InputLogEntry {
+  tick: number
+  claimedTick: number // differs from tick only when clamped (anomaly)
+  t: number
+  peer: string
+  order: number
+  seq: number
+  type: string
+  netId: string
+  pos: Vec3
+  vel?: Vec3
+  color?: number
+}
 const ZERO: Vec3 = { x: 0, y: 0, z: 0 }
 
 interface Grab { holder: string; order: number; target: Vec3 }
@@ -58,6 +74,14 @@ export class Sim {
   grabs = new Map<string, Grab>()
   rollbacks = 0
   lastReplayDepth = 0
+  /**
+   * Everything that has ever been fed into this Rapier world, with the tick
+   * it was applied at, full float precision. Download it on two peers and
+   * diff (sorted by tick, t, order, seq) to find where they disagreed.
+   */
+  inputLog: InputLogEntry[] = []
+  /** Anomalies that are expected to cause divergence (tick jumps, clamps). */
+  onAnomaly: (msg: string) => void = () => {}
   private history = new Map<number, HistoryRec>()
   private timeline: Entry[] = []
   private seen = new Set<string>()
@@ -94,10 +118,20 @@ export class Sim {
   insert(i: Interaction) {
     const key = `${i.peer}:${i.seq}`
     if (this.seen.has(key)) return
-    let k = this.tickOf(i.t)
+    const claimedTick = this.tickOf(i.t)
+    let k = claimedTick
     if (k > this.tick + MAX_FUTURE_TICKS) k = this.tick + MAX_FUTURE_TICKS
     if (k < this.tick) k = Math.max(k, this.tick - this.history.size)
+    if (k !== claimedTick) {
+      this.onAnomaly(`clamped ${i.type} from ${i.peer} by ${k - claimedTick} ticks; sims will diverge`)
+    }
     this.seen.add(key)
+    if (this.inputLog.length < INPUT_LOG_MAX) {
+      this.inputLog.push({
+        tick: k, claimedTick, t: i.t, peer: i.peer, order: i.order, seq: i.seq,
+        type: i.type, netId: i.netId, pos: i.pos, vel: i.vel, color: i.color,
+      })
+    }
     const entry: Entry = { tick: k, t: i.t, order: i.order, seq: i.seq, i }
     let lo = 0, hi = this.timeline.length
     while (lo < hi) { const m = (lo + hi) >> 1; if (before(this.timeline[m], entry)) lo = m + 1; else hi = m }
@@ -127,12 +161,14 @@ export class Sim {
   advance(now: number) {
     let n = 0
     while (this.tickOf(now) > this.tick && n < MAX_CATCHUP) { this.step(); n++ }
-    // Tab was asleep: jump to the current global tick instead of grinding
+    // Stalled hard: jump to the current global tick instead of grinding
     // through the backlog. Old snapshots are from before the gap and cannot
     // seed a replay across it, so drop them.
     if (this.tickOf(now) > this.tick) {
+      const skipped = this.tickOf(now) - this.tick
       this.tick = this.tickOf(now)
       this.history.clear()
+      this.onAnomaly(`jumped ${skipped} ticks without simulating; sims will diverge`)
     }
   }
 
@@ -254,6 +290,12 @@ export class Sim {
   applyBoot(entities: BootEntity[]) {
     for (const e of entities) {
       if (this.bodies.has(e.netId)) continue
+      if (this.inputLog.length < INPUT_LOG_MAX) {
+        this.inputLog.push({
+          tick: this.tick, claimedTick: this.tick, t: 0, peer: 'boot', order: -1, seq: 0,
+          type: 'boot', netId: e.netId, pos: e.pos, vel: e.linvel, color: e.color,
+        })
+      }
       const body = this.world.createRigidBody(
         RAPIER.RigidBodyDesc.dynamic()
           .setTranslation(e.pos.x, e.pos.y, e.pos.z)

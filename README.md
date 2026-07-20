@@ -78,11 +78,25 @@ Playwright smoke test (spawn replication plus a laggy drag that must converge).
 - **Contested drags.** A grab or move is last-writer-wins in timeline order,
   including stealing a grab another peer holds. Two users fighting over a box
   produce an honest tug of war; the loser sees it rubber-band away.
-- **Staleness.** An interaction older than `max(250ms, 1.5 * RTT + 120ms)`
-  (or older than the rollback window) is dropped and counts as a strike; ten
-  strikes and the peer is excluded from the sim, flagged in the panel for an
-  admin to kick. Uncheck "lag clock sync too" while faking latency to look
-  like a peer backdating history and watch yourself get excluded elsewhere.
+- **Staleness (opt-in).** With "enforce staleness limit" ticked, an
+  interaction older than `max(250ms, 1.5 * RTT + 120ms)` is dropped and
+  counts as a strike; ten strikes and the peer is excluded from the sim,
+  flagged in the panel for an admin to kick. It is off by default because a
+  dropped interaction is a guaranteed permanent divergence (the sender
+  applied what you refused), which gets in the way of determinism testing;
+  when off, arbitrarily late interactions fold in as long as they are within
+  the 5s snapshot window. Tick "enforce" and untick "lag clock sync too"
+  while faking latency to look like a peer backdating history and watch
+  yourself get excluded elsewhere.
+- **Input log.** Everything fed into the local Rapier world is recorded with
+  full float precision as `{tick, claimedTick, t, peer, order, seq, type,
+  netId, pos, vel}`. "download input log" saves it as JSON; grab it from two
+  peers and diff (sort by tick, t, order, seq) to see exactly where their
+  inputs disagreed. If the logs match but state hashes differ, the divergence
+  is in the engine, not the netcode. Events that are expected to break sync
+  (tick jumps after a hard stall, interactions clamped because they predate
+  the snapshot window) are logged in the panel as ANOMALY lines and marked in
+  the log via claimedTick.
 - **Late join.** A joiner requests a one-shot entity snapshot from the most
   senior peer it connects to.
 - **Divergence.** Sims are best-effort deterministic only. A coarse hash of
@@ -111,5 +125,6 @@ Playwright smoke test (spawn replication plus a laggy drag that must converge).
 - No kick mechanism; exclusion is local and one-way.
 - No entity deletion, no interest management, JSON on the wire, snapshots
   every tick: all fine at jig scale, all replaceable later.
-- A hidden tab stops simulating and rebases its clock on return rather than
-  replaying the gap.
+- Hidden tabs keep simulating via an unthrottled worker heartbeat, but a hard
+  stall of more than 2s (debugger pause, machine sleep) still jumps ticks and
+  is reported as an ANOMALY rather than repaired.

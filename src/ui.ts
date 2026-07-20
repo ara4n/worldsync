@@ -24,6 +24,8 @@ export interface Hooks {
   onLatency(v: number): void
   onLagPings(v: boolean): void
   onRubber(v: number): void
+  onEnforceStale(v: boolean): void
+  onDumpInputs(): void
 }
 
 export class UI {
@@ -36,9 +38,11 @@ export class UI {
     root.innerHTML = `
       <h1>worldsync</h1>
       <div class="controls">
-        <label>fake latency <input id="lat" type="range" min="0" max="400" step="10" value="0"> <span id="latv">0ms</span></label>
-        <label><input id="lagpings" type="checkbox" checked> lag clock sync too (uncheck to look like a cheater)</label>
+        <label>fake latency <input id="lat" type="range" min="0" max="1000" step="25" value="0"> <span id="latv">0ms</span></label>
+        <label><input id="lagpings" type="checkbox" checked> lag clock sync too</label>
+        <label><input id="stale" type="checkbox"> enforce staleness limit (drop and strike too-old interactions)</label>
         <label>rubber-band <input id="rubber" type="number" min="0" max="2000" step="25" value="100"> ms</label>
+        <button id="dump">download input log</button>
       </div>
       <div id="status"></div>
       <div id="log"></div>`
@@ -51,6 +55,9 @@ export class UI {
     lp.onchange = () => hooks.onLagPings(lp.checked)
     const rb = root.querySelector('#rubber') as HTMLInputElement
     rb.oninput = () => hooks.onRubber(Number(rb.value))
+    const st = root.querySelector('#stale') as HTMLInputElement
+    st.onchange = () => hooks.onEnforceStale(st.checked)
+    ;(root.querySelector('#dump') as HTMLButtonElement).onclick = () => hooks.onDumpInputs()
   }
 
   log(line: string) {

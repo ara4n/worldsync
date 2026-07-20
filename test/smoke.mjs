@@ -62,7 +62,14 @@ console.log(`a pos ${JSON.stringify(pa)}`)
 console.log(`b pos ${JSON.stringify(pb)}`)
 console.log(`divergence ${dist.toFixed(3)}m, rollbacks on b: ${rollbacksB}`)
 
+const getLog = page => page.evaluate(() =>
+  JSON.stringify([...window.__jig.sim.inputLog].sort((x, y) =>
+    x.tick - y.tick || x.t - y.t || x.order - y.order || x.seq - y.seq)))
+const [logA, logB] = await Promise.all([getLog(a), getLog(b)])
+console.log(`input logs ${logA === logB ? 'identical' : 'DIFFER'} (${JSON.parse(logA).length} entries)`)
+
 if (dist > 1.0) fail(`sims diverged by ${dist.toFixed(3)}m after drag`)
+if (logA !== logB) fail('peers fed different inputs to their sims')
 if (rollbacksB < 1) fail('expected the laggy drag to force rollbacks on b')
 const moved = Math.hypot(pa.x, pa.z) > 0.5
 if (!moved) fail('drag did not move the box')

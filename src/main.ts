@@ -14,17 +14,37 @@ async function main() {
   await sim.init()
   const view = new View(document.body)
   const net = new Net()
+  // Off by default so arbitrary fake latency folds instead of dropping;
+  // dropped interactions are a guaranteed permanent divergence.
+  let enforceStale = false
   const ui = new UI(document.getElementById('panel')!, {
     onLatency: v => { net.sendDelayMs = v },
     onLagPings: v => { net.lagPings = v },
     onRubber: v => { view.rubberMs = v },
+    onEnforceStale: v => { enforceStale = v },
+    onDumpInputs: () => {
+      const blob = new Blob(
+        [JSON.stringify({ peer: net.id, order: net.order, tick: sim.tick, log: sim.inputLog }, null, 1)],
+        { type: 'application/json' })
+      const a = document.createElement('a')
+      a.href = URL.createObjectURL(blob)
+      a.download = `inputs-${net.id}.json`
+      a.click()
+      URL.revokeObjectURL(a.href)
+    },
   })
   net.onLog = l => ui.log(l)
+  sim.onAnomaly = m => ui.log(`ANOMALY: ${m}`)
 
   let seq = 0
   let spawnCount = 0
   let ownHash = 0
   let bootAsked = false
+
+  // JSON round-trips doubles exactly except that -0 becomes 0, so normalise
+  // negative zeros at the source to keep local and remote inputs bit-equal.
+  const z = (n: number) => n + 0 === 0 ? 0 : n
+  const zv = (v: { x: number; y: number; z: number }) => ({ x: z(v.x), y: z(v.y), z: z(v.z) })
 
   const out: Emitter = {
     ready: () => net.id !== '',
@@ -32,7 +52,7 @@ async function main() {
     emit(type, netId, data) {
       const i: Interaction = {
         peer: net.id, order: net.order, seq: seq++, t: wallNow(),
-        type, netId, pos: data.pos, vel: data.vel, color: data.color,
+        type, netId, pos: zv(data.pos), vel: data.vel && zv(data.vel), color: data.color,
       }
       sim.insert(i)
       net.broadcast({ kind: 'i', i })
@@ -58,9 +78,11 @@ async function main() {
         if (peer.excluded) return
         // The claimed timestamp is trusted as-is; age against our own wall
         // clock decides staleness (peer.offset is reported, not applied).
-        const age = wallNow() - msg.i.t
-        const limit = staleLimit(peer)
-        if (age > limit) { strike(peer, `${age.toFixed(0)}ms old, limit ${limit.toFixed(0)}ms`); return }
+        if (enforceStale) {
+          const age = wallNow() - msg.i.t
+          const limit = staleLimit(peer)
+          if (age > limit) { strike(peer, `${age.toFixed(0)}ms old, limit ${limit.toFixed(0)}ms`); return }
+        }
         sim.insert(msg.i)
         break
       }
@@ -136,6 +158,18 @@ async function main() {
     requestAnimationFrame(frame)
   }
   requestAnimationFrame(frame)
+
+  // Hidden tabs get no rAF, and throttled timers alone would eventually trip
+  // the tick-jump anomaly; worker messages are not throttled, so a worker
+  // heartbeat keeps the sim stepping (without rendering) in the background.
+  const ticker = new Worker(URL.createObjectURL(new Blob(
+    ['setInterval(() => postMessage(0), 100)'], { type: 'application/javascript' })))
+  ticker.onmessage = () => {
+    if (!document.hidden) return
+    sim.fold()
+    sim.advance(wallNow())
+    sim.mirror()
+  }
 
   // Hooks for automated smoke tests and console poking.
   ;(window as any).__jig = {
