@@ -2,9 +2,13 @@ import { Room as LivekitRoom, RoomEvent, Track } from 'livekit-client'
 import type { MatrixClient } from 'matrix-js-sdk'
 
 /**
- * The data path under MatrixNet, small enough to fake: LiveKit text streams
- * in production, a BroadcastChannel loopback in the mock dev host. Identities
- * are MatrixRTC member ids (`${userId}:${deviceId}`).
+ * The data path under MatrixNet, small enough to fake: LiveKit's reliable
+ * data channel in production, a BroadcastChannel loopback in the mock dev
+ * host. ORDER MATTERS: the session's beat-attestation rule (drop ops
+ * stamped before the author's own beat) presumes per-sender FIFO delivery,
+ * which the reliable data channel provides - text streams do NOT (each
+ * sendText is its own chunked stream, delivered in completion order, so a
+ * beat can overtake the ops sent just before it and get them struck).
  */
 export interface DataTransport {
   connect(): Promise<void>
@@ -98,10 +102,13 @@ export class LiveKitTransport implements DataTransport {
     this.onParticipants(new Set([...this.room.remoteParticipants.values()].map(p => p.identity)))
   }
 
+  private readonly encoder = new TextEncoder()
+  private readonly decoder = new TextDecoder()
+
   async connect() {
-    this.room.registerTextStreamHandler(TOPIC, async (reader, participant) => {
-      const text = await reader.readAll()
-      if (participant) this.onData(participant.identity, text)
+    this.room.on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
+      if (topic !== TOPIC || !participant) return
+      this.onData(participant.identity, this.decoder.decode(payload))
     })
     const emit = () => this.emitParticipants()
     this.room.on(RoomEvent.ParticipantConnected, emit)
@@ -182,7 +189,8 @@ export class LiveKitTransport implements DataTransport {
   }
 
   send(to: string | null, data: string) {
-    void this.room.localParticipant.sendText(data, {
+    void this.room.localParticipant.publishData(this.encoder.encode(data), {
+      reliable: true, // retransmitted AND per-sender ordered, unlike text streams
       topic: TOPIC,
       destinationIdentities: to === null ? undefined : [to],
     }).catch(() => {}) // transient disconnects drop messages, like any transport
