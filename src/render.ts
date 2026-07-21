@@ -46,6 +46,35 @@ export class View {
     addEventListener('keyup', e => { if (e.key === 'Meta' || e.key === 'Control') setOrbit(false) })
     addEventListener('blur', () => setOrbit(false))
 
+    // Wheel is ours, not OrbitControls': a trackpad two-finger drag arrives
+    // as plain wheel deltas (pan: the world follows the fingers, sliding
+    // along the ground plane), while a pinch arrives with ctrlKey set
+    // (zoom). Mouse wheels therefore pan too; ctrl-wheel zooms.
+    this.controls.enableZoom = false
+    const right = new THREE.Vector3()
+    const fwd = new THREE.Vector3()
+    this.renderer.domElement.addEventListener('wheel', e => {
+      e.preventDefault()
+      const unit = e.deltaMode === 1 ? 16 : 1 // lines -> px
+      if (e.ctrlKey || e.metaKey) {
+        const dir = this.camera.position.clone().sub(this.controls.target)
+        dir.setLength(THREE.MathUtils.clamp(dir.length() * Math.exp(e.deltaY * unit * 0.01), 1.5, 200))
+        this.camera.position.copy(this.controls.target).add(dir)
+        return
+      }
+      const dist = this.camera.position.distanceTo(this.controls.target)
+      const perPx = 2 * dist * Math.tan((this.camera.fov / 2) * Math.PI / 180) / this.renderer.domElement.clientHeight
+      right.setFromMatrixColumn(this.camera.matrix, 0)
+      right.y = 0
+      right.normalize()
+      this.camera.getWorldDirection(fwd)
+      fwd.y = 0
+      fwd.normalize()
+      const delta = right.multiplyScalar(e.deltaX * unit * perPx).addScaledVector(fwd, e.deltaY * unit * perPx)
+      this.camera.position.add(delta)
+      this.controls.target.add(delta)
+    }, { passive: false })
+
     this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x30281e, 0.7))
     this.sun = new THREE.DirectionalLight(0xffffff, 1.6)
     this.sun.castShadow = true
