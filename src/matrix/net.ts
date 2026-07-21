@@ -70,8 +70,32 @@ export class MatrixNet {
   private rtc!: MatrixRTCSession
   private transport!: DataTransport
   private reachable = new Set<string>()
+  /** membership id -> the SFU identity it matched (see matchParticipant) */
+  private sfuIdFor = new Map<string, string>()
   private announced = new Set<string>()
   private joined = false
+
+  /** The SFU identity for a membership id. The lk-jwt-service does not
+   * necessarily mint identities as `${userId}:${deviceId}` (the modern
+   * /get_token slot flow can prefix or reshape them), and an unmatched
+   * identity silently kills ALL targeted traffic (pings, pongs, boots) -
+   * broadcasts still arrive, which is maximally confusing. Match
+   * tolerantly and log the raw sets so a new format is visible. */
+  private matchParticipant(memberId: string): string | null {
+    if (this.reachable.has(memberId)) return memberId
+    for (const pi of this.reachable) {
+      if (pi.endsWith(memberId) || pi.includes(memberId) || memberId.startsWith(pi)) return pi
+    }
+    return null
+  }
+
+  private memberIdFor(sfuId: string): string | null {
+    for (const [mid, sid] of this.sfuIdFor) if (sid === sfuId) return mid
+    for (const id of this.peers.keys()) {
+      if (sfuId === id || sfuId.endsWith(id) || sfuId.includes(id) || id.startsWith(sfuId)) return id
+    }
+    return null
+  }
 
   async connect(
     p: WidgetParams, lkServiceUrl: string | null,
@@ -124,10 +148,15 @@ export class MatrixNet {
       : new LiveKitTransport(client, serviceUrl!, p.roomId, p.userId, p.deviceId)
     this.transport.onLog = l => this.onLog(l)
     this.transport.onData = (from, data) => {
-      try { this.onMessage(from, JSON.parse(data)) } catch { /* not ours */ }
+      // 'from' is the SFU identity; the session keys peers by membership id
+      try { this.onMessage(this.memberIdFor(from) ?? from, JSON.parse(data)) } catch { /* not ours */ }
     }
     this.transport.onParticipants = ids => {
+      const changed = ids.size !== this.reachable.size || [...ids].some(i => !this.reachable.has(i))
       this.reachable = ids
+      if (changed && !p.mockTransport) {
+        this.onLog(`transport participants: ${[...ids].join(', ') || '(none)'}`)
+      }
       this.reconcile()
     }
 
@@ -168,18 +197,20 @@ export class MatrixNet {
     // behind (the delayed leave event may never fire), and a joiner would
     // wait forever to calibrate against a senior that cannot answer. Give
     // real seniors a grace period to show up on the transport; if none of
-    // them do, declare them ghosts.
+    // them do, declare them ghosts. This also covers the senior-MOST peer
+    // rejoining a room of juniors: it has no senior to calibrate from, and
+    // before rooting fresh it gets the same grace for a running junior's
+    // pong to hand it the existing grid (Session adopts any calibrated
+    // peer's grid, whatever its order).
     setTimeout(() => {
-      let anySenior = false
       let reachableSenior = false
       for (const m of this.rtc.memberships) {
         const id = `${m.userId}:${m.deviceId}`
         if (id === this.id || m.createdTs() >= this.order) continue
-        anySenior = true
-        if (this.reachable.has(id)) reachableSenior = true
+        if (this.matchParticipant(id) !== null) reachableSenior = true
       }
-      if (anySenior && !reachableSenior) {
-        this.onLog('senior members never became reachable; treating them as ghosts')
+      if (!reachableSenior) {
+        this.onLog('no reachable senior after the grace period; rooting the grid here unless a running peer calibrates us first')
         this.onSeniorsUnreachable()
       }
     }, GHOST_GRACE_MS)
@@ -293,7 +324,9 @@ export class MatrixNet {
         peer = { id, order: ts, connected: false }
         this.peers.set(id, peer)
       }
-      const reachableNow = this.reachable.has(id)
+      const sfuId = this.matchParticipant(id)
+      if (sfuId !== null) this.sfuIdFor.set(id, sfuId)
+      const reachableNow = sfuId !== null
       if (reachableNow && !this.announced.has(id)) {
         peer.connected = true
         this.announced.add(id)
@@ -314,11 +347,13 @@ export class MatrixNet {
 
   private sendRaw(to: string | null, msg: DcMessage) {
     if (!this.transport) return // still connecting; peers are not up yet either
+    // targeted sends need the SFU identity, not the membership id
+    const dest = to === null ? null : this.sfuIdFor.get(to) ?? to
     const data = JSON.stringify(msg)
     const clockMsg = msg.kind === 'ping' || msg.kind === 'pong'
     const delay = clockMsg && !this.lagPings ? 0 : this.sendDelayMs
-    if (delay > 0) setTimeout(() => this.transport.send(to, data), delay)
-    else this.transport.send(to, data)
+    if (delay > 0) setTimeout(() => this.transport.send(dest, data), delay)
+    else this.transport.send(dest, data)
   }
 
   sendToId(id: string, msg: DcMessage) { this.sendRaw(id, msg) }
