@@ -32,6 +32,13 @@ const screenCount = f => f.evaluate(() => window.__jig.view.screens.size)
 const waitScreens = (f, n, why) =>
   f.waitForFunction(want => window.__jig.view.screens.size === want, n, { timeout: 15000 })
     .catch(async () => fail(`${why}: expected ${n} screens, have ${await screenCount(f)}`))
+const colliderCount = f => f.evaluate(() =>
+  [...window.__jig.sim.props.values()].filter(p => p.kind === 'collider').length)
+const waitColliders = (f, n, why) =>
+  f.waitForFunction(want =>
+    [...window.__jig.sim.props.values()].filter(p => p.kind === 'collider').length === want,
+  n, { timeout: 15000 })
+    .catch(async () => fail(`${why}: expected ${n} colliders, have ${await colliderCount(f)}`))
 
 const a = await open('a')
 const b = await open('b')
@@ -44,6 +51,11 @@ console.log('a uploaded videoconf; each tab should lay out one screen per partic
 await waitScreens(a, 2, 'a after upload')
 await waitScreens(b, 2, 'b after upload')
 
+// The screens are solid: the primary emits one collider prop per screen,
+// and they replicate as sim state to both tabs.
+await waitColliders(a, 2, 'a colliders')
+await waitColliders(b, 2, 'b colliders')
+
 // The mock transport has no media path: the camera button must stay hidden
 // even though the script requested video.
 for (const [f, name] of [[a, 'a'], [b, 'b']]) {
@@ -54,8 +66,9 @@ for (const [f, name] of [[a, 'a'], [b, 'b']]) {
 }
 
 await b.page().close()
-console.log('b closed; a should drop to one screen...')
+console.log('b closed; a should drop to one screen and one collider...')
 await waitScreens(a, 1, 'a after b left')
+await waitColliders(a, 1, 'a colliders after b left')
 
 console.log(process.exitCode ? 'VIDEOCONF TEST FAILED' : 'VIDEOCONF TEST PASSED')
 await browser.close()

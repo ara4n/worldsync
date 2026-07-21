@@ -30,17 +30,36 @@ function frameLoop(pos, yaw, w, h) {
   return [c(-1, -1), c(1, -1), c(1, 1), c(-1, 1), c(-1, -1)]
 }
 
+/** where screen i of n lives on the stacked semicircle */
+function poseFor(i, total) {
+  const row = Math.floor(i / PER_ROW)
+  const inRow = Math.min(total - row * PER_ROW, PER_ROW)
+  const col = i - row * PER_ROW
+  const a = (col - (inRow - 1) / 2) * STEP
+  return { pos: { x: RADIUS * Math.sin(a), y: ROW_Y + row * ROW_H, z: -RADIUS * Math.cos(a) }, yaw: -a }
+}
+
 function layout(peers) {
   for (let i = 0; i < peers.length; i++) {
-    const row = Math.floor(i / PER_ROW)
-    const inRow = Math.min(peers.length - row * PER_ROW, PER_ROW)
-    const col = i - row * PER_ROW
-    const a = (col - (inRow - 1) / 2) * STEP
-    const pos = { x: RADIUS * Math.sin(a), y: ROW_Y + row * ROW_H, z: -RADIUS * Math.cos(a) }
+    const { pos, yaw } = poseFor(i, peers.length)
     const s = screens[peers[i].id]
     s.screen.position = pos
-    s.screen.yaw = -a
-    s.frame.points = frameLoop(pos, -a, SW, SH)
+    s.screen.yaw = yaw
+    s.frame.points = frameLoop(pos, yaw, SW, SH)
+  }
+}
+
+/** The screens are solid: boxes thrown at them bounce off. Colliders are
+ * sim state (they shape physics, which must converge bit-identically), so
+ * they ride the op timeline and only the primary maintains them - the
+ * same single-runner pattern as board seeding - rebuilding the set on
+ * every membership change. */
+function syncColliders(peers) {
+  if (!world.me.primary) return
+  for (const p of world.props()) if (p.kind === 'collider') world.despawn(p.id)
+  for (let i = 0; i < peers.length; i++) {
+    const { pos, yaw } = poseFor(i, peers.length)
+    world.createSolid({ position: pos, yaw, dims: { x: SW, y: SH, z: 0.08 } })
   }
 }
 
@@ -67,4 +86,5 @@ world.onupdate = () => {
     }
   }
   layout(peers)
+  syncColliders(peers)
 }
