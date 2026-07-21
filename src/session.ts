@@ -187,6 +187,22 @@ export class Session {
     }
   }
 
+  /**
+   * The transport's judgement that every senior membership is a ghost
+   * (dead session whose delayed leave never fired): stop waiting for a
+   * calibration pong that cannot come and root the grid here. A no-op if
+   * a live senior did connect (it is in peers, so we are not the root) or
+   * calibration already happened. If a senior then turns out to be alive
+   * after all, its pongs trigger a hard resync + boot seam, which heals.
+   */
+  seniorsUnreachable() {
+    if (!this.tickClock.calibrated && this.id && this.rootOrder() === this.order) {
+      this.onLog('no senior is reachable (ghost memberships?); rooting the tick grid here')
+      this.tickClock.set(this.clock(), 0)
+      this.start()
+    }
+  }
+
   // JSON round-trips doubles exactly except that -0 becomes 0, so normalise
   // negative zeros at the source to keep local and remote inputs bit-equal.
   private z = (n: number) => n + 0 === 0 ? 0 : n

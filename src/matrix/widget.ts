@@ -1,4 +1,7 @@
-import { WidgetApi, MatrixCapabilities } from 'matrix-widget-api'
+import {
+  WidgetApi, MatrixCapabilities, WidgetApiToWidgetAction,
+  type INotifyCapabilitiesActionRequest,
+} from 'matrix-widget-api'
 import { createRoomWidgetClient, EventType, type MatrixClient, type ICapabilities } from 'matrix-js-sdk'
 import type { WidgetParams } from './params'
 import { WORLD_EVENT_TYPE } from './world'
@@ -12,6 +15,17 @@ import { WORLD_EVENT_TYPE } from './world'
  */
 export async function initWidgetClient(p: WidgetParams): Promise<{ api: WidgetApi; client: MatrixClient }> {
   const api = new WidgetApi(p.widgetId, new URL(p.parentUrl).origin)
+  // Log exactly what the host granted: a quietly-denied capability (easy
+  // to do in a re-approval prompt after this widget asks for new ones)
+  // presents as a silent hang - e.g. no m.call.member echo means the
+  // session never learns its own membership and never starts.
+  api.on(`action:${WidgetApiToWidgetAction.NotifyCapabilities}`, (raw: Event) => {
+    const ev = raw as CustomEvent<INotifyCapabilitiesActionRequest>
+    const { requested, approved } = ev.detail.data
+    const denied = requested.filter(c => !approved.includes(c))
+    console.log('[worldsync] capabilities approved:', approved)
+    if (denied.length) console.warn('[worldsync] capabilities DENIED by the host:', denied)
+  })
   api.requestCapability(MatrixCapabilities.AlwaysOnScreen)
   // MSC4039 media actions: the glTF scene GLB is uploaded/downloaded through
   // the host, since the widget has no access token for the media repo.

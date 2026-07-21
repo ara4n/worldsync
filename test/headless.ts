@@ -2,6 +2,7 @@
 // sockets, fully deterministic. Run with: npm run test:headless
 import { createHub } from '../src/hub'
 import { TICK_MS } from '../src/sim'
+import { WorldScript, type ScriptHost } from '../src/websg'
 
 let failures = 0
 const check = (cond: boolean, what: string) => {
@@ -202,14 +203,40 @@ async function glbSceneConverges() {
   const y = a.sim.body(id)!.translation().y
   check(Math.abs(y - 1.5) < 0.05, `box rests on the scene shelf, not the ground (y=${y.toFixed(3)})`)
 
-  // late joiner adopts the scene from "room state" before calibrating, so
-  // its boot-seam world matches the seniors' from the first snapshot
+  // the ground plane yields to the scene: a box off the shelf falls forever
+  const off = a.session.nextNetId()
+  a.session.emit('spawn', off, { pos: { x: 10, y: 3, z: 0 } })
+  hub.run(2 * S)
+  check(a.sim.body(off)!.translation().y < -5,
+    `ground yields to the scene (off-shelf box fell to y=${a.sim.body(off)!.translation().y.toFixed(1)})`)
+
+  // clearing the scene is a deterministic world RESET: bodies dropped,
+  // ground back
+  a.session.emit('scene', '', { pos: { x: 0, y: 0, z: 0 } }, a.sim.tick + 12)
+  hub.run(1 * S)
+  check(a.sim.bodies.size === 0 && b.sim.bodies.size === 0,
+    `scene clear reset the world (a ${a.sim.bodies.size}, b ${b.sim.bodies.size} bodies)`)
+  const back = a.session.nextNetId()
+  a.session.emit('spawn', back, { pos: { x: 5, y: 2, z: 0 } })
+  hub.run(2 * S)
+  check(Math.abs(a.sim.body(back)!.translation().y - 0.5) < 0.05,
+    `ground returns when the scene clears (y=${a.sim.body(back)!.translation().y.toFixed(3)})`)
+
+  // reload the scene (the state event still names it), then a late joiner
+  // adopts it from "room state" before calibrating, so its boot-seam world
+  // matches the seniors' from the first snapshot
+  a.session.emit('scene', url, { pos: { x: 0, y: 0, z: 0 } }, a.sim.tick + 12)
+  hub.run(1 * S)
+  check(a.sim.bodies.size === 0, 'scene reload reset the world again')
   const c = await hub.join('c')
   c.sim.registerSceneGeometry(url, geom)
   c.sim.adoptScene(url)
-  hub.run(8 * S)
-  const cy = c.sim.body(id)!.translation().y
-  check(Math.abs(cy - 1.5) < 0.05, `joiner sees the box on the shelf too (y=${cy.toFixed(3)})`)
+  hub.run(2 * S)
+  const post = a.session.nextNetId()
+  a.session.emit('spawn', post, { pos: { x: 0, y: 3, z: 0 } })
+  hub.run(6 * S)
+  const cy = c.sim.body(post)!.translation().y
+  check(Math.abs(cy - 1.5) < 0.05, `joiner sees a box land on the shelf too (y=${cy.toFixed(3)})`)
   const settled = a.sim.tick - 400
   for (const [x, z, name] of [[a, b, 'a/b'], [a, c, 'a/c'], [b, c, 'b/c']] as const) {
     check(hashDiff(x, z, settled).length === 0, `${name}: no divergent settled ticks`)
@@ -220,6 +247,96 @@ async function glbSceneConverges() {
   check(a.sim.anomalies.length === 0 && c.sim.anomalies.length === 0, 'a and c: no anomalies')
   check(b.sim.anomalies.every(m => m.includes('scene')) && b.sim.anomalies.length > 0,
     `b: exactly the expected missing-geometry anomaly (${b.sim.anomalies.length})`)
+}
+
+/** the same op mapping main.ts gives the sandbox, wired to a hub peer */
+const hostFor = (p: HubPeer): ScriptHost => ({
+  log: () => {},
+  boxes: () => [...p.sim.bodies.keys()].map(id => {
+    const t = p.sim.body(id)!.translation()
+    const g = p.sim.grabs.get(id)
+    return { id, x: t.x, y: t.y, z: t.z, grabbed: !!g, mine: g?.holder === p.id }
+  }),
+  box: id => {
+    const b = p.sim.body(id)
+    if (!b) return null
+    const t = b.translation()
+    const g = p.sim.grabs.get(id)
+    return { x: t.x, y: t.y, z: t.z, grabbed: !!g, mine: g?.holder === p.id }
+  },
+  sceneNode: () => null,
+  spawn: (x, y, z, color) => {
+    const id = p.session.nextNetId()
+    p.session.emit('spawn', id, { pos: { x, y, z }, color })
+    return id
+  },
+  grab: id => {
+    const b = p.sim.body(id)
+    if (!b || p.sim.grabs.has(id)) return false
+    const t = b.translation()
+    p.session.emit('grab', id, { pos: { x: t.x, y: t.y, z: t.z } })
+    return true
+  },
+  moveTo: (id, x, y, z) => {
+    const g = p.sim.grabs.get(id)
+    if (!g || g.holder !== p.id) return false
+    p.session.streamPose(id, { x, y, z })
+    return true
+  },
+  release: (id, vx, vy, vz) => {
+    const g = p.sim.grabs.get(id)
+    if (!g || g.holder !== p.id) return false
+    const b = p.sim.body(id)
+    const t = b ? b.translation() : { x: 0, y: 0, z: 0 }
+    p.session.emit('release', id, { pos: { x: t.x, y: t.y, z: t.z }, vel: { x: vx, y: vy, z: vz } })
+    return true
+  },
+})
+
+async function sandboxedScriptConverges() {
+  console.log('\n-- sandboxed WebSG script drives the world through ops only --')
+  const hub = createHub(40)
+  const a = await hub.join('a')
+  const b = await hub.join('b')
+  hub.run(1 * S)
+  // spawn, wait for the op to apply, grab, wave for 1.5s, throw
+  const script = await WorldScript.create(`
+    let phase = 'spawn', box = null, t0 = 0
+    world.onenter = () => console.log('entered')
+    world.onupdate = (dt, time) => {
+      if (phase === 'spawn') { box = world.createNode({ translation: [0, 3, 0], color: 0xff8800 }); phase = 'grab' }
+      else if (phase === 'grab') { if (box.grab()) { t0 = time; phase = 'drag' } }
+      else if (phase === 'drag') {
+        if (time - t0 < 1.5) box.moveTo(Math.sin((time - t0) * 4) * 2, 1.2, 0)
+        else { box.release([1, 2, 0]); phase = 'done' }
+      }
+    }
+  `, hostFor(a))
+  script.enter()
+  let last = a.sim.tick
+  hub.run(6 * S, () => {
+    if (a.sim.tick > last) {
+      const dt = (a.sim.tick - last) / 60
+      last = a.sim.tick
+      script.update(dt, (a.sim.tick - a.session.startTick) / 60)
+    }
+  })
+  check(!script.dead, 'script survived (no dispatch errors)')
+  script.dispose()
+  hub.run(4 * S)
+
+  check(a.sim.bodies.size === 1 && b.sim.bodies.size === 1,
+    `script box replicated (a ${a.sim.bodies.size}, b ${b.sim.bodies.size})`)
+  const id = [...a.sim.bodies.keys()][0]
+  const t = a.sim.body(id)!.translation()
+  check(Math.abs(t.x) > 0.3, `box was dragged and thrown off origin (x=${t.x.toFixed(2)})`)
+  check(!a.sim.grabs.has(id), 'box was released')
+  const settled = a.sim.tick - 400
+  check(hashDiff(a, b, settled).length === 0, 'no divergent settled ticks')
+  for (const p of [a, b]) {
+    check(p.sim.anomalies.length === 0, `${p.id}: no anomalies`)
+    check([...p.session.peers.values()].every(q => q.checked && q.divergedAt === null), `${p.id}: hash exchange clean`)
+  }
 }
 
 async function backdaterStruck() {
@@ -244,5 +361,6 @@ await threePeerMesh()
 await skewedClocks()
 await spawnRacesJoin()
 await glbSceneConverges()
+await sandboxedScriptConverges()
 await backdaterStruck()
 console.log(`\n${failures === 0 ? 'HEADLESS SUITE PASSED' : `${failures} FAILURES`} (${((Date.now() - t0) / 1000).toFixed(1)}s real for ~72s virtual)`)

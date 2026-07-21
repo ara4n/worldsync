@@ -26,7 +26,17 @@ with the same signaling.
 
 Controls: click the ground to spawn a box, drag a box to move it (physics
 resumes on release, with throw velocity), cmd-drag or right-drag orbits,
-wheel zooms.
+two-finger drag pans along the ground plane, pinch or ctrl-wheel zooms.
+
+Rendering: cascaded shadow maps (4 cascades, splits weighted hard toward
+the camera so contact shadows get millimetre texels), double-sided
+shadow casting with a tiny normal bias - the combination that finally
+killed both shadow acne and peter-panning at box/ground contacts - and
+ACES filmic tone mapping (exposure 1.2) so glossy glTF floors show a
+graded specular sheen instead of a clipped white blob. The renderer
+logs a feature stamp (`[worldsync] renderer: ...`) at startup so a
+screenshot can be matched to the code that drew it; host iframes cache
+aggressively enough that this matters.
 
 ## Matrix widget mode (matryoshka)
 
@@ -62,13 +72,70 @@ host's MSC4039 media actions, points the room's
 every peer swaps in the scene's colliders on the same tick. Each peer
 bakes the GLB's meshes into one fixed trimesh (deterministically: same
 bytes, same traversal, f64 transforms rounded to f32 identically), so
-boxes rest on and roll off the scene bit-identically everywhere. The
-scene rides history snapshots and the boot seam like any other sim state;
+boxes rest on and roll off the scene bit-identically everywhere.
+Real-world GLBs decode fully: KTX2/Basis textures, Draco and meshopt
+geometry (decoder binaries served from `public/basis` and
+`public/draco`, pinned to the three version), and
+`EXT_mesh_gpu_instancing` meshes bake one collider copy per instance at
+`matrixWorld * instanceMatrix` - baking only the node transform parks a
+phantom collider at the node origin and leaves the visible instances
+untouchable. A scene
+(re)load is a deterministic world RESET at the op's tick: every body is
+dropped (no stale pile floating inside the new world) and the default
+ground plane yields to the scene's own floors, returning when the scene
+is cleared. The scene rides history snapshots and the boot seam like any
+other sim state;
 late joiners fetch and adopt it from room state before tick calibration,
 and a peer whose download outlives the op's lead applies the op hollow
 (one logged anomaly) and heals by folding from the op's tick once the
 geometry arrives. Requires widget mode - the classic ws demo has no media
 repo to share bytes through, so its button just explains that.
+
+**MSC3815 `script_url` (WebSG scripts)** is supported too: the panel's
+"load world script" button uploads a JS file and merges `script_url` into
+the world state event. The script runs in a QuickJS-in-WASM sandbox
+(quickjs-emscripten, singlefile variant) with a 32MB memory limit, 1MB
+stack, and a 20ms interrupt deadline per hook call - tighter than
+thirdroom's runtime, which relies on its fixed 64MiB WASM heap alone. The
+API is a WebSG-flavoured subset: `world.onload` / `world.onenter` /
+`world.onupdate(dt, time)`, `world.createNode({translation, color})`,
+`world.findNodeByName`, `world.boxes()`, `node.translation`, plus
+worldsync extensions `node.grab()` / `node.moveTo()` / `node.release(vel)`
+for driving bodies through the grab pipeline. `examples/stir.js` is an
+uploadable demo.
+
+The execution model deliberately differs from thirdroom. There, every
+peer runs the script with its own wall-clock `dt` and networking is
+owner-authoritative replication plus interpolation - fine for that
+engine, fatal for deterministic lockstep (each peer's sandbox would read
+rolled-back state and diverge, and QuickJS heaps cannot be snapshotted
+into the rollback history). Here the script runs ONLY on the current
+root peer, and everything it does leaves the sandbox as ordinary ops
+(spawn / grab / pose / release) on the shared tick grid: remote peers
+fold script effects exactly like human input, so determinism is
+preserved without the sandbox ever being rollback state. The trade: the
+script is a singleton with local state - a root handover (root closes or
+becomes unreachable) restarts it from scratch on the successor, and
+during a network partition both sides can briefly run it (split-brain,
+doubled effects) until connectivity settles. Script authority follows
+the senior-most *reachable* peer, so a ghost membership does not hold
+the script hostage even though it still blocks tick calibration.
+
+WebSG API gaps against thirdroom's surface, and how they collide with
+the world model: materials, lights, meshes, UI canvases, the action bar,
+ECS component stores, and collision listeners are all absent - worldsync
+has no deterministic backend for them, since the op vocabulary is the
+only mutation channel (a script-created material would exist on the root
+alone). `node.translation` is a read-only snapshot, not thirdroom's
+live write-through wrapper: writing a transform directly would bypass
+the tick grid, so movement must go through grab/moveTo/release.
+Collision events would need deterministic contact extraction from
+Rapier, which differs across peers inside the unsettled window; physics
+impulses (`PhysicsBody.applyImpulse`) would need a new op type to be
+foldable. `network.*` (host detection, broadcast, replicators) is
+unnecessary by construction - replication IS the sim - but that also
+means scripts cannot yet react to per-peer input, and raw-WASM scripts
+(which thirdroom accepts alongside JS) are not supported.
 
 For the dev loop, `/mock.html?room=x` is a mock widget host: the real
 `ClientWidgetApi` against an in-memory widget driver whose room state is
@@ -81,7 +148,9 @@ MSC4039 media repo gossiped between tabs so scene upload works too. `node
 test/mockwidget.mjs` asserts bit-exact convergence through this stack,
 late join included; `node test/scene.mjs` runs the full scene flow across
 three tabs (upload, live fetch, late-join preload) and asserts the healed
-peer converges to the bit.
+peer converges to the bit; `node test/script.mjs` uploads a world script,
+asserts only the root runs it (with no divergence), then closes the root
+tab and asserts the survivor takes the script over.
 
 To embed for real, serve the app (dev server works: `npm run dev --
 --host`) and add it to a room in Element Web with
@@ -91,17 +160,29 @@ To embed for real, serve the app (dev server works: `npm run dev --
 ```
 
 (Element Web substitutes the `$`-templates and appends `parentUrl`
-itself; add `&lkService=` if the homeserver's `.well-known` does not
-advertise `org.matrix.msc4143.rtc_foci`.) Status: against a live Element
-Web + matrix.org the widget params and handshake are verified up to the
-capability exchange; the LiveKit transport follows element-call's sdk
-patterns but has not yet been exercised against a real SFU
-(element-call's `pnpm backend` provides one), and LiveKit text streams
-are not yet end-to-end encrypted - wiring the MatrixRTC key events into
-payload encryption is the natural next step. A known trap: a ghost
-`m.call.member` from a killed session makes a solo joiner wait for a
-senior peer that will never answer calibration pings; until the
-reachable-senior fallback lands, use a fresh room.
+itself.) The lk-jwt-service is discovered element-call style: a
+transport advertised by an existing member, else the client well-known,
+else the user's homeserver `/.well-known/matrix/client` fetched
+directly (a RoomWidgetClient never talks to a homeserver itself, so the
+sdk's well-known is usually empty in widget mode); `&lkService=`
+overrides all of that. Status: verified END-TO-END against Element
+Desktop + matrix.org + livekit-jwt.call.matrix.org - handshake,
+capability grant (the widget logs the approved/denied sets, since a
+quietly-denied capability presents as a silent hang), OpenID -> SFU JWT
+exchange, LiveKit connect, scene upload/download and play. LiveKit text
+streams are not yet end-to-end encrypted - wiring the MatrixRTC key
+events into payload encryption is the natural next step. Ghost
+`m.call.member`s from killed sessions no longer stall calibration: a
+joiner gives seniors 3s to become reachable on the transport, then
+writes them off and roots the tick grid itself (a senior that shows up
+late triggers a hard resync + boot seam and the room heals); the widget
+also leaves the RTC session on pagehide so refreshes stop minting
+ghosts. Media uploads cross the widget boundary as memory-backed Blobs:
+an `<input>` File is backed by its on-disk path, and the read grant
+does not survive the postMessage hop to the host's process (Element
+Desktop's upload dies with ERR_ACCESS_DENIED and an empty body).
+Upload failures surface the homeserver's `matrix_api_error` detail and
+pre-flight the host's media size limit.
 
 Test hooks: `npm run dev` then `node test/smoke.mjs` runs a two-browser
 Playwright smoke test (spawn replication plus a laggy drag that must
@@ -120,9 +201,10 @@ into the joiner's past). All run headed.
 stack (Session + Sim) runs on an in-process hub with a virtual clock and
 per-link one-way latencies, covering laggy drags, late joins, three-peer
 meshes, wildly skewed local clocks, ops racing a join, glTF scene
-collider swaps (slow-download heal and late-join adoption included), and
-a backdating cheater - ~72 virtual seconds, bit-exact assertions, a
-third of a real second. The hub delivers messages through a JSON round-trip so wire
+collider swaps (slow-download heal and late-join adoption included), a
+sandboxed world script driving the sim through ops, and a backdating
+cheater - ~72 virtual seconds, bit-exact assertions, a third of a real
+second. The hub delivers messages through a JSON round-trip so wire
 serialisation hazards stay exercised.
 
 ## How it works
@@ -314,8 +396,7 @@ serialisation hazards stay exercised.
   spurious strike (the 10-strike threshold absorbs it).
 - An op that folds below the boot dump's snapshot tick after the dump was
   sent is erased by the seam on every peer alike: consistent, but a
-  sufficiently laggy op racing a join can still vanish (its mesh lingers,
-  as nothing deletes render entities yet).
+  sufficiently laggy op racing a join can still vanish.
 - No resync after divergence; the hash column only reports it.
 - No kick mechanism; exclusion is local and one-way.
 - No entity deletion, no interest management, JSON on the wire: all fine at
@@ -327,11 +408,19 @@ serialisation hazards stay exercised.
   transfers (1+restitution) x hand speed to a 1kg box. A force-capped PD
   controller on a dynamic body would give finite hand mass, at the cost of
   a mushier hold.
-- Widget mode: tick calibration waits on the lowest-order membership even
-  if that peer is unreachable (ghost membership); needs a reachable-senior
-  fallback with a timeout.
+- Widget mode: the ghost-membership fallback writes seniors off after a
+  3s unreachability grace; a genuinely slow senior arriving later means
+  a hard resync and a boot seam rather than a clean calibration. One
+  unexplained session-start hang was seen with a second client present -
+  the capability/membership diagnostics should name it if it recurs.
 - Scenes are single-file `.glb` only, colliders are a raw bake of every
   mesh (no OMI_collider / physics extensions, no exclusions), and a
   joiner whose scene preload FAILS joins without colliders and diverges
   on scene contacts until a new scene op arrives; the failure is logged
   but not retried.
+- World scripts are root-singleton with unreplicated state: a root
+  handover restarts the script from scratch, and a partition can run it
+  on both sides at once (doubled effects) until connectivity settles.
+  The sandbox has no clock/network access, so a hostile script is
+  bounded to what ops can do - but ops are exactly what a hostile PEER
+  can already do, so the trust model is unchanged.
