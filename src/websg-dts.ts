@@ -104,8 +104,9 @@ declare const world: {
   onpointerdown: ((ev: WorldPointerEvent) => void) | null
   onpointermove: ((ev: WorldPointerEvent) => void) | null
   onpointerup: ((ev: WorldPointerEvent) => void) | null
-  /** arrow-key presses (ev.key: 'ArrowUp' | 'ArrowDown' | 'ArrowLeft' |
-   * 'ArrowRight'), delivered only while this handler is defined */
+  /** arrow-key and space presses (ev.key: 'ArrowUp' | 'ArrowDown' |
+   * 'ArrowLeft' | 'ArrowRight' | ' '), delivered only while this handler
+   * is defined */
   onkeydown: ((ev: { key: string }) => void) | null
 
   /** who am I: peer id, whether this peer is the current primary (senior

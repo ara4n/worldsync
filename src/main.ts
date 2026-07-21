@@ -285,7 +285,7 @@ async function main() {
   // in the panel or the monaco editor keeps them (same guard as M/V).
   addEventListener('keydown', e => {
     if (!script || !scriptKeysOn || e.metaKey || e.ctrlKey || e.altKey) return
-    if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return
+    if (![' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return
     const t = e.target as HTMLElement | null
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
     e.preventDefault()
