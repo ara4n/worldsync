@@ -24,6 +24,8 @@ export class View {
   constructor(parent: HTMLElement, public ecs: EcsStore) {
     this.renderer.setSize(innerWidth, innerHeight)
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
+    this.renderer.shadowMap.enabled = true
+    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
     parent.appendChild(this.renderer.domElement)
     this.scene.background = new THREE.Color(0x0e1116)
     this.camera.position.set(9, 9, 13)
@@ -44,14 +46,19 @@ export class View {
     addEventListener('keyup', e => { if (e.key === 'Meta' || e.key === 'Control') setOrbit(false) })
     addEventListener('blur', () => setOrbit(false))
 
-    this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x30281e, 0.9))
-    const sun = new THREE.DirectionalLight(0xffffff, 1.6)
-    sun.position.set(8, 14, 6)
-    this.scene.add(sun)
+    this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x30281e, 0.7))
+    this.sun = new THREE.DirectionalLight(0xffffff, 1.6)
+    this.sun.castShadow = true
+    this.sun.shadow.mapSize.set(4096, 4096)
+    this.sun.shadow.bias = -0.0004
+    this.scene.add(this.sun)
+    this.scene.add(this.sun.target)
+    this.fitShadows(null)
     this.ground = new THREE.Mesh(
       new THREE.PlaneGeometry(40, 40),
-      new THREE.MeshStandardMaterial({ color: 0x1a1f26, roughness: 1 }))
+      new THREE.MeshStandardMaterial({ color: 0x2a3140, roughness: 1 }))
     this.ground.rotation.x = -Math.PI / 2
+    this.ground.receiveShadow = true
     this.scene.add(this.ground)
     this.grid = new THREE.GridHelper(40, 40, 0x39414d, 0x252b33)
     this.grid.position.y = 0.01
@@ -67,13 +74,44 @@ export class View {
   private sceneRoot: THREE.Object3D | null = null
   private ground!: THREE.Mesh
   private grid!: THREE.GridHelper
+  private sun!: THREE.DirectionalLight
+
+  /**
+   * Aim the sun and size its orthographic shadow camera to cover `box`
+   * (the loaded scene's bounds), or the default jig play area when null.
+   * One cascade only: very large scenes trade shadow crispness for reach.
+   */
+  private fitShadows(box: THREE.Box3 | null) {
+    const b = box ?? new THREE.Box3(new THREE.Vector3(-20, 0, -20), new THREE.Vector3(20, 8, 20))
+    const center = b.getCenter(new THREE.Vector3())
+    const size = b.getSize(new THREE.Vector3())
+    const radius = Math.min(Math.max(size.x, size.z) * 0.5 + 5, 250)
+    const dir = new THREE.Vector3(0.45, 0.8, 0.35).normalize()
+    this.sun.position.copy(center).addScaledVector(dir, radius + size.y)
+    this.sun.target.position.copy(center)
+    this.sun.target.updateMatrixWorld()
+    const cam = this.sun.shadow.camera
+    cam.left = -radius; cam.right = radius; cam.top = radius; cam.bottom = -radius
+    cam.near = 0.1
+    cam.far = (radius + size.y) * 3
+    cam.updateProjectionMatrix()
+  }
 
   /** Swap the rendered glTF scene (null removes it). Idempotent per object. */
   setScene(obj: THREE.Object3D | null) {
     if (this.sceneRoot === obj) return
     if (this.sceneRoot) this.scene.remove(this.sceneRoot)
     this.sceneRoot = obj
-    if (obj) this.scene.add(obj)
+    if (obj) {
+      obj.traverse(node => {
+        const mesh = node as THREE.Mesh
+        if (mesh.isMesh) { mesh.castShadow = true; mesh.receiveShadow = true }
+      })
+      this.scene.add(obj)
+      this.fitShadows(new THREE.Box3().setFromObject(obj))
+    } else {
+      this.fitShadows(null)
+    }
   }
 
   /** The ground plane and grid hide while a scene is active (tracks the
@@ -106,6 +144,8 @@ export class View {
     for (const eid of live) {
       if (this.meshes.has(eid)) continue
       const mesh = new THREE.Mesh(this.geo, this.matFor(this.ecs.Tint.value[eid]))
+      mesh.castShadow = true
+      mesh.receiveShadow = true
       mesh.userData.eid = eid
       this.scene.add(mesh)
       this.meshes.set(eid, mesh)
