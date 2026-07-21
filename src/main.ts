@@ -518,6 +518,21 @@ async function main() {
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
     toggleMic()
   })
+  // On-canvas mute state, always visible (the panel can be collapsed or
+  // tiny in a widget iframe); hidden on transports with no media path.
+  const micBtn = document.createElement('button')
+  micBtn.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:20;display:none;'
+    + 'padding:8px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.3);cursor:pointer;'
+    + 'font:13px system-ui,sans-serif;color:#fff;background:rgba(20,24,32,0.75)'
+  micBtn.onclick = () => toggleMic()
+  document.body.appendChild(micBtn)
+  const micUi = () => {
+    if (!audioNet.hasAudio?.()) { micBtn.style.display = 'none'; return }
+    micBtn.style.display = 'block'
+    micBtn.textContent = micLive ? '\u{1F399} mic live · click to mute (M)' : '\u{1F507} muted · click to talk (M)'
+    micBtn.style.background = micLive ? 'rgba(46,125,50,0.9)' : 'rgba(20,24,32,0.75)'
+  }
+  setInterval(micUi, 500)
 
   if (net instanceof Net) net.connect(room)
   else {
