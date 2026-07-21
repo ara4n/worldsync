@@ -131,6 +131,13 @@ declare const world: {
    * bounce-dropping, and claims don't swell it */
   createSphere(props?: { position?: Vec3Like; translation?: Vec3Like; color?: number; radius?: number
     unlit?: boolean; bounce?: boolean }): string
+  /** spawn a prop of any kind by name: 'sphere', 'box', or a modelled kind
+   * the client renders as built-in geometry - the low-poly chess set
+   * 'pawn'|'rook'|'knight'|'bishop'|'queen'|'king', whose size is the
+   * piece's height and whose base rests at the prop position. Unknown
+   * kinds render as spheres. Returns its id. */
+  createProp(props?: { kind?: string; position?: Vec3Like; translation?: Vec3Like; color?: number
+    size?: number; unlit?: boolean; bounce?: boolean }): string
   /** spawn a kinematic cube prop (a 2*size cube); returns its id */
   createBox(props?: { position?: Vec3Like; translation?: Vec3Like; color?: number; size?: number
     unlit?: boolean; bounce?: boolean }): string

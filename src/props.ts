@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js'
 import type { Prop } from './sim'
 
 /**
@@ -15,6 +16,44 @@ import type { Prop } from './sim'
 
 interface Anim { t0: number; frames: { until: number; y0: number; y1: number; easeIn: boolean }[]; x: number; z: number; x0: number; z0: number }
 interface Dying { mesh: THREE.Mesh; t0: number }
+
+// Low-poly chess piece kinds: lathe-turned from hand-authored [radius,
+// height] profiles in piece-local units (total height 1, base resting at
+// y=0, so the prop position is where the piece stands) and scaled by the
+// prop's size, which is therefore the piece's world height. Coarse radial
+// segments plus flat shading give the faceted look; the knight and the
+// king's cross add merged boxes to the turning.
+const LATHE_SEGS = 10
+const lathe = (pts: [number, number][]) =>
+  new THREE.LatheGeometry(pts.map(([r, y]) => new THREE.Vector2(r, y)), LATHE_SEGS)
+const block = (w: number, h: number, d: number, x: number, y: number, z: number, tiltX = 0) => {
+  const g = new THREE.BoxGeometry(w, h, d)
+  if (tiltX) g.rotateX(tiltX)
+  g.translate(x, y, z)
+  return g
+}
+const PIECE_GEOS: Record<string, () => THREE.BufferGeometry> = {
+  pawn: () => lathe([[0, 0], [0.36, 0], [0.36, 0.1], [0.22, 0.22], [0.14, 0.42], [0.11, 0.56],
+    [0.2, 0.62], [0.11, 0.68], [0.19, 0.8], [0.13, 0.94], [0, 1]]),
+  rook: () => lathe([[0, 0], [0.34, 0], [0.34, 0.1], [0.22, 0.22], [0.18, 0.68], [0.28, 0.76],
+    [0.28, 1], [0.2, 1], [0.2, 0.86], [0, 0.86]]),
+  knight: () => mergeGeometries([
+    lathe([[0, 0], [0.34, 0], [0.34, 0.1], [0.22, 0.22], [0.17, 0.34], [0, 0.34]]),
+    block(0.24, 0.52, 0.26, 0, 0.55, -0.02, -0.35), // neck, leaning forward
+    block(0.18, 0.2, 0.3, 0, 0.8, 0.16, -0.35), // muzzle
+    block(0.1, 0.18, 0.12, 0, 0.9, -0.1, -0.2), // ears
+  ]),
+  bishop: () => lathe([[0, 0], [0.33, 0], [0.33, 0.09], [0.2, 0.2], [0.13, 0.45], [0.11, 0.58],
+    [0.18, 0.64], [0.1, 0.68], [0.17, 0.78], [0.12, 0.9], [0.05, 0.95], [0, 1]]),
+  queen: () => lathe([[0, 0], [0.3, 0], [0.3, 0.08], [0.19, 0.18], [0.12, 0.5], [0.1, 0.6],
+    [0.17, 0.66], [0.1, 0.7], [0.24, 0.88], [0.15, 0.84], [0.08, 0.92], [0, 1]]),
+  king: () => mergeGeometries([
+    lathe([[0, 0], [0.3, 0], [0.3, 0.08], [0.19, 0.17], [0.12, 0.5], [0.1, 0.62], [0.18, 0.68],
+      [0.1, 0.73], [0.2, 0.84], [0.13, 0.88], [0, 0.88]]),
+    block(0.07, 0.16, 0.07, 0, 0.93, 0), // the cross
+    block(0.18, 0.07, 0.07, 0, 0.94, 0),
+  ]),
+}
 
 const FADE_MS = 200
 const POP_SWELL_MS = 60
@@ -41,7 +80,9 @@ export class PropLayer {
     if (!g) {
       g = kind === 'box'
         ? new THREE.BoxGeometry(size * 2, size * 2, size * 2)
-        : new THREE.SphereGeometry(size, 24, 16)
+        : PIECE_GEOS[kind]
+          ? PIECE_GEOS[kind]().scale(size, size, size)
+          : new THREE.SphereGeometry(size, 24, 16)
       this.geos.set(key, g)
     }
     return g
@@ -57,7 +98,9 @@ export class PropLayer {
       if (!mesh) {
         const mat = p.unlit
           ? new THREE.MeshBasicMaterial({ color: p.color })
-          : new THREE.MeshStandardMaterial({ color: p.color, roughness: 0.5, metalness: 0.05 })
+          : new THREE.MeshStandardMaterial({
+            color: p.color, roughness: 0.5, metalness: 0.05, flatShading: p.kind in PIECE_GEOS,
+          })
         this.patchMaterial(mat)
         mat.transparent = true
         mat.opacity = 0
@@ -181,25 +224,31 @@ export class PropLayer {
   }
 
   /**
-   * Pick a prop under the pointer: exact mesh hit first, then dots-3d's
-   * hitmask behaviour (a 2.2x-size capture radius around each prop) so
-   * small spheres are draggable-past without pixel hunting. Returns the
-   * candidate closest to the camera along the ray.
+   * Pick a prop under the pointer: an exact mesh hit wins unless the ray
+   * passes right by another prop's anchor IN FRONT of that hit (a tight
+   * 0.8x-size capture) - so a slim chess piece is grabbable at its base
+   * without the hit falling through to the tile behind it. With no exact
+   * hit at all, dots-3d's generous 2.2x-size hitmask applies, so small
+   * spheres are draggable without pixel hunting. Returns the candidate
+   * closest to the camera along the ray.
    */
   pick(ray: THREE.Raycaster): { id: string; point: THREE.Vector3 } | null {
     const hits = ray.intersectObjects([...this.meshes.values()], false)
-    if (hits.length) {
-      return { id: (hits[0].object as THREE.Mesh).userData.netId as string, point: hits[0].point }
-    }
+    const hit = hits.length
+      ? { id: (hits[0].object as THREE.Mesh).userData.netId as string, point: hits[0].point, along: hits[0].distance }
+      : null
+    const capture = hit ? 0.8 : 2.2
     let best: { id: string; point: THREE.Vector3; along: number } | null = null
     const closest = new THREE.Vector3()
     for (const [id, mesh] of this.meshes) {
+      if (id === hit?.id) continue
       const size = mesh.userData.size as number
       ray.ray.closestPointToPoint(mesh.position, closest)
-      if (closest.distanceTo(mesh.position) > size * 2.2) continue
+      if (closest.distanceTo(mesh.position) > size * capture) continue
       const along = closest.distanceTo(ray.ray.origin)
+      if (along >= (hit?.along ?? Infinity)) continue
       if (!best || along < best.along) best = { id, point: closest.clone(), along }
     }
-    return best && { id: best.id, point: best.point }
+    return best ?? hit
   }
 }

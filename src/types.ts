@@ -59,7 +59,7 @@ export interface Interaction {
   grab?: { holder: string; order: number; target: Vec3 } // boot only
   from?: number // boot only: tick of the snapshot the dump was read from
   color?: number
-  shape?: string  // prop only: 'sphere' | 'box' | 'collider'
+  shape?: string  // prop only: 'sphere' | 'box' | 'collider' | a modelled kind (chess pieces)
   size?: number   // prop only: radius / half-extent
   unlit?: boolean // prop only: cosmetic hint, but folded state so it boots
   bounce?: boolean // prop only: false = ease vertical falls, never bounce

@@ -249,6 +249,18 @@ const PRELUDE = `
         typeof props.radius === 'number' ? props.radius : 0.5,
         !!props.unlit, props.bounce !== false)
     },
+    // any prop kind by name: 'sphere', 'box', or a modelled kind the
+    // client renders as built-in geometry - the low-poly chess set
+    // 'pawn'|'rook'|'knight'|'bishop'|'queen'|'king', whose size is the
+    // piece's height and whose base rests at the prop position. Unknown
+    // kinds render as spheres.
+    createProp(props = {}) {
+      const t = vec(props.position ?? props.translation)
+      return H.spawnProp(String(props.kind ?? 'sphere'), t.x, t.y, t.z,
+        typeof props.color === 'number' ? props.color : 0xffffff,
+        typeof props.size === 'number' ? props.size : 0.5,
+        !!props.unlit, props.bounce !== false)
+    },
     // a kinematic cube prop (rendered as a 2*size cube), same lifecycle as
     // spheres: move/paint/claim/despawn; no physics
     createBox(props = {}) {

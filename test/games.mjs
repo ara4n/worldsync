@@ -1,9 +1,9 @@
 // Game-script e2e under the mock widget host: uploads the four-in-a-row
 // and chess examples (fresh room each) and plays them through real
-// pointer clicks - seat claiming, a disc drop landing in the right cell,
-// and a legal pawn double-step whose marker moves, turn flips, and
-// physics cube slides to the target square. Chess move legality is also
-// probed negatively (clicking an illegal square must change nothing).
+// pointer input - seat claiming, a disc drop landing in the right cell,
+// and a legal pawn double-step DRAGGED to its square, easing into the
+// center and flipping the turn. Chess move legality is also probed
+// negatively (dragging to an illegal square must ease the piece home).
 // Run the dev server first: npm run dev
 import { chromium } from 'playwright'
 import { readFileSync } from 'node:fs'
@@ -89,15 +89,31 @@ async function uploadScript(t, path, name) {
 {
   const t = await open('ch')
   await uploadScript(t, 'examples/chess.js', 'chess.js')
-  // staged seeding: 64 tiles, then furniture, then 32 markers (+32 cubes)
-  const seeded = await t.frame.waitForFunction(() => {
+  const BOARD_Y = 0.02, LIFT = 0.5
+  // press the piece at its base (the near-steal pick grabs it there), pull
+  // the pointer to the target square on the LIFT drag plane, release
+  async function dragTo(fromX, fromZ, toX, toZ) {
+    const s = await t.frame.evaluate(([x, y, z]) => window.__jig.screenOfWorld(x, y, z), [fromX, BOARD_Y, fromZ])
+    const e = await t.frame.evaluate(([x, y, z]) => window.__jig.screenOfWorld(x, y, z), [toX, LIFT, toZ])
+    await t.page.mouse.move(t.bb.x + s.x, t.bb.y + s.y)
+    await t.page.mouse.down()
+    for (let i = 1; i <= 8; i++) {
+      await t.page.mouse.move(t.bb.x + s.x + ((e.x - s.x) * i) / 8, t.bb.y + s.y + ((e.y - s.y) * i) / 8)
+      await t.page.waitForTimeout(50)
+    }
+    await t.page.mouse.up()
+    await t.page.waitForTimeout(1000) // let the ops fold and the ease land
+  }
+  // staged seeding: 64 tiles, then furniture, then 32 piece props (and no
+  // physics cubes: the modelled pieces ARE the game)
+  const seeded = await t.frame.waitForFunction((y) => {
     const ps = window.__jig.props()
-    const markers = ps.filter((p) => Math.abs(p.y - 1.7) < 0.05)
-    return ps.length >= 99 && markers.length === 32
-  }, null, { timeout: 30000 }).then(() => true).catch(() => false)
+    const pieces = ps.filter((p) => Math.abs(p.y - y) < 0.05)
+    return ps.length >= 99 && pieces.length === 32
+  }, BOARD_Y, { timeout: 30000 }).then(() => true).catch(() => false)
   if (!seeded) fail('chess: board never fully seeded')
   const cubes = await t.frame.evaluate(() => window.__jig.sim.bodies.size)
-  if (cubes !== 32) fail(`chess: expected 32 piece cubes, got ${cubes}`)
+  if (cubes !== 0) fail(`chess: expected no physics cubes, got ${cubes}`)
   await t.page.waitForTimeout(1200)
 
   let ps = await props(t.frame)
@@ -108,35 +124,23 @@ async function uploadScript(t, path, name) {
   ps = await props(t.frame)
   if (!ps.find((p) => p.id === whiteSeat.id).claim) fail('chess: white seat claim did not land')
 
-  const pawn = findProp(ps, sqX(4), 1.7, sqZ(1)) // e2
-  if (!pawn) fail('chess: no pawn marker on e2')
-  await clickProp(t, pawn.id)
+  const pawn = findProp(ps, sqX(4), BOARD_Y, sqZ(1)) // e2
+  if (!pawn) fail('chess: no pawn on e2')
 
-  // negative probe: an illegal square (e5, three ahead) must not move it
-  const e5 = findProp(ps, sqX(4), -0.53, sqZ(4))
-  await clickProp(t, e5.id)
-  await t.page.waitForTimeout(800)
+  // negative probe: dragging to an illegal square (e5, three ahead) must
+  // ease the pawn back home
+  await dragTo(sqX(4), sqZ(1), sqX(4), sqZ(4))
   ps = await props(t.frame)
-  if (!findProp(ps, sqX(4), 1.7, sqZ(1))) fail('chess: pawn moved on an ILLEGAL click')
+  if (!findProp(ps, sqX(4), BOARD_Y, sqZ(1))) fail('chess: pawn stuck after an ILLEGAL drag')
 
-  // legal double-step to e4 (selection survives the illegal click)
-  const e4 = findProp(ps, sqX(4), -0.53, sqZ(3))
-  await clickProp(t, e4.id)
-  await t.page.waitForTimeout(1200)
+  // legal double-step: drag e2 -> e4, released mid-square it must ease
+  // into the center
+  await dragTo(sqX(4), sqZ(1), sqX(4), sqZ(3))
   ps = await props(t.frame)
-  if (!findProp(ps, sqX(4), 1.7, sqZ(3))) fail('chess: pawn marker did not reach e4')
+  if (!findProp(ps, sqX(4), BOARD_Y, sqZ(3))) fail('chess: pawn did not reach e4')
   const turn = ps.find((p) => near(p.y, 1.4) && near(p.x, 6.2))
   if (!turn || turn.color !== 0x241d16) fail('chess: turn sphere did not flip to black')
-  // the physical cube slides to the square (grab -> stream -> release)
-  const slid = await t.frame.waitForFunction(([x, z]) => {
-    for (const id of window.__jig.sim.bodies.keys()) {
-      const p = window.__jig.pos(id)
-      if (p && Math.abs(p.x - x) < 0.3 && Math.abs(p.z - z) < 0.3) return true
-    }
-    return false
-  }, [sqX(4), sqZ(3)], { timeout: 8000 }).then(() => true).catch(() => false)
-  if (!slid) fail('chess: no piece cube arrived at e4')
-  if (process.exitCode !== 1) console.log('chess: seat, legality gate, move, turn flip and cube slide work')
+  if (process.exitCode !== 1) console.log('chess: seat, drag legality gate, move ease and turn flip work')
   await t.page.close()
 }
 
