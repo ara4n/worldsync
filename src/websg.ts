@@ -64,6 +64,10 @@ export interface ScriptHost {
   props(): PropView[]
   prop(id: string): PropView | null
   spawnProp(kind: string, x: number, y: number, z: number, color: number, size: number, unlit: boolean): string
+  /** an invisible fixed cuboid collider in the physics world (folded sim
+   * state like any prop: boxes bounce off it identically on every peer).
+   * yaw rotates about Y; w/h/d are full extents. Despawn/move as a prop. */
+  spawnSolid(x: number, y: number, z: number, yaw: number, w: number, h: number, d: number): string
   despawn(id: string): boolean
   claim(id: string): boolean
   unclaim(id: string): boolean
@@ -253,6 +257,14 @@ const PRELUDE = `
     paint(id, color) { return H.paint(id, color) },
     createLine(props) { return new Line(props) },
     createScreen(props) { return new Screen(props) },
+    // a solid invisible cuboid collider: sim state, so despawn/move it via
+    // world.despawn(id) / world.move(id, pos) like any prop
+    createSolid(props = {}) {
+      const t = vec(props.position)
+      const d = props.dims ?? {}
+      return H.spawnSolid(t.x, t.y, t.z, typeof props.yaw === 'number' ? props.yaw : 0,
+        d.x ?? 1, d.y ?? 1, d.z ?? 0.1)
+    },
     peers() { return parse(H.peers()) },
     env(opts) { H.setEnv(JSON.stringify(opts ?? {})) },
     camera(pos, target) {
@@ -381,6 +393,9 @@ export class WorldScript {
     fn('spawnProp', (kind, x, y, z, c, size, unlit) =>
       ctx.newString(host.spawnProp(ctx.getString(kind), ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z),
         ctx.getNumber(c), ctx.getNumber(size), ctx.dump(unlit) === true)))
+    fn('spawnSolid', (x, y, z, yaw, w, h, d) =>
+      ctx.newString(host.spawnSolid(ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z),
+        ctx.getNumber(yaw), ctx.getNumber(w), ctx.getNumber(h), ctx.getNumber(d))))
     fn('despawn', (id) => bool(host.despawn(ctx.getString(id))))
     fn('claim', (id) => bool(host.claim(ctx.getString(id))))
     fn('unclaim', (id) => bool(host.unclaim(ctx.getString(id))))

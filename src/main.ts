@@ -345,6 +345,11 @@ async function main() {
       session.emit('prop', id, { pos: { x, y, z }, color, shape: kind, size, unlit })
       return id
     },
+    spawnSolid: (x, y, z, yaw, w, h, d) => {
+      const id = session.nextNetId()
+      session.emit('prop', id, { pos: { x, y, z }, shape: 'collider', yaw, dims: { x: w, y: h, z: d }, solid: true })
+      return id
+    },
     despawn: id => {
       if (!sim.props.has(id) && !sim.bodies.has(id)) return false
       session.emit('despawn', id, { pos: { x: 0, y: 0, z: 0 } })
