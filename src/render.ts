@@ -79,7 +79,8 @@ export class View {
     this.sun = new THREE.DirectionalLight(0xffffff, 1.6)
     this.sun.castShadow = true
     this.sun.shadow.mapSize.set(4096, 4096)
-    this.sun.shadow.bias = -0.0004
+    this.sun.shadow.bias = -0.0001
+    this.sun.shadow.normalBias = 0.05
     this.scene.add(this.sun)
     this.scene.add(this.sun.target)
     this.fitShadows(null)
@@ -105,25 +106,36 @@ export class View {
   private grid!: THREE.GridHelper
   private sun!: THREE.DirectionalLight
 
-  /**
-   * Aim the sun and size its orthographic shadow camera to cover `box`
-   * (the loaded scene's bounds), or the default jig play area when null.
-   * One cascade only: very large scenes trade shadow crispness for reach.
-   */
+  // The shadow frustum is a tight window that FOLLOWS the orbit target
+  // rather than covering the whole scene: fitting a ~300-unit world into
+  // one 4096 map leaves each box a dozen texels (blocky chevron acne).
+  // Nearby shadows stay crisp; geometry beyond the window casts none.
+  private readonly shadowRadius = 40
+  private shadowReach = 40
+  private readonly sunDir = new THREE.Vector3(0.45, 0.8, 0.35).normalize()
+
+  /** Scene bounds only tune the vertical reach; the frustum tracks the
+   * camera target per-frame (updateShadowFollow). */
   private fitShadows(box: THREE.Box3 | null) {
-    const b = box ?? new THREE.Box3(new THREE.Vector3(-20, 0, -20), new THREE.Vector3(20, 8, 20))
-    const center = b.getCenter(new THREE.Vector3())
-    const size = b.getSize(new THREE.Vector3())
-    const radius = Math.min(Math.max(size.x, size.z) * 0.5 + 5, 250)
-    const dir = new THREE.Vector3(0.45, 0.8, 0.35).normalize()
-    this.sun.position.copy(center).addScaledVector(dir, radius + size.y)
-    this.sun.target.position.copy(center)
-    this.sun.target.updateMatrixWorld()
+    const size = box ? box.getSize(new THREE.Vector3()) : new THREE.Vector3(40, 8, 40)
+    this.shadowReach = Math.max(size.y, 20)
+    const r = this.shadowRadius
     const cam = this.sun.shadow.camera
-    cam.left = -radius; cam.right = radius; cam.top = radius; cam.bottom = -radius
+    cam.left = -r; cam.right = r; cam.top = r; cam.bottom = -r
     cam.near = 0.1
-    cam.far = (radius + size.y) * 3
+    cam.far = this.shadowReach * 3 + r * 4
     cam.updateProjectionMatrix()
+  }
+
+  private updateShadowFollow() {
+    // snap the window to the shadow-map texel grid, or the follow motion
+    // makes every shadow edge shimmer as the camera pans
+    const texel = (2 * this.shadowRadius) / this.sun.shadow.mapSize.width
+    const cx = Math.round(this.controls.target.x / texel) * texel
+    const cz = Math.round(this.controls.target.z / texel) * texel
+    this.sun.target.position.set(cx, 0, cz)
+    this.sun.position.set(cx, 0, cz).addScaledVector(this.sunDir, this.shadowReach + this.shadowRadius * 2)
+    this.sun.target.updateMatrixWorld()
   }
 
   /** Swap the rendered glTF scene (null removes it). Idempotent per object. */
@@ -219,6 +231,7 @@ export class View {
    * one tick behind but smooth.
    */
   frame(now: number, alpha: number) {
+    this.updateShadowFollow()
     const { Position, Rotation, PrevPosition, PrevRotation } = this.ecs
     for (const [eid, mesh] of this.meshes) {
       mesh.position.set(
