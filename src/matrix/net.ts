@@ -215,8 +215,19 @@ export class MatrixNet {
     )
     // Best-effort clean leave on refresh/close, so our membership does not
     // linger as a ghost for everyone else (the server-side delayed leave
-    // event remains the backstop when this postMessage never lands).
+    // event remains the backstop when this postMessage never lands). There
+    // is no reliable teardown hook beyond this: an iframe removed on a
+    // room switch may never deliver pagehide, so ghost cleanup ultimately
+    // RESTS on the MSC4140 delayed leave the sdk arms at join (leave fires
+    // server-side ~8s after the keep-alives stop). That backstop silently
+    // degrades to the 4h membership expiry when the homeserver lacks
+    // msc4140 - surface which world we live in, per homeserver.
     addEventListener('pagehide', () => this.leave())
+    void client.doesServerSupportUnstableFeature('org.matrix.msc4140').then(ok => {
+      this.onLog(ok
+        ? 'delayed events supported: a dead session\'s membership clears in ~8s'
+        : 'homeserver lacks delayed events (msc4140): a dead session\'s membership only expires after 4h')
+    }).catch(() => this.onLog('delayed-event support probe failed (versions unreachable)'))
     await this.transport.connect()
     if (!p.mockTransport) this.sayHello()
     this.reconcile()
