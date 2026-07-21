@@ -106,19 +106,47 @@ async function main() {
     // MSC3815 script_url: upload the JS, merge it into the world state
     // event; the state echo (ours and every other peer's watch) feeds the
     // script driver below, which runs it only on the current root peer.
-    onScriptFile: async file => {
-      if (!wp) { log('world scripts need Matrix (run as a widget; the mock host works: /mock.html)'); return }
-      const m = net as import('./matrix/net').MatrixNet
-      try {
-        log(`uploading ${file.name} (${(file.size / 1024).toFixed(1)} kB)...`)
-        const mxc = await uploadWorldAsset(m.api, m.client, wp.roomId, file, 'script')
-        log(`world script set: ${mxc}`)
-        worldScriptChanged(mxc) // don't wait for our own state echo
-      } catch (e) {
-        logErr('script upload failed', e)
-      }
+    onScriptFile: file => uploadScript(file).catch(() => {}),
+    // The monaco editor is a heavy overlay most peers never open; it
+    // lives in its own dynamically-imported chunk.
+    onEditScript: async () => {
+      const { ScriptEditor } = await import('./editor')
+      editor ??= new ScriptEditor(document.body, room, {
+        log,
+        getPersisted: async () => {
+          if (!scriptUrl || !wp) return null
+          const cached = scriptSrc.get(scriptUrl)
+          if (cached !== undefined) return cached
+          const m = net as import('./matrix/net').MatrixNet
+          const src = new TextDecoder().decode(await fetchWorldAsset(m.api, scriptUrl))
+          scriptSrc.set(scriptUrl, src)
+          return src
+        },
+        save: source =>
+          uploadScript(new File([source], 'script.js', { type: 'text/javascript' })),
+      })
+      editor.toggle()
     },
   })
+  let editor: import('./editor').ScriptEditor | null = null
+  // Shared by the file picker and the editor's Save & Run; throws so the
+  // editor can show the failure, after it has been logged here.
+  const uploadScript = async (file: File) => {
+    if (!wp) {
+      log('world scripts need Matrix (run as a widget; the mock host works: /mock.html)')
+      throw new Error('no matrix transport')
+    }
+    const m = net as import('./matrix/net').MatrixNet
+    try {
+      log(`uploading ${file.name} (${(file.size / 1024).toFixed(1)} kB)...`)
+      const mxc = await uploadWorldAsset(m.api, m.client, wp.roomId, file, 'script')
+      log(`world script set: ${mxc}`)
+      worldScriptChanged(mxc) // don't wait for our own state echo
+    } catch (e) {
+      logErr('script upload failed', e)
+      throw e
+    }
+  }
   // In widget mode the panel can be tiny or hidden, so mirror every
   // diagnostic line to the console; debugging inside a host iframe with a
   // silent panel is otherwise guesswork.

@@ -30,6 +30,25 @@
   #panel .hint { color: #8b949e; }
   #panel #status { margin-top: 8px; }
   #panel #log { margin-top: 8px; border-top: 1px solid #30363d; padding-top: 6px; color: #8b949e; }
+  /* script editor: overlay docked left, out of the stats panel's way,
+     sharing the panel's dark chrome */
+  #editor {
+    position: fixed; top: 10px; left: 10px; bottom: 10px; z-index: 10;
+    display: flex; flex-direction: column;
+    background: rgba(13, 17, 23, 0.96); border: 1px solid #30363d; border-radius: 8px;
+    color: #c9d1d9; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    box-sizing: border-box; overflow: hidden;
+    width: min(620px, calc(100vw - 340px));
+  }
+  #editor .bar {
+    display: flex; align-items: center; gap: 6px; flex: none;
+    padding: 8px 10px; border-bottom: 1px solid #30363d; color: #e6edf3;
+  }
+  #editor .bar .spacer { flex: 1; }
+  #editor .bar .state {
+    color: #8b949e; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #editor .code { flex: 1; min-height: 0; }
   #help {
     position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); white-space: nowrap;
     color: #8b949e; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;

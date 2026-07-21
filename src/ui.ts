@@ -32,6 +32,7 @@ export interface Hooks {
   onVerify(): void
   onSceneFile(f: File): void
   onScriptFile(f: File): void
+  onEditScript(): void
 }
 
 export class UI {
@@ -56,6 +57,7 @@ export class UI {
         <input id="scenefile" type="file" accept=".glb,model/gltf-binary" style="display:none">
         <button id="script">load world script (.js)</button>
         <input id="scriptfile" type="file" accept=".js,text/javascript" style="display:none">
+        <button id="editscript">edit world script</button>
       </div>
       <div id="status"></div>
       <div id="log"></div>
@@ -90,6 +92,7 @@ export class UI {
     }
     filePick('#scene', '#scenefile', f => hooks.onSceneFile(f))
     filePick('#script', '#scriptfile', f => hooks.onScriptFile(f))
+    ;(root.querySelector('#editscript') as HTMLButtonElement).onclick = () => hooks.onEditScript()
   }
 
   log(line: string) {
