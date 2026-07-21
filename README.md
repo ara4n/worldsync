@@ -26,7 +26,17 @@ with the same signaling.
 
 Controls: click the ground to spawn a box, drag a box to move it (physics
 resumes on release, with throw velocity), cmd-drag or right-drag orbits,
-wheel zooms.
+two-finger drag pans along the ground plane, pinch or ctrl-wheel zooms.
+
+Rendering: cascaded shadow maps (4 cascades, splits weighted hard toward
+the camera so contact shadows get millimetre texels), double-sided
+shadow casting with a tiny normal bias - the combination that finally
+killed both shadow acne and peter-panning at box/ground contacts - and
+ACES filmic tone mapping (exposure 1.2) so glossy glTF floors show a
+graded specular sheen instead of a clipped white blob. The renderer
+logs a feature stamp (`[worldsync] renderer: ...`) at startup so a
+screenshot can be matched to the code that drew it; host iframes cache
+aggressively enough that this matters.
 
 ## Matrix widget mode (matryoshka)
 
@@ -62,7 +72,14 @@ host's MSC4039 media actions, points the room's
 every peer swaps in the scene's colliders on the same tick. Each peer
 bakes the GLB's meshes into one fixed trimesh (deterministically: same
 bytes, same traversal, f64 transforms rounded to f32 identically), so
-boxes rest on and roll off the scene bit-identically everywhere. A scene
+boxes rest on and roll off the scene bit-identically everywhere.
+Real-world GLBs decode fully: KTX2/Basis textures, Draco and meshopt
+geometry (decoder binaries served from `public/basis` and
+`public/draco`, pinned to the three version), and
+`EXT_mesh_gpu_instancing` meshes bake one collider copy per instance at
+`matrixWorld * instanceMatrix` - baking only the node transform parks a
+phantom collider at the node origin and leaves the visible instances
+untouchable. A scene
 (re)load is a deterministic world RESET at the op's tick: every body is
 dropped (no stale pile floating inside the new world) and the default
 ground plane yields to the scene's own floors, returning when the scene
@@ -148,16 +165,24 @@ transport advertised by an existing member, else the client well-known,
 else the user's homeserver `/.well-known/matrix/client` fetched
 directly (a RoomWidgetClient never talks to a homeserver itself, so the
 sdk's well-known is usually empty in widget mode); `&lkService=`
-overrides all of that. Status: against a live Element Web + matrix.org
-the widget params and handshake are verified up to the capability
-exchange; the LiveKit transport follows element-call's sdk patterns but
-has not yet been exercised end-to-end against a real SFU, and LiveKit
-text streams are not yet end-to-end encrypted - wiring the MatrixRTC
-key events into payload encryption is the natural next step. Ghost
+overrides all of that. Status: verified END-TO-END against Element
+Desktop + matrix.org + livekit-jwt.call.matrix.org - handshake,
+capability grant (the widget logs the approved/denied sets, since a
+quietly-denied capability presents as a silent hang), OpenID -> SFU JWT
+exchange, LiveKit connect, scene upload/download and play. LiveKit text
+streams are not yet end-to-end encrypted - wiring the MatrixRTC key
+events into payload encryption is the natural next step. Ghost
 `m.call.member`s from killed sessions no longer stall calibration: a
-joiner gives seniors 12s to become reachable on the transport, then
+joiner gives seniors 3s to become reachable on the transport, then
 writes them off and roots the tick grid itself (a senior that shows up
-late triggers a hard resync + boot seam and the room heals).
+late triggers a hard resync + boot seam and the room heals); the widget
+also leaves the RTC session on pagehide so refreshes stop minting
+ghosts. Media uploads cross the widget boundary as memory-backed Blobs:
+an `<input>` File is backed by its on-disk path, and the read grant
+does not survive the postMessage hop to the host's process (Element
+Desktop's upload dies with ERR_ACCESS_DENIED and an empty body).
+Upload failures surface the homeserver's `matrix_api_error` detail and
+pre-flight the host's media size limit.
 
 Test hooks: `npm run dev` then `node test/smoke.mjs` runs a two-browser
 Playwright smoke test (spawn replication plus a laggy drag that must
@@ -384,8 +409,10 @@ serialisation hazards stay exercised.
   controller on a dynamic body would give finite hand mass, at the cost of
   a mushier hold.
 - Widget mode: the ghost-membership fallback writes seniors off after a
-  12s unreachability grace; a genuinely slow senior arriving later means
-  a hard resync and a boot seam rather than a clean calibration.
+  3s unreachability grace; a genuinely slow senior arriving later means
+  a hard resync and a boot seam rather than a clean calibration. One
+  unexplained session-start hang was seen with a second client present -
+  the capability/membership diagnostics should name it if it recurs.
 - Scenes are single-file `.glb` only, colliders are a raw bake of every
   mesh (no OMI_collider / physics extensions, no exclusions), and a
   joiner whose scene preload FAILS joins without colliders and diverges
