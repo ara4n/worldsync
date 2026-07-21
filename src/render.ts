@@ -97,21 +97,26 @@ export class View {
       maxFar: 150,
       mode: 'custom',
       customSplitsCallback: (_cascades: number, _near: number, _far: number, breaks: number[]) => {
-        breaks.push(0.03, 0.1, 0.35, 1)
+        // cascade 0 reaches ~8m: box contacts are usually viewed from
+        // 3-6m, and they must land in the finest cascade to read clean
+        breaks.push(0.055, 0.16, 0.4, 1)
       },
       shadowMapSize: 2048,
       lightDirection: new THREE.Vector3(-0.45, -0.8, -0.35).normalize(),
       lightIntensity: 1.6,
     })
     this.csm.fade = true
-    // Near-zero bias on every cascade: casters render their BACK faces
-    // into the shadow maps (shadowSide in patchMaterial), so acne lands on
-    // faces the sun never lights and no bias is needed to hide it - and
-    // without bias there is nothing to push a shadow off its contact
-    // point (peter-panning) or to make cascades disagree.
+    // Casters render BOTH faces into the shadow maps (shadowSide in
+    // patchMaterial): back-face-only casting left a thin lit rim at
+    // contact edges, because a resting box's bottom face is coplanar with
+    // its receiver and edge texels resolved to "equal depth, lit" - with
+    // front faces included, those texels store the box wall instead and
+    // shadow decisively. The small normalBias covers the acne that front
+    // faces reintroduce; at these texel sizes its peter-panning is
+    // sub-centimetre.
     this.csm.lights.forEach((l, i) => {
       l.shadow.bias = -0.00002 * (i + 1)
-      l.shadow.normalBias = 0
+      l.shadow.normalBias = 0.006
     })
     const groundMat = new THREE.MeshStandardMaterial({ color: 0x2a3140, roughness: 1 })
     this.patchMaterial(groundMat)
@@ -140,10 +145,10 @@ export class View {
   /** Route a lit material through the CSM shader patch (idempotent).
    * Every lit material MUST be patched, or it sums all cascade lights
    * and renders several times too bright; unlit materials ignore lights
-   * and are left alone. Casters draw back faces into the shadow maps
+   * and are left alone. Casters draw both faces into the shadow maps
    * (see the bias comment in the constructor). */
   private patchMaterial(m: THREE.Material) {
-    m.shadowSide = THREE.BackSide
+    m.shadowSide = THREE.DoubleSide
     const lit = m as THREE.MeshStandardMaterial
     if (!lit.isMeshStandardMaterial && !(m as THREE.MeshPhongMaterial).isMeshPhongMaterial
       && !(m as THREE.MeshLambertMaterial).isMeshLambertMaterial) return
