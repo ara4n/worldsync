@@ -239,7 +239,7 @@ export class Session {
   emit(type: Interaction['type'], netId: string, data: {
     pos: Vec3; vel?: Vec3; rot?: Quat; angvel?: Vec3
     grab?: { holder: string; order: number; target: Vec3 }; color?: number
-    shape?: string; size?: number; unlit?: boolean; force?: boolean; prop?: PropInfo
+    shape?: string; size?: number; unlit?: boolean; bounce?: boolean; force?: boolean; prop?: PropInfo
     yaw?: number; dims?: Vec3; solid?: boolean
   }, tickOverride?: number, from?: number) {
     const i: Interaction = {
@@ -251,7 +251,7 @@ export class Session {
       grab: data.grab && { holder: data.grab.holder, order: data.grab.order, target: this.zv(data.grab.target) },
       from,
       color: data.color,
-      shape: data.shape, size: data.size, unlit: data.unlit, force: data.force, prop: data.prop,
+      shape: data.shape, size: data.size, unlit: data.unlit, bounce: data.bounce, force: data.force, prop: data.prop,
       yaw: data.yaw !== undefined ? this.z(data.yaw) : undefined,
       dims: data.dims && this.zv(data.dims), solid: data.solid,
     }

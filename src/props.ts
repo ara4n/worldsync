@@ -27,7 +27,8 @@ const BOUNCE = [0, 0.2, 0, 0.05, 0]
 export class PropLayer {
   group = new THREE.Group()
   private meshes = new Map<string, THREE.Mesh>()
-  private state = new Map<string, { pos: THREE.Vector3; color: number; claim: string | null; born: number }>()
+  private state = new Map<string, { pos: THREE.Vector3; color: number; claim: string | null; born: number
+    swell: boolean }>()
   private anims = new Map<string, Anim>()
   private dying: Dying[] = []
   private geos = new Map<string, THREE.BufferGeometry>()
@@ -68,7 +69,13 @@ export class PropLayer {
         mesh.userData.size = p.size
         this.group.add(mesh)
         this.meshes.set(id, mesh)
-        this.state.set(id, { pos: new THREE.Vector3(p.pos.x, p.pos.y, p.pos.z), color: p.color, claim: p.claim, born: now })
+        this.state.set(id, {
+          pos: new THREE.Vector3(p.pos.x, p.pos.y, p.pos.z), color: p.color, claim: p.claim, born: now,
+          // bounce:false marks board-game props: they also skip the claim
+          // swell, which would weld adjacent cells (tetrix pieces) into a
+          // seamless blob until unclaimed
+          swell: p.bounce !== false,
+        })
         continue
       }
       const st = this.state.get(id)!
@@ -150,7 +157,7 @@ export class PropLayer {
       } else {
         mesh.position.set(st.pos.x, st.pos.y, st.pos.z)
       }
-      const target = st.claim ? 1.25 : 1
+      const target = st.claim && st.swell ? 1.25 : 1
       const s = mesh.scale.x + (target - mesh.scale.x) * 0.25
       mesh.scale.setScalar(Math.abs(s - target) < 0.01 ? target : s)
     }

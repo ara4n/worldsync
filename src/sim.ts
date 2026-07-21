@@ -38,8 +38,9 @@ interface Grab { holder: string; order: number; target: Vec3; since: number }
  * primitive: set by the first 'claim' op to arrive in timeline order. */
 export interface Prop {
   kind: string; pos: Vec3; color: number; size: number; unlit: boolean; claim: string | null
-  /** false: the render layer eases discrete moves instead of the dots
-   * bounce-drop (tetrix pieces slide; connect-4 discs bounce) */
+  /** false: a subdued board-game prop - the render layer eases discrete
+   * moves instead of the dots bounce-drop, and claims don't swell it
+   * (tetrix pieces slide and keep their seams; connect-4 discs bounce) */
   bounce?: boolean
   yaw?: number; dims?: Vec3; solid?: boolean
   /** solid only: the fixed body's handle. Valid across snapshot restores

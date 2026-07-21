@@ -49,6 +49,11 @@ await a.frame.waitForFunction(
 // a claimed 4-cell piece appears in lane 0 and falls
 await a.frame.waitForFunction(() => window.__jig.props().filter((p) => p.claim).length === 4,
   null, { timeout: 15000 }).catch(() => fail('no claimed 4-cell piece appeared'))
+// the bounce:false request must survive all the way into the folded sim
+// state (it once died silently at the session.emit whitelist)
+const bounceOff = await a.frame.evaluate(() =>
+  [...window.__jig.sim.props.values()].every((p) => p.bounce === false))
+if (!bounceOff) fail('bounce:false did not reach the sim prop state')
 let ps = cellsOf(await props(a.frame)).filter((p) => p.claim)
 if (ps.some((p) => colOf(p) < 0 || colOf(p) > 4)) fail(`piece outside lane 0: cols ${ps.map(colOf)}`)
 const y0 = Math.max(...ps.map((p) => p.y))

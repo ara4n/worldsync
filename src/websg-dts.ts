@@ -126,8 +126,9 @@ declare const world: {
   // -- props: kinematic physics-free entities, claims as coordination --
   props(): WorldProp[]
   prop(id: string): WorldProp | null
-  /** spawn a kinematic sphere prop; returns its id. bounce:false makes
-   * discrete moves ease instead of bounce-dropping on vertical falls */
+  /** spawn a kinematic sphere prop; returns its id. bounce:false marks a
+   * subdued board-game prop: discrete moves ease instead of
+   * bounce-dropping, and claims don't swell it */
   createSphere(props?: { position?: Vec3Like; translation?: Vec3Like; color?: number; radius?: number
     unlit?: boolean; bounce?: boolean }): string
   /** spawn a kinematic cube prop (a 2*size cube); returns its id */
