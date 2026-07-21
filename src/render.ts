@@ -31,6 +31,9 @@ export class View {
     // into a blown white glare puddle under linear output; ACES compresses
     // the highlight so it reads as sheen instead of a searchlight.
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping
+    // ACES darkens midtones; a modest exposure lift restores the overall
+    // level without re-blowing the highlights it exists to compress.
+    this.renderer.toneMappingExposure = 1.2
     parent.appendChild(this.renderer.domElement)
     this.scene.background = new THREE.Color(0x0e1116)
     this.camera.position.set(9, 9, 13)
@@ -83,7 +86,7 @@ export class View {
     // Feature stamp: stale-bundle confusion (host iframes cache hard) has
     // burned enough debugging time that the renderer announces itself.
     console.log('[worldsync] renderer: csm x4 backface-shadows aces (46aabb0+)')
-    this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x30281e, 0.7))
+    this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x30281e, 0.85))
     // Cascaded shadow maps with splits weighted hard toward the camera:
     // the near cascade covers only the first ~4m of view depth, so contact
     // shadows get millimetre texels and the bias needed to prevent acne
