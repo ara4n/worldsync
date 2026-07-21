@@ -237,6 +237,7 @@ const PRELUDE = `
   globalThis.world = {
     onload: null, onenter: null, onupdate: null,
     onpointerdown: null, onpointermove: null, onpointerup: null,
+    onkeydown: null,
     get me() { return parse(H.me()) },
     props() { return parse(H.props()) },
     prop(id) { return parse(H.prop(id)) },
@@ -350,6 +351,9 @@ export class WorldScript {
   /** deliver a pointer event ('onpointerdown'|'onpointermove'|'onpointerup');
    * the payload crosses as JSON and arrives parsed in the handler */
   pointer(name: string, ev: unknown) { this.dispatch(name, JSON.stringify(ev)) }
+
+  /** deliver a key press to world.onkeydown (same JSON path as pointer) */
+  key(ev: unknown) { this.dispatch('onkeydown', JSON.stringify(ev)) }
 
   /** does the script define this handler? (pointer capture asks first) */
   handles(name: string): boolean {

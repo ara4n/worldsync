@@ -280,6 +280,17 @@ async function main() {
   let scriptFor: string | null = null
   let scriptStarting = false
   let scriptPointerOn = false
+  let scriptKeysOn = false
+  // Arrow keys go to the script while it defines world.onkeydown; typing
+  // in the panel or the monaco editor keeps them (same guard as M/V).
+  addEventListener('keydown', e => {
+    if (!script || !scriptKeysOn || e.metaKey || e.ctrlKey || e.altKey) return
+    if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return
+    const t = e.target as HTMLElement | null
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
+    e.preventDefault()
+    script.key({ key: e.key })
+  })
   let lastScriptTick = 0
   const scriptSrc = new Map<string, string>()
   const scriptFetches = new Set<string>()
@@ -481,6 +492,7 @@ async function main() {
     script.dispose()
     script = null
     scriptPointerOn = false
+    scriptKeysOn = false
     for (const id of [...scriptLines.keys()]) scriptHost.removeLine(id) // its lines go with it
     for (const id of [...scriptScreens]) scriptHost.removeScreen(id) // and its screens
     if (videoWanted) {
@@ -522,6 +534,7 @@ async function main() {
           script = s
           scriptFor = url
           scriptPointerOn = s.handles('onpointerdown')
+          scriptKeysOn = s.handles('onkeydown')
           lastScriptTick = sim.tick
           s.enter()
           log(`world script running${isRoot() ? ' (this peer is primary)' : ''}`)
