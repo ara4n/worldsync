@@ -4,7 +4,7 @@ import { logger } from 'matrix-js-sdk/lib/logger'
 import type { DcMessage } from '../types'
 import type { WidgetParams } from './params'
 import { initWidgetClient } from './widget'
-import type { WidgetApi } from 'matrix-widget-api'
+import { WidgetApiToWidgetAction, type IRoomEvent, type WidgetApi } from 'matrix-widget-api'
 import { BroadcastTransport, LiveKitTransport, type DataTransport } from './transport'
 import { readWorldSceneUrl, readWorldScriptUrl, worldUrls, WORLD_EVENT_TYPE } from './world'
 
@@ -251,15 +251,25 @@ export class MatrixNet {
       ._onRTCSessionMemberUpdate
     const echoStart = Date.now()
     let echoWarned = false
+    let lastRecover = 0
     const echoPoll = setInterval(() => {
       if (this.joined) { clearInterval(echoPoll); return }
       void membershipPoke?.call(this.rtc).then(() => this.reconcile())
+      // Poking only re-reads state that ARRIVED; the host's push is
+      // delivered exactly once and can be lost outright (seen in the
+      // wild: join status Connected - the send was acknowledged - yet
+      // the echo never surfaced). Past 5s, also re-read the room state
+      // from the host directly and inject whatever the sdk is missing.
+      if (Date.now() - echoStart > 5000 && Date.now() - lastRecover > 3000) {
+        lastRecover = Date.now()
+        void this.recoverMembershipState(p)
+      }
       if (!echoWarned && Date.now() - echoStart > 15000) {
         echoWarned = true
         this.onLog(`own membership echo still missing after 15s (${this.rtc.memberships.length} memberships `
-          + `visible, join status ${this.rtc.membershipStatus}), still retrying every 1s - if this never `
-          + 'resolves, the host is probably not granting the m.call.member receive capability; '
-          + 're-add the widget and approve everything')
+          + `visible, join status ${this.rtc.membershipStatus}), still retrying and re-reading room state `
+          + 'every few seconds - if this never resolves, the host is probably not granting the '
+          + 'm.call.member capabilities; re-add the widget and approve everything')
       }
     }, 1000)
 
@@ -307,6 +317,50 @@ export class MatrixNet {
         this.onSeniorsUnreachable()
       }
     }, GHOST_GRACE_MS)
+  }
+
+  /** State pushes are delivered exactly once and hosts lose them: seen in
+   * the wild with join status Connected (the send was acknowledged, the
+   * event is on the server) while the widget's room state stayed stuck on
+   * the PREVIOUS session's expired membership - which the sdk then
+   * rightly ignored on every poke, forever. Ask the host for the room's
+   * current m.call.member state directly (the receive capability also
+   * grants reads) and feed anything the sdk lacks through the client's
+   * own update_state injection path, exactly as if the push had arrived. */
+  private async recoverMembershipState(p: WidgetParams) {
+    let events: IRoomEvent[]
+    try {
+      events = await this.api.readStateEvents(EventType.GroupCallMemberPrefix, 30, undefined, [p.roomId])
+    } catch {
+      return // host without state reads; the poke loop keeps trying
+    }
+    const room = this.client.getRoom(p.roomId)
+    // Under update_state this read is served from the TIMELINE, which can
+    // contain superseded memberships: keep only the newest per state key,
+    // and never replace room state with something older than it has.
+    const newest = new Map<string, IRoomEvent>()
+    for (const raw of events ?? []) {
+      if (!raw?.event_id || raw.room_id !== p.roomId || raw.state_key === undefined) continue
+      const prev = newest.get(raw.state_key)
+      if (!prev || (raw.origin_server_ts ?? 0) > (prev.origin_server_ts ?? 0)) newest.set(raw.state_key, raw)
+    }
+    for (const raw of newest.values()) {
+      const have = room?.currentState.getStateEvents(raw.type, raw.state_key ?? '')
+      if (have && (have.getId() === raw.event_id || (have.getTs() ?? 0) > (raw.origin_server_ts ?? 0))) continue
+      this.onLog(`state push lost by the host: recovering ${raw.type} ${raw.state_key ?? ''} by direct read`)
+      // Impersonate the host's update_state push: RoomWidgetClient's
+      // handler injects it into room state on every host flavour (the
+      // unsupported-version case only warns). The fabricated requestId
+      // makes its ack an unsolicited response the host quietly drops.
+      this.api.emit(`action:${WidgetApiToWidgetAction.UpdateState}`,
+        new CustomEvent(`action:${WidgetApiToWidgetAction.UpdateState}`, {
+          cancelable: true,
+          detail: {
+            api: 'toWidget', widgetId: p.widgetId, requestId: `worldsync-recover-${raw.event_id}`,
+            action: WidgetApiToWidgetAction.UpdateState, data: { state: [raw] },
+          },
+        }))
+    }
   }
 
   /** the focus advertised by the OLDEST other member (the session's owner,

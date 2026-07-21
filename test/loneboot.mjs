@@ -1,7 +1,10 @@
-// Lone-boot fallback e2e: the mock host withholds our own m.call.member
-// echo (?dropOwnEcho=1), simulating hosts that lose it. The session must
-// still start alone after the grace period (nobody else on the transport)
-// and be playable - a spawned box lands in the sim.
+// Echo-loss e2e: the mock host withholds our own m.call.member echo
+// (?dropOwnEcho=1) while still storing the state, exactly like hosts in
+// the wild that acknowledge the send but lose the push. Two scenarios:
+// alone, the session must self-root after the grace period (lone-boot
+// fallback); with a live peer present the fallback must NOT fire -
+// instead the widget re-reads room state from the host directly and
+// injects the missing membership (state-push recovery), then meshes.
 // Run the dev server first: npm run dev
 import { chromium } from 'playwright'
 
@@ -35,6 +38,48 @@ if (ok) {
     return new Promise(r => setTimeout(() => r(w.__jig.sim.bodies.size), 2000))
   })
   if (bodies < 1) fail('spawn did not land in the lone-booted sim')
+}
+
+// --- scenario 2: echo lost WITH a live peer -> state-push recovery ---
+{
+  const room2 = 'lb' + Math.random().toString(36).slice(2, 8)
+  // one shared context: BroadcastChannel (the mock transport and state
+  // gossip) does not cross browser contexts, and browser.newPage() makes
+  // a fresh context each call
+  const ctx2 = await browser.newContext()
+  const open = async (params) => {
+    const p = await ctx2.newPage()
+    await p.goto(`${base}/mock.html?room=${room2}${params}`)
+    await p.waitForFunction(() => {
+      const w = document.getElementById('widget')?.contentWindow
+      return !!(w && w.__jig && w.__jig.session)
+    }, null, { timeout: 30000 })
+    return { page: p, frame: p.frames().find((f) => f !== p.mainFrame()) }
+  }
+  const a = await open('')
+  await a.frame.waitForFunction(() => window.__jig.session.ready(), null, { timeout: 15000 })
+  const b = await open('&dropOwnEcho=1')
+  const logs = []
+  b.page.on('console', (m) => { if (m.text().includes('[worldsync]')) logs.push(m.text()) })
+  const ready = await b.frame.waitForFunction(() => window.__jig.session.ready(), null, { timeout: 25000 })
+    .then(() => true).catch(() => false)
+  if (!ready) fail('recovery: b never started with a peer present and the echo withheld')
+  const blogs = await b.frame.evaluate(() =>
+    [...document.querySelectorAll('#log div')].map((d) => d.textContent))
+  if (!blogs.some((l) => l.includes('recovering org.matrix.msc3401.call.member'))) {
+    fail(`recovery: state-push recovery never ran: ${blogs.slice(-8).join(' | ')}`)
+  }
+  if (blogs.some((l) => l.includes('starting alone'))) {
+    fail('recovery: lone-boot fallback fired despite a live peer')
+  }
+  // and they actually mesh: a sees b as a connected peer
+  const meshed = await a.frame.waitForFunction(() =>
+    [...window.__jig.net.peers.values()].some((p) => p.connected), null, { timeout: 15000 })
+    .then(() => true).catch(() => false)
+  if (!meshed) fail('recovery: a never connected to the recovered b')
+  else console.log('state-push recovery with a live peer: ok')
+  await a.page.close()
+  await b.page.close()
 }
 
 if (process.exitCode !== 1) console.log('LONEBOOT TEST PASSED')

@@ -153,6 +153,14 @@ class MockDriver extends WidgetDriver {
 
   readRoomEvents(): Promise<IRoomEvent[]> { return Promise.resolve([]) }
 
+  // Modern widgets (update_state negotiated) get their read_events state
+  // requests routed HERE, not to readRoomState; there is no timeline
+  // store, but the state entries are exactly the tail such reads want
+  // (the widget's state-push recovery reads m.call.member this way).
+  readRoomTimeline(roomId: string, eventType: string): Promise<IRoomEvent[]> {
+    return this.readRoomState(roomId, eventType, undefined)
+  }
+
   // MSC4039 media repo, in-memory: uploads are gossiped to every tab so a
   // peer's widget can download a scene its neighbour uploaded.
   getMediaConfig(): Promise<IGetMediaConfigResult> {
