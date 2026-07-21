@@ -6,7 +6,9 @@ import * as THREE from 'three'
  * node tree on top - the glTF world plus every live entity: physics
  * boxes, props, cosmetic lines and screens, lights, ground - and the
  * selected node's properties below. The tree tracks the scene live, so
- * spawns and despawns appear as they happen. Transform,
+ * spawns and despawns appear as they happen, and the properties panel
+ * re-reads the selected node's values in place (moving entities update
+ * under your eyes; the field being edited is left alone). Transform,
  * visibility, name, material and light fields are editable - as LOCAL
  * PREVIEWS only: nothing is replicated to other peers, and the physics
  * colliders were baked from the GLB at parse time, so edits move pixels,
@@ -71,8 +73,9 @@ export class SceneInspector {
     this.el.style.display = 'flex'
     this.refresh()
     // The graph is static once parsed, but WHICH graph is live follows the
-    // sim (uploads, rollbacks, late fetches); track it while open.
-    this.timer ??= setInterval(() => this.refresh(), 500)
+    // sim (uploads, rollbacks, late fetches), and the selected node's
+    // values move every frame; track both while open.
+    this.timer ??= setInterval(() => this.refresh(), 250)
   }
 
   close() {
@@ -100,7 +103,11 @@ export class SceneInspector {
       if (g) tris += (g.getIndex()?.count ?? g.getAttribute('position')?.count ?? 0) / 3
     })
     const sig = names.join('|')
-    if (root === this.shownRoot && sig === this.shownSig) return
+    if (root === this.shownRoot && sig === this.shownSig) {
+      // same graph, same shape: just pull the selected node's live values
+      for (const u of this.live) u()
+      return
+    }
     this.shownRoot = root
     this.shownSig = sig
     // a despawned selection has nothing left to outline or edit
@@ -148,9 +155,15 @@ export class SceneInspector {
     this.renderProps()
   }
 
+  // Re-readers for the visible property fields, run on every refresh tick
+  // so a moving/repainted entity's values track live. Each skips its input
+  // while focused: the form never rewrites under the cursor.
+  private live: (() => void)[] = []
+
   private renderProps() {
     const o = this.selected
     this.propsEl.innerHTML = ''
+    this.live = []
     if (!o) { this.propsEl.innerHTML = '<div class="hint">select a node</div>'; return }
 
     const table = document.createElement('table')
@@ -185,6 +198,11 @@ export class SceneInspector {
         set(v)
         refreshWorld()
       }
+      this.live.push(() => {
+        if (document.activeElement === inp) return
+        const v = f(get())
+        if (inp.value !== v) inp.value = v
+      })
       return inp
     }
     const vec3 = (label: string, get: () => THREE.Vector3, scale = 1) =>
@@ -197,6 +215,9 @@ export class SceneInspector {
       inp.type = 'checkbox'
       inp.checked = get()
       inp.onchange = () => set(inp.checked)
+      this.live.push(() => {
+        if (document.activeElement !== inp) inp.checked = get()
+      })
       return inp
     }
     const color = (get: () => THREE.Color, set: (hex: string) => void) => {
@@ -204,6 +225,11 @@ export class SceneInspector {
       inp.type = 'color'
       inp.value = `#${get().getHexString()}`
       inp.oninput = () => set(inp.value)
+      this.live.push(() => {
+        if (document.activeElement === inp) return
+        const v = `#${get().getHexString()}`
+        if (inp.value !== v) inp.value = v
+      })
       return inp
     }
     const text = (get: () => string, set: (v: string) => void) => {
@@ -212,6 +238,9 @@ export class SceneInspector {
       inp.className = 'wide'
       inp.value = get()
       inp.onchange = () => { set(inp.value); this.renderTree() } // tree shows names
+      this.live.push(() => {
+        if (document.activeElement !== inp && inp.value !== get()) inp.value = get()
+      })
       return inp
     }
 
@@ -224,6 +253,7 @@ export class SceneInspector {
     vec3('scale', () => o.scale)
     worldTd = row('world pos', '')
     refreshWorld()
+    this.live.push(refreshWorld)
 
     const mesh = o as THREE.Mesh
     if (mesh.isMesh) {
