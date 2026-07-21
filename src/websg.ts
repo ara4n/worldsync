@@ -72,7 +72,8 @@ export interface ScriptHost {
    * points hides it). Shared lines are additionally broadcast latest-wins
    * per (author, id) so every peer draws them; local ones never leave the
    * client. Never folded, never hashed. */
-  line(id: string, pointsJson: string, color: number, opacity: number, shared: boolean): void
+  line(id: string, pointsJson: string, color: number, opacity: number, width: number, worldUnits: boolean,
+    shared: boolean): void
   /** remove a line entity (broadcast to everyone if it was shared) */
   removeLine(id: string): void
   setEnv(json: string): void
@@ -135,7 +136,8 @@ const PRELUDE = `
     return n
   }
   // Cosmetic line entity: the script owns and animates it (points, color,
-  // opacity); every mutation ships the full state to the host. shared:true
+  // opacity, width - screen px by default, world units with
+  // worldUnits:true); every mutation ships the full state. shared:true
   // makes it visible to every peer (latest-wins broadcast); animate those
   // sparingly, since each mutation is a network message.
   let lineSeq = 0
@@ -146,12 +148,15 @@ const PRELUDE = `
       this._points = (opts.points ?? []).map((p) => { const v = vec(p); return { x: v.x, y: v.y, z: v.z } })
       this._color = typeof opts.color === 'number' ? opts.color : 0xffffff
       this._opacity = typeof opts.opacity === 'number' ? opts.opacity : 1
+      this._width = typeof opts.width === 'number' ? opts.width : 2
+      this._worldUnits = !!opts.worldUnits
       this._dead = false
       this._sync()
     }
     _sync() {
       if (this._dead) return
-      H.line(this._id, JSON.stringify(this._points), this._color, this._opacity, this._shared)
+      H.line(this._id, JSON.stringify(this._points), this._color, this._opacity, this._width,
+        this._worldUnits, this._shared)
     }
     get points() { return this._points.map((p) => new Vector3(p.x, p.y, p.z)) }
     set points(ps) {
@@ -162,6 +167,8 @@ const PRELUDE = `
     set color(c) { this._color = c; this._sync() }
     get opacity() { return this._opacity }
     set opacity(o) { this._opacity = o; this._sync() }
+    get width() { return this._width }
+    set width(w) { this._width = w; this._sync() }
     despawn() { if (!this._dead) { this._dead = true; H.removeLine(this._id) } }
   }
   globalThis.WebSG = {
@@ -336,9 +343,9 @@ export class WorldScript {
     fn('setPos', (id, x, y, z) =>
       bool(host.setPos(ctx.getString(id), ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z))))
     fn('paint', (id, c) => bool(host.paint(ctx.getString(id), ctx.getNumber(c))))
-    fn('line', (id, pts, c, op, shared) => {
+    fn('line', (id, pts, c, op, w, wu, shared) => {
       host.line(ctx.getString(id), ctx.getString(pts), ctx.getNumber(c), ctx.getNumber(op),
-        ctx.dump(shared) === true)
+        ctx.getNumber(w), ctx.dump(wu) === true, ctx.dump(shared) === true)
       return ctx.undefined
     })
     fn('removeLine', (id) => { host.removeLine(ctx.getString(id)); return ctx.undefined })

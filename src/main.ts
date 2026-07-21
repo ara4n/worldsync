@@ -163,7 +163,8 @@ async function main() {
   // before receive().
   const onMsg = (from: string, msg: DcMessage) => {
     if (msg.kind === 'line') {
-      view.setLine(`${msg.peer}/${msg.id}`, msg.points.length ? msg.points : null, msg.color, msg.opacity)
+      view.setLine(`${msg.peer}/${msg.id}`, msg.points.length ? msg.points : null,
+        msg.color, msg.opacity, msg.width, msg.worldUnits)
       return
     }
     session.receive(from, msg)
@@ -360,18 +361,24 @@ async function main() {
       session.emit('paint', id, { pos: { x: 0, y: 0, z: 0 }, color })
       return true
     },
-    line: (id, pointsJson, color, opacity, shared) => {
+    line: (id, pointsJson, color, opacity, width, worldUnits, shared) => {
       const points = pointsJson ? JSON.parse(pointsJson) as { x: number; y: number; z: number }[] : []
       scriptLines.set(id, shared)
-      view.setLine(`${session.id}/${id}`, points, color, opacity)
-      if (shared) (net as NetLike).broadcast({ kind: 'line', peer: session.id, id, points, color, opacity })
+      view.setLine(`${session.id}/${id}`, points, color, opacity, width, worldUnits)
+      if (shared) {
+        (net as NetLike).broadcast({ kind: 'line', peer: session.id, id, points, color, opacity, width, worldUnits })
+      }
     },
     removeLine: id => {
       const shared = scriptLines.get(id)
       if (shared === undefined) return
       scriptLines.delete(id)
-      view.setLine(`${session.id}/${id}`, null, 0, 0)
-      if (shared) (net as NetLike).broadcast({ kind: 'line', peer: session.id, id, points: [], color: 0, opacity: 0 })
+      view.setLine(`${session.id}/${id}`, null, 0, 0, 0, false)
+      if (shared) {
+        (net as NetLike).broadcast({
+          kind: 'line', peer: session.id, id, points: [], color: 0, opacity: 0, width: 0, worldUnits: false,
+        })
+      }
     },
     setEnv: json => view.setEnvironment(JSON.parse(json)),
     setCamera: (x, y, z, tx, ty, tz) => view.setCameraPose({ x, y, z }, { x: tx, y: ty, z: tz }),

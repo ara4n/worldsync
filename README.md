@@ -132,8 +132,10 @@ pointer input via `world.onpointerdown/move/up(ev)` where `ev` carries
 the hit prop plus the raw ray (`WebSG.rayPlane` does plane math for drag
 previews) and a prop hit captures the gesture away from box spawning;
 cosmetics via generic line entities - `world.createLine({points, color,
-opacity, shared})` returns a handle whose points/color/opacity the
-script mutates (and animates) itself; `shared` lines are broadcast
+opacity, width, worldUnits, shared})` returns a handle whose
+points/color/opacity/width the script mutates (and animates) itself,
+drawn as fat lines (width in screen px, or world units for wire-like
+lines that scale with the camera); `shared` lines are broadcast
 latest-wins per (author, id) beside the protocol - never folded, never
 hashed - while local ones never leave the client (`world.me.color` is
 each peer's deterministic accent color for drawing in) - plus

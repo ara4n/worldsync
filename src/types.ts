@@ -86,7 +86,8 @@ export type DcMessage =
   // Ephemeral cosmetic line entity: latest-wins full state per (author,
   // id), purely cosmetic, never folded and never in the hash. Fewer than 2
   // points removes the line; a departed peer's lines go with it.
-  | { kind: 'line'; peer: string; id: string; points: Vec3[]; color: number; opacity: number }
+  | { kind: 'line'; peer: string; id: string; points: Vec3[]; color: number; opacity: number; width: number
+      worldUnits: boolean }
   // The heartbeat: attests the author's present (anything it stamps earlier
   // later is a provable history rewrite) and triggers the healing fold that
   // re-simulates the last interval against complete pose tracks.
