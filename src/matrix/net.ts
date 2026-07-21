@@ -113,7 +113,7 @@ export class MatrixNet {
       void poke?.call(this.rtc).then(() => this.reconcile())
     })
 
-    const serviceUrl = lkServiceUrl ?? await this.discoverService(p)
+    const serviceUrl = lkServiceUrl ?? (p.mockTransport ? null : await this.discoverService(p))
     if (!p.mockTransport && !serviceUrl) {
       throw new Error('no LiveKit service url: not in rtc_foci of the client well-known, '
         + 'none advertised by current members - pass ?lkService=https://your-lk-jwt-service')
@@ -185,23 +185,82 @@ export class MatrixNet {
     }, GHOST_GRACE_MS)
   }
 
+  /** the focus advertised by the OLDEST other member (the session's owner,
+   * per MSC4143 oldest_membership focus selection) */
+  private serviceFromMemberships(): string | null {
+    const sorted = [...this.rtc.memberships].sort((a, b) => a.createdTs() - b.createdTs())
+    for (const m of sorted) {
+      if (`${m.userId}:${m.deviceId}` === this.id) continue
+      for (const t of m.transports) {
+        if (isLivekitTransportConfig(t)) return t.livekit_service_url
+      }
+    }
+    return null
+  }
+
+  /** is there m.call.member state from anyone else, surfaced by the sdk yet
+   * or not? (empty content = a left membership, ignored) */
+  private hasForeignMemberState(p: WidgetParams): boolean {
+    const events = this.client.getRoom(p.roomId)?.currentState.getStateEvents(EventType.GroupCallMemberPrefix) ?? []
+    return events.some(ev =>
+      Object.keys(ev.getContent()).length > 0 && !(ev.getStateKey() ?? '').includes(p.deviceId))
+  }
+
+  /** last-ditch: pull a livekit service straight out of raw m.call.member
+   * content (foci_preferred / transports), for state the sdk never parsed */
+  private serviceFromRawState(p: WidgetParams): string | null {
+    const events = this.client.getRoom(p.roomId)?.currentState.getStateEvents(EventType.GroupCallMemberPrefix) ?? []
+    for (const ev of events) {
+      if ((ev.getStateKey() ?? '').includes(p.deviceId)) continue
+      const c = ev.getContent() as Record<string, unknown>
+      for (const list of [c.foci_preferred, c.transports]) {
+        if (!Array.isArray(list)) continue
+        for (const t of list) {
+          const f = t as { type?: string; livekit_service_url?: string }
+          if (f?.type === 'livekit' && typeof f.livekit_service_url === 'string') return f.livekit_service_url
+        }
+      }
+    }
+    return null
+  }
+
   /**
-   * Find the lk-jwt-service, element-call style, in preference order:
-   * a transport an existing member advertises (joining their session means
-   * using their SFU), the host-provided client well-known (usually absent
-   * for widgets: a RoomWidgetClient never talks to a homeserver), and
-   * finally the user's homeserver .well-known fetched directly over HTTP.
+   * Find the lk-jwt-service, element-call style, in preference order: the
+   * focus an existing member advertises - joining their session MUST mean
+   * using their SFU, since two peers on different LiveKit clouds (each
+   * discovering their own homeserver's focus in a federated room) both
+   * come up healthy and never see each other - then the host-provided
+   * client well-known (usually absent for widgets: a RoomWidgetClient
+   * never talks to a homeserver), and finally the user's homeserver
+   * .well-known fetched directly over HTTP. Membership state can surface
+   * from the widget AFTER connect() starts, so poke the session and wait
+   * briefly before concluding no member advertises a focus.
    */
   private async discoverService(p: WidgetParams): Promise<string | null> {
+    const poke = (this.rtc as unknown as { _onRTCSessionMemberUpdate?: () => Promise<void> })._onRTCSessionMemberUpdate
+    for (let i = 0; i < 10; i++) {
+      await poke?.call(this.rtc)
+      const advertised = this.serviceFromMemberships()
+      if (advertised) {
+        this.onLog('livekit service advertised by an existing member (joining their sfu)')
+        return advertised
+      }
+      // surfaced members that advertise no focus, or no member state at
+      // all: nothing to wait for
+      if (this.rtc.memberships.some(m => `${m.userId}:${m.deviceId}` !== this.id)) break
+      if (!this.hasForeignMemberState(p)) break
+      if (i === 0) this.onLog('m.call.member state present but not surfaced yet; giving the sdk a moment')
+      await new Promise(r => setTimeout(r, 300))
+    }
+    const raw = this.serviceFromRawState(p)
+    if (raw) {
+      this.onLog('livekit service pulled from raw membership state (joining their sfu)')
+      return raw
+    }
     const fromWk = (wk: unknown): string | null => {
       const foci = (wk as Record<string, unknown> | undefined)?.['org.matrix.msc4143.rtc_foci'] as
         { type: string; livekit_service_url?: string }[] | undefined
       return foci?.find(f => f.type === 'livekit')?.livekit_service_url ?? null
-    }
-    for (const m of this.rtc.memberships) {
-      for (const t of m.transports) {
-        if (isLivekitTransportConfig(t)) return t.livekit_service_url
-      }
     }
     const viaClient = fromWk(this.client.getClientWellKnown())
     if (viaClient) return viaClient
