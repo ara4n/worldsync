@@ -94,9 +94,13 @@ export class MatrixNet {
     return null
   }
 
-  /** introduce our membership id to everyone on the transport */
-  private sayHello() {
-    this.transport?.send(null, JSON.stringify({ kind: 'hello', peer: this.id }))
+  /** Introduce our membership id to everyone on the transport; with ackTo,
+   * answer one peer's hello instead (targeted at its SFU identity). Acks
+   * carry the same mapping but are never answered, so introductions
+   * cannot ping-pong. */
+  private sayHello(ackTo?: string) {
+    this.transport?.send(ackTo ?? null,
+      JSON.stringify({ kind: 'hello', peer: this.id, ...(ackTo ? { ack: true } : {}) }))
   }
 
   private memberIdFor(sfuId: string): string | null {
@@ -164,10 +168,15 @@ export class MatrixNet {
       if (msg.kind === 'hello') {
         if (this.sfuIdFor.get(msg.peer) !== from) {
           this.sfuIdFor.set(msg.peer, from)
-          this.onLog(`hello: ${msg.peer} is sfu identity ${from}`)
-          this.sayHello() // answer, so a newcomer learns us as fast
+          this.onLog(`hello${msg.ack ? '-ack' : ''}: ${msg.peer} is sfu identity ${from}`)
           this.reconcile()
         }
+        // Answer EVERY hello, not just mapping-changing ones: a reloaded
+        // peer keeps its membership id AND its SFU identity, so its fresh
+        // hello changes nothing on our side - but it still needs our
+        // mapping, or it writes us off as a ghost and roots a second
+        // world (split-brain). Acks are never answered.
+        if (!msg.ack) this.sayHello(from)
         return
       }
       this.onMessage(this.memberIdFor(from) ?? from, msg)

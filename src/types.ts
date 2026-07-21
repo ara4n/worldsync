@@ -82,7 +82,7 @@ export type DcMessage =
   // Transport-level introduction: maps the sender's opaque SFU identity
   // (LiveKit's modern token flow mints hashes) to its membership id.
   // Consumed by MatrixNet; the Session never sees it.
-  | { kind: 'hello'; peer: string }
+  | { kind: 'hello'; peer: string; ack?: boolean }
   | { kind: 'i'; i: Interaction }
   // The pose plane: latest-wins continuous motion for a held entity.
   // Never rolls anyone back; recorded per author and read by replays.
