@@ -140,11 +140,12 @@ async function uploadScript(t, path, name) {
   if (!findProp(ps, sqX(4), BOARD_Y, sqZ(3))) fail('chess: pawn did not reach e4')
   const turn = ps.find((p) => near(p.y, 1.4) && near(p.x, 6.2))
   if (!turn || turn.color !== 0x241d16) fail('chess: turn sphere did not flip to black')
-  // the mover narrates the move into the room as themselves (world.say)
+  // the mover narrates the move into the room as themselves (world.say),
+  // in standard algebraic notation: a pawn double-step is just 'e4'
   const said = await t.frame.evaluate(() =>
     window.__jig.net.client.getRooms().flatMap((r) => r.timeline ?? [])
-      .some((ev) => ev.getType() === 'm.room.message' && ev.getContent().body.includes('♙ e2 > e4')))
-  if (!said) fail('chess: move was not announced in the room')
+      .some((ev) => ev.getType() === 'm.room.message' && ev.getContent().body === 'e4'))
+  if (!said) fail('chess: move was not announced as SAN in the room')
   if (process.exitCode !== 1) console.log('chess: seat, drag legality gate, move ease, turn flip and move chat work')
   await t.page.close()
 }

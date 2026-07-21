@@ -155,12 +155,36 @@ const updateHover = (d) => {
 // -- moving --
 
 // each move is narrated into the Matrix room by its mover (world.say
-// posts as that user), algebraic-ish: piece glyph, from > to, captures,
-// promotion, and the fallen king
+// posts as that user) in standard algebraic notation: pawns are bare
+// squares (e4, exd5), pieces get letters (Nf3, Bxe5), ambiguous movers
+// their departure file/rank (Rad1), promotion =Q. There is no castling
+// or en passant to notate and no check detection for +/#; a captured
+// king ends the game, notated with the standard result (Qxe8 1-0).
 const FILE = 'abcdefgh'
 const sqName = (c, r) => FILE[c] + (r + 1)
-const GLYPHS = { [W]: { p: '♙', r: '♖', n: '♘', b: '♗', q: '♕', k: '♔' },
-  [B]: { p: '♟', r: '♜', n: '♞', b: '♝', q: '♛', k: '♚' } }
+const LETTER = { p: '', r: 'R', n: 'N', b: 'B', q: 'Q', k: 'K' }
+
+const san = (d, c, r, victim, promoted) => {
+  if (d.type === 'p') {
+    return (victim ? FILE[d.c0] + 'x' : '') + sqName(c, r) + (promoted ? '=Q' : '')
+  }
+  // disambiguate against same-side same-type pieces that also reach the
+  // square: departure file first, then rank, then both (SAN preference).
+  // The mover is cleared off the board first - mid-drag its prop hovers
+  // at an arbitrary cell and must not block a rival's sliding path.
+  for (let cc = 0; cc < N; cc++) for (let rr = 0; rr < N; rr++) {
+    if (board[cc][rr] && board[cc][rr].id === d.id) board[cc][rr] = null
+  }
+  const rivals = pieces.filter((p) => p.id !== d.id && p.side === d.side && p.type === d.type
+    && targets(p).some(([tc, tr]) => tc === c && tr === r))
+  let dis = ''
+  if (rivals.length) {
+    if (!rivals.some((p) => p.c === d.c0)) dis = FILE[d.c0]
+    else if (!rivals.some((p) => p.r === d.r0)) dis = String(d.r0 + 1)
+    else dis = sqName(d.c0, d.r0)
+  }
+  return LETTER[d.type] + dis + (victim ? 'x' : '') + sqName(c, r)
+}
 
 const doMove = (d, c, r) => {
   const victim = board[c][r] && board[c][r].id !== d.id ? board[c][r] : null
@@ -173,10 +197,8 @@ const doMove = (d, c, r) => {
     world.move(d.id, { x: sqX(c), y: BOARD_Y, z: sqZ(r) })
   }
   if (turnProp) world.paint(turnProp.id, d.side === W ? B : W)
-  let msg = `${GLYPHS[d.side][d.type]} ${sqName(d.c0, d.r0)} > ${sqName(c, r)}`
-  if (victim) msg += `, takes ${GLYPHS[victim.side][victim.type]}`
-  if (promoted) msg += `, promoted to ${GLYPHS[d.side].q}`
-  if (victim && victim.type === 'k') msg += ` - ${d.side === W ? 'white' : 'black'} wins!`
+  let msg = san(d, c, r, victim, promoted)
+  if (victim && victim.type === 'k') msg += d.side === W ? ' 1-0' : ' 0-1'
   world.say(msg)
   localLatch = now
 }
