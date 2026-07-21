@@ -1,6 +1,6 @@
 import {
   WidgetApi, MatrixCapabilities, WidgetApiToWidgetAction,
-  type INotifyCapabilitiesActionRequest,
+  type INotifyCapabilitiesActionRequest, type IWidgetApiRequest,
 } from 'matrix-widget-api'
 import { createRoomWidgetClient, EventType, type MatrixClient, type ICapabilities } from 'matrix-js-sdk'
 import type { WidgetParams } from './params'
@@ -25,6 +25,14 @@ export async function initWidgetClient(p: WidgetParams): Promise<{ api: WidgetAp
     const denied = requested.filter(c => !approved.includes(c))
     console.log('[worldsync] capabilities approved:', approved)
     if (denied.length) console.warn('[worldsync] capabilities DENIED by the host:', denied)
+  })
+  // Element Web notifies widgets of client theme switches; with no
+  // handler the transport error-replies AND throws an uncaught rejection
+  // into the console each time. Worldsync has one look: ack and ignore.
+  api.on(`action:${WidgetApiToWidgetAction.ThemeChange}`, (raw: Event) => {
+    const ev = raw as CustomEvent<IWidgetApiRequest>
+    ev.preventDefault()
+    api.transport.reply(ev.detail, {})
   })
   api.requestCapability(MatrixCapabilities.AlwaysOnScreen)
   // MSC4039 media actions: the glTF scene GLB is uploaded/downloaded through
