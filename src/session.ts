@@ -128,13 +128,17 @@ export class Session {
   nextNetId() { return `${this.id}-${this.spawnCount++}` }
 
   /** Has the late-join boot settled? Scripts must not start (and e.g.
-   * seed a board) while the world they would read is still in flight:
-   * a rejoining peer that seeds before its boot seam folds plants a
-   * second board on everyone. */
+   * seed a board) while the world they would read is still in flight: a
+   * rejoining peer that seeds before its boot seam folds plants a second
+   * board on everyone. Boot ops are stamped BOOT_LEAD_TICKS ahead, so
+   * settled means the grid has PASSED the seam tick (the ops applied) -
+   * mere receipt still reads as an empty world. */
   worldSettled() {
-    return !this.bootAsked || this.bootHealed || this.clock() - this.startedAtMs > 5000
+    if (!this.bootAsked) return true
+    if (this.bootSeamTick !== null && this.sim.tick > this.bootSeamTick) return true
+    return this.clock() - this.startedAtMs > 5000
   }
-  private bootHealed = false
+  private bootSeamTick: number | null = null
   private startedAtMs = 0
   private calibratedFrom: string | null = null
 
@@ -147,7 +151,7 @@ export class Session {
     this.startTick = this.sim.tick
     this.nextHashTick = this.sim.tick + HASH_EVERY_TICKS
     this.nextBeatTick = this.sim.tick + BEAT_EVERY_TICKS
-    this.onLog(`tick grid ${this.order === this.rootOrder() ? 'rooted' : 'calibrated'} at tick ${this.sim.tick}`)
+    this.onLog(`tick grid ${this.calibratedFrom === null ? 'rooted' : `calibrated (adopted ${this.calibratedFrom.split(':')[0]}'s grid)`} at tick ${this.sim.tick}`)
     for (const p of this.pendingOps) this.receive(p.from, { kind: 'i', i: p.i })
     this.pendingOps.length = 0
     this.maybeBootReq()
@@ -160,25 +164,31 @@ export class Session {
     return min
   }
 
-  // Late joiners pull a state snapshot, but only once the tick grid is
-  // calibrated: boot ops carry tick stamps that mean nothing to an
-  // unstarted sim. The dump comes from the senior-most peer - the most
-  // settled world; a fresh joiner's dump can race in-flight ops and its
-  // seam then drops them everywhere - and only when NO senior exists
-  // (a senior rejoining a room of juniors) from the peer whose grid we
-  // adopted: it has the running world, whatever its join order.
+  // Joiners that ADOPTED a running grid pull a state snapshot, but only
+  // once the tick grid is calibrated: boot ops carry tick stamps that
+  // mean nothing to an unstarted sim. A peer that rooted its own grid
+  // never pulls - it IS the world, and asking a freshly-connected senior
+  // for a dump would replace a running board with whatever the senior
+  // has (possibly nothing). The dump comes from the senior-most peer -
+  // the most settled world; a fresh joiner's dump can race in-flight
+  // ops and its seam then drops them everywhere - else from the peer
+  // whose grid we adopted (a senior rejoining a room of juniors pulls
+  // from them). An unstarted target ignores the request; advance()
+  // re-issues until a seam arrives.
   private maybeBootReq() {
-    if (!this.started || this.bootAsked) return
+    if (!this.started || this.bootAsked || this.calibratedFrom === null) return
     let target: SessionPeer | null = null
     for (const p of this.peers.values()) {
       if (p.order < this.order && (target === null || p.order < target.order)) target = p
     }
-    if (!target && this.calibratedFrom) target = this.peers.get(this.calibratedFrom) ?? null
+    if (!target) target = this.peers.get(this.calibratedFrom) ?? null
     if (target) {
       this.bootAsked = true
+      this.bootReqAtMs = this.clock()
       this.sendRaw(target.id, { kind: 'boot-req' })
     }
   }
+  private bootReqAtMs = 0
 
   peerConnected(id: string, order: number) {
     if (!this.peers.has(id)) {
@@ -321,6 +331,13 @@ export class Session {
             if (Math.abs(delta) > HARD_RESYNC_TICKS) {
               this.onLog(`tick clock ${delta.toFixed(1)} ticks off root; hard resync`)
               this.tickClock.set(t3, est)
+              // Our grid was the wrong one (self-rooted before this live
+              // senior appeared): our world state is too, so re-pull it
+              // from the root that just yanked our clock.
+              this.calibratedFrom = fromId
+              this.bootAsked = false
+              this.bootSeamTick = null
+              this.maybeBootReq()
             } else {
               this.tickClock.nudge(delta)
             }
@@ -330,7 +347,9 @@ export class Session {
       }
       case 'i': {
         if (peer.excluded) return
-        if (msg.i.type === 'boot') this.bootHealed = true // our seam answer is landing
+        // settled only once the grid PASSES the seam (boot ops are
+        // stamped ahead; on receipt they have not applied yet)
+        if (msg.i.type === 'boot') this.bootSeamTick = Math.max(this.bootSeamTick ?? -1, msg.i.tick)
         if (!this.started) { this.pendingOps.push({ from: fromId, i: msg.i }); return }
         if (!this.admissible(peer, msg.i.tick)) return
         const k = this.sim.insert(msg.i)
@@ -368,7 +387,10 @@ export class Session {
         // (us included, via emit) folds the identical seam at the same
         // tick, stamped ahead so nobody has already passed it. An empty
         // room still gets a marker op: the seam must exist so ops that
-        // raced the join are re-applied everywhere.
+        // raced the join are re-applied everywhere. An UNSTARTED peer
+        // must never answer: its dump would be an empty world stamped on
+        // a meaningless grid - a wrecking ball for the requester.
+        if (!this.started) return
         const seamTick = this.sim.tick + BOOT_LEAD_TICKS
         const { from, entities } = this.sim.dumpSeam()
         if (entities.length === 0) {
@@ -421,6 +443,13 @@ export class Session {
       for (const p of this.peers.values()) this.sendRaw(p.id, { kind: 'ping', t0: now })
     }
     if (!this.started) return
+    // A boot-req can go unanswered (the target was still unstarted, or
+    // the message was lost to a transport blip): re-issue until a seam
+    // actually arrives.
+    if (this.bootAsked && this.bootSeamTick === null && now - this.bootReqAtMs > 2000) {
+      this.bootAsked = false
+      this.maybeBootReq()
+    }
     this.sim.advance(this.tickClock.tickTimeAt(now))
     if (this.sim.tick >= this.nextBeatTick) {
       this.nextBeatTick = this.sim.tick + BEAT_EVERY_TICKS
