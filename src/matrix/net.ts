@@ -190,6 +190,13 @@ export class MatrixNet {
       }
       this.reconcile()
     }
+    this.transport.onVideoTrack = (identity, track) => {
+      const mid = this.memberIdFor(identity)
+      if (mid) this.onVideo(mid, track)
+      else if (track) this.pendingVideo.set(identity, track)
+      else this.pendingVideo.delete(identity)
+    }
+    this.transport.onLocalVideo = track => this.onVideo(this.id, track)
 
     // Adopt the room's glTF scene before publishing our membership: nobody
     // can be waiting on us yet, and the sim must not start (senior pongs
@@ -375,6 +382,7 @@ export class MatrixNet {
         this.onPeerLeft(id)
       }
     }
+    this.flushPendingVideo()
   }
 
   private sendRaw(to: string | null, msg: DcMessage) {
@@ -398,6 +406,29 @@ export class MatrixNet {
    * (false when the transport has no media path) */
   async setMicEnabled(on: boolean): Promise<boolean> {
     return this.transport?.setMicEnabled ? this.transport.setMicEnabled(on) : false
+  }
+
+  hasVideo(): boolean { return !!this.transport?.setCameraEnabled }
+
+  async setCameraEnabled(on: boolean): Promise<boolean> {
+    return this.transport?.setCameraEnabled ? this.transport.setCameraEnabled(on) : false
+  }
+
+  /** a peer's camera track appeared (or, with null, went away), keyed by
+   * membership id; fires for our own camera too (self-view) */
+  onVideo: (peer: string, track: MediaStreamTrack | null) => void = () => {}
+  /** tracks whose SFU identity had no membership mapping yet when they
+   * arrived; re-attributed after every reconcile (a hello may land after
+   * the SFU already delivered the participant's video) */
+  private pendingVideo = new Map<string, MediaStreamTrack>()
+  private flushPendingVideo() {
+    for (const [identity, track] of [...this.pendingVideo]) {
+      const mid = this.memberIdFor(identity)
+      if (mid) {
+        this.pendingVideo.delete(identity)
+        this.onVideo(mid, track)
+      }
+    }
   }
 
   leave() {

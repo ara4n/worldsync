@@ -23,6 +23,13 @@ export interface DataTransport {
    * media path (LiveKit does, the mock does not); resolves to the
    * resulting state */
   setMicEnabled?(on: boolean): Promise<boolean>
+  /** publish/unpublish the local camera; same contract as the mic */
+  setCameraEnabled?(on: boolean): Promise<boolean>
+  /** a remote participant's video track appeared (or, with null, went
+   * away); identities are the transport's own (SFU identities) */
+  onVideoTrack?: (identity: string, track: MediaStreamTrack | null) => void
+  /** our own camera track, for a local self-view */
+  onLocalVideo?: (track: MediaStreamTrack | null) => void
   close(): void
 }
 
@@ -85,10 +92,13 @@ export class LiveKitTransport implements DataTransport {
   onData: (from: string, data: string) => void = () => {}
   onParticipants: (identities: Set<string>) => void = () => {}
   onLog: (line: string) => void = () => {}
+  onVideoTrack: (identity: string, track: MediaStreamTrack | null) => void = () => {}
+  onLocalVideo: (track: MediaStreamTrack | null) => void = () => {}
   private room = new LivekitRoom()
   private closed = false
   private rejoining = false
   private micWanted = false
+  private camWanted = false
 
   constructor(
     private client: MatrixClient,
@@ -128,15 +138,31 @@ export class LiveKitTransport implements DataTransport {
     })
     // Voice rides the same room: attach every subscribed audio track to a
     // hidden <audio> element, so hearing others needs no mic of your own.
-    this.room.on(RoomEvent.TrackSubscribed, track => {
+    // Video tracks are handed up instead: the renderer textures them onto
+    // whatever screens a world script has placed.
+    this.room.on(RoomEvent.TrackSubscribed, (track, _pub, participant) => {
+      if (track.kind === Track.Kind.Video) {
+        this.onVideoTrack(participant.identity, track.mediaStreamTrack)
+        return
+      }
       if (track.kind !== Track.Kind.Audio) return
       const el = track.attach()
       el.style.display = 'none'
       document.body.appendChild(el)
     })
-    this.room.on(RoomEvent.TrackUnsubscribed, track => {
+    this.room.on(RoomEvent.TrackUnsubscribed, (track, _pub, participant) => {
+      if (track.kind === Track.Kind.Video) {
+        this.onVideoTrack(participant.identity, null)
+        return
+      }
       if (track.kind !== Track.Kind.Audio) return
       for (const el of track.detach()) el.remove()
+    })
+    this.room.on(RoomEvent.LocalTrackPublished, pub => {
+      if (pub.track?.source === Track.Source.Camera) this.onLocalVideo(pub.track.mediaStreamTrack)
+    })
+    this.room.on(RoomEvent.LocalTrackUnpublished, pub => {
+      if (pub.track?.source === Track.Source.Camera) this.onLocalVideo(null)
     })
     // Autoplay policy may hold playback until a user gesture; resume on
     // the next one.
@@ -170,6 +196,9 @@ export class LiveKitTransport implements DataTransport {
         if (this.micWanted && !this.room.localParticipant.isMicrophoneEnabled) {
           void this.room.localParticipant.setMicrophoneEnabled(true).catch(() => {})
         }
+        if (this.camWanted && !this.room.localParticipant.isCameraEnabled) {
+          void this.room.localParticipant.setCameraEnabled(true).catch(() => {})
+        }
         return
       } catch (e) {
         this.onLog(`livekit: connect attempt ${attempt} failed (${e}); retrying in ${delayMs / 1000}s`)
@@ -186,6 +215,14 @@ export class LiveKitTransport implements DataTransport {
     this.micWanted = on
     await this.room.localParticipant.setMicrophoneEnabled(on)
     return this.room.localParticipant.isMicrophoneEnabled
+  }
+
+  /** Same contract as the mic: nothing is captured or published until the
+   * first enable, so a video-requesting world never prompts on its own. */
+  async setCameraEnabled(on: boolean): Promise<boolean> {
+    this.camWanted = on
+    await this.room.localParticipant.setCameraEnabled(on)
+    return this.room.localParticipant.isCameraEnabled
   }
 
   send(to: string | null, data: string) {
