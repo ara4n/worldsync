@@ -242,14 +242,18 @@ export class MatrixNet {
     // pong to hand it the existing grid (Session adopts any calibrated
     // peer's grid, whatever its order).
     setTimeout(() => {
-      let reachableSenior = false
+      let senior = false, reachableSenior = false
       for (const m of this.rtc.memberships) {
         const id = `${m.userId}:${m.deviceId}`
         if (id === this.id || m.createdTs() >= this.order) continue
+        senior = true
         if (this.matchParticipant(id) !== null) reachableSenior = true
       }
       if (!reachableSenior) {
-        this.onLog('no reachable senior after the grace period; rooting the grid here unless a running peer calibrates us first')
+        // With no senior membership at all there was nothing to wait for
+        // (alone, or everyone is junior): fire the callback - it is a
+        // no-op on an already-rooted session - but skip the ghost log.
+        if (senior) this.onLog('no reachable senior after the grace period; rooting the grid here unless a running peer calibrates us first')
         this.onSeniorsUnreachable()
       }
     }, GHOST_GRACE_MS)
