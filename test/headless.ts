@@ -252,6 +252,55 @@ async function glbSceneConverges() {
 /** the same op mapping main.ts gives the sandbox, wired to a hub peer */
 const hostFor = (p: HubPeer): ScriptHost => ({
   log: () => {},
+  me: () => ({ id: p.id, primary: [...p.session.peers.values()].every(q => q.order > p.session.order), color: 0xffffff }),
+  props: () => [...p.sim.props].map(([id, pr]) => ({
+    id, x: pr.pos.x, y: pr.pos.y, z: pr.pos.z, color: pr.color, size: pr.size, kind: pr.kind,
+    claimedBy: pr.claim ?? '', mine: pr.claim === p.id,
+  })),
+  prop: id => {
+    const pr = p.sim.props.get(id)
+    if (!pr) return null
+    return {
+      id, x: pr.pos.x, y: pr.pos.y, z: pr.pos.z, color: pr.color, size: pr.size, kind: pr.kind,
+      claimedBy: pr.claim ?? '', mine: pr.claim === p.id,
+    }
+  },
+  spawnProp: (kind, x, y, z, color, size, unlit) => {
+    const id = p.session.nextNetId()
+    p.session.emit('prop', id, { pos: { x, y, z }, color, shape: kind, size, unlit })
+    return id
+  },
+  despawn: id => {
+    if (!p.sim.props.has(id) && !p.sim.bodies.has(id)) return false
+    p.session.emit('despawn', id, { pos: { x: 0, y: 0, z: 0 } })
+    return true
+  },
+  claim: id => {
+    const pr = p.sim.props.get(id)
+    if (!pr || (pr.claim !== null && pr.claim !== p.id)) return false
+    p.session.emit('claim', id, { pos: { x: 0, y: 0, z: 0 } })
+    return true
+  },
+  unclaim: id => {
+    const pr = p.sim.props.get(id)
+    if (!pr || pr.claim !== p.id) return false
+    p.session.emit('unclaim', id, { pos: { x: 0, y: 0, z: 0 } })
+    return true
+  },
+  setPos: (id, x, y, z) => {
+    if (!p.sim.props.has(id)) return false
+    p.session.emit('move', id, { pos: { x, y, z } })
+    return true
+  },
+  paint: (id, color) => {
+    if (!p.sim.props.has(id)) return false
+    p.session.emit('paint', id, { pos: { x: 0, y: 0, z: 0 }, color })
+    return true
+  },
+  chainLine: () => {},
+  decorLines: () => {},
+  setEnv: () => {},
+  setCamera: () => {},
   boxes: () => [...p.sim.bodies.keys()].map(id => {
     const t = p.sim.body(id)!.translation()
     const g = p.sim.grabs.get(id)
@@ -339,6 +388,126 @@ async function sandboxedScriptConverges() {
   }
 }
 
+async function propsAndClaimsConverge() {
+  console.log('\n-- props: claim races resolve deterministically, state boots across seams --')
+  const hub = createHub(25)
+  const a = await hub.join('a')
+  const b = await hub.join('b')
+  hub.link('a', 'b', 120)
+  hub.run(1 * S)
+
+  // a seeds a little board of props
+  const ids: string[] = []
+  for (let k = 0; k < 4; k++) {
+    const id = a.session.nextNetId()
+    ids.push(id)
+    a.session.emit('prop', id, { pos: { x: k, y: 1, z: 0 }, color: 0x111111 * (k + 1), shape: 'sphere', size: 0.2, unlit: true })
+  }
+  hub.run(1 * S)
+  check(b.sim.props.size === 4, `props replicated (b has ${b.sim.props.size}/4)`)
+
+  // both peers claim the same prop at (nearly) the same tick: exactly one
+  // deterministic winner on BOTH sims, by (tick, order, seq)
+  a.session.emit('claim', ids[0], { pos: { x: 0, y: 0, z: 0 } })
+  b.session.emit('claim', ids[0], { pos: { x: 0, y: 0, z: 0 } })
+  hub.run(2 * S)
+  const winA = a.sim.props.get(ids[0])!.claim
+  const winB = b.sim.props.get(ids[0])!.claim
+  check(winA !== null && winA === winB, `claim race has one agreed winner (${winA})`)
+  // the loser's rival claim was inert; the winner can still release
+  const winner = winA === a.id ? a : b
+  const loser = winA === a.id ? b : a
+
+  // a rival unclaim without force is inert; with force it clears (ghost path)
+  loser.session.emit('unclaim', ids[0], { pos: { x: 0, y: 0, z: 0 } })
+  hub.run(1 * S)
+  check(a.sim.props.get(ids[0])!.claim === winA, 'rival unclaim without force is inert')
+  loser.session.emit('unclaim', ids[0], { pos: { x: 0, y: 0, z: 0 }, force: true })
+  hub.run(1 * S)
+  check(a.sim.props.get(ids[0])!.claim === null && b.sim.props.get(ids[0])!.claim === null,
+    'forced unclaim clears the claim everywhere')
+
+  // move + paint + despawn fold like any op
+  winner.session.emit('move', ids[1], { pos: { x: 1, y: 0, z: 0 } })
+  winner.session.emit('paint', ids[2], { pos: { x: 0, y: 0, z: 0 }, color: 0xabcdef })
+  winner.session.emit('despawn', ids[3], { pos: { x: 0, y: 0, z: 0 } })
+  loser.session.emit('claim', ids[2], { pos: { x: 0, y: 0, z: 0 } })
+  hub.run(2 * S)
+  for (const p of [a, b]) {
+    check(p.sim.props.get(ids[1])!.pos.y === 0, `${p.id}: move applied`)
+    check(p.sim.props.get(ids[2])!.color === 0xabcdef, `${p.id}: paint applied`)
+    check(!p.sim.props.has(ids[3]), `${p.id}: despawn applied`)
+    check(p.sim.props.get(ids[2])!.claim === loser.id, `${p.id}: loser's fresh claim landed`)
+  }
+
+  // a late joiner boots the whole prop table, claims included
+  const c = await hub.join('c')
+  hub.run(3 * S)
+  check(c.sim.props.size === 3, `joiner booted the props (${c.sim.props.size}/3)`)
+  check(c.sim.props.get(ids[2])?.claim === loser.id, 'joiner sees the claim across the seam')
+  check(c.sim.props.get(ids[2])?.color === 0xabcdef, 'joiner sees the paint across the seam')
+
+  hub.run(8 * S)
+  const settled = a.sim.tick - 400
+  for (const [x, y, name] of [[a, b, 'a/b'], [a, c, 'a/c'], [b, c, 'b/c']] as const) {
+    check(hashDiff(x, y, settled).length === 0, `${name}: no divergent settled ticks`)
+  }
+  for (const p of [a, b, c]) {
+    check(p.sim.anomalies.length === 0, `${p.id}: no anomalies`)
+    check([...p.session.peers.values()].every(q => q.checked && q.divergedAt === null), `${p.id}: hash exchange clean`)
+  }
+}
+
+async function sandboxedDotsChain() {
+  console.log('\n-- sandboxed script chains props via claims (the dots primitive) --')
+  const hub = createHub(30)
+  const a = await hub.join('a')
+  const b = await hub.join('b')
+  hub.run(1 * S)
+  // a's script seeds a 3-dot row and chains two of them via claims, then
+  // "clears" them (despawn) and refills one - the dots gameplay skeleton
+  const script = await WorldScript.create(`
+    let phase = 'seed', dots = []
+    world.onupdate = () => {
+      if (phase === 'seed') {
+        if (!world.me.primary) return
+        for (let k = 0; k < 3; k++) {
+          dots.push(world.createSphere({ position: { x: k, y: 1, z: 0 }, color: 0xda664f, radius: 0.16, unlit: true }))
+        }
+        phase = 'claim'
+      } else if (phase === 'claim') {
+        const p0 = world.prop(dots[0]), p1 = world.prop(dots[1])
+        if (!p0 || !p1) return
+        if (!p0.mine) { world.claim(dots[0]); return }
+        if (!p1.mine) { world.claim(dots[1]); return }
+        phase = 'clear'
+      } else if (phase === 'clear') {
+        world.despawn(dots[0])
+        world.despawn(dots[1])
+        world.createSphere({ position: { x: 0.5, y: 2, z: 0 }, color: 0x94baf9, radius: 0.16, unlit: true })
+        phase = 'done'
+      }
+    }
+  `, hostFor(a))
+  let last = a.sim.tick
+  hub.run(5 * S, () => {
+    if (a.sim.tick > last) {
+      last = a.sim.tick
+      script.update(1 / 60, 0)
+    }
+  })
+  check(!script.dead, 'script survived')
+  script.dispose()
+  hub.run(4 * S)
+  check(a.sim.props.size === 2 && b.sim.props.size === 2,
+    `chain cleared and refilled on both peers (a ${a.sim.props.size}, b ${b.sim.props.size})`)
+  const settled = a.sim.tick - 400
+  check(hashDiff(a, b, settled).length === 0, 'no divergent settled ticks')
+  for (const p of [a, b]) {
+    check([...p.session.peers.values()].every(q => q.checked && q.divergedAt === null), `${p.id}: hash exchange clean`)
+  }
+}
+
 async function backdaterStruck() {
   console.log('\n-- an op stamped before its author\'s own beat earns a strike --')
   const hub = createHub(10)
@@ -362,5 +531,7 @@ await skewedClocks()
 await spawnRacesJoin()
 await glbSceneConverges()
 await sandboxedScriptConverges()
+await propsAndClaimsConverge()
+await sandboxedDotsChain()
 await backdaterStruck()
 console.log(`\n${failures === 0 ? 'HEADLESS SUITE PASSED' : `${failures} FAILURES`} (${((Date.now() - t0) / 1000).toFixed(1)}s real for ~72s virtual)`)

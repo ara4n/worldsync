@@ -1,5 +1,5 @@
 import RAPIER from '@dimforge/rapier3d-deterministic-compat'
-import { type BootEntity, type Interaction, type Quat, type Vec3 } from './types'
+import { type BootEntity, type Interaction, type PropInfo, type Quat, type Vec3 } from './types'
 import { createEcsStore } from './ecs'
 
 export const TICK_HZ = 60
@@ -32,6 +32,11 @@ export interface InputLogEntry {
 const ZERO: Vec3 = { x: 0, y: 0, z: 0 }
 
 interface Grab { holder: string; order: number; target: Vec3; since: number }
+/** Kinematic, physics-free entity (a dots-demo sphere): everything here is
+ * plain folded state, mutated only by ops, so it participates in rollback
+ * and the cross-peer hash like body poses do. `claim` is the coordination
+ * primitive: set by the first 'claim' op to arrive in timeline order. */
+export interface Prop { kind: string; pos: Vec3; color: number; size: number; unlit: boolean; claim: string | null }
 /** Baked triangle soup for a glTF scene's fixed collider; every peer parses
  * it from the same GLB bytes, so the arrays are bit-identical everywhere. */
 export interface SceneGeometry { vertices: Float32Array; indices: Uint32Array }
@@ -39,12 +44,24 @@ export interface SceneGeometry { vertices: Float32Array; indices: Uint32Array }
  * trimesh body's handle (-1 while the geometry has not arrived yet), tick
  * is when the scene applied (the heal-fold target once it does arrive). */
 interface SceneRef { url: string; body: number; tick: number }
-interface HistoryRec { snap: Uint8Array; bodies: Map<string, number>; grabs: Map<string, Grab>; scene: SceneRef | null }
+interface HistoryRec {
+  snap: Uint8Array
+  bodies: Map<string, number>
+  grabs: Map<string, Grab>
+  props: Map<string, Prop>
+  scene: SceneRef | null
+}
 interface Entry { tick: number; order: number; seq: number; i: Interaction }
 
 /** Everything a simulation step touches; the live sim and scratch replay
  * verification worlds both step through the same code via one of these. */
-interface Ctx { world: RAPIER.World; bodies: Map<string, number>; grabs: Map<string, Grab>; scene: SceneRef | null }
+interface Ctx {
+  world: RAPIER.World
+  bodies: Map<string, number>
+  grabs: Map<string, Grab>
+  props: Map<string, Prop>
+  scene: SceneRef | null
+}
 
 function bodyOf(ctx: Ctx, netId: string): RAPIER.RigidBody | null {
   const h = ctx.bodies.get(netId)
@@ -70,6 +87,19 @@ function hashCtx(ctx: Ctx): number {
     for (let i = 0; i < 104; i++) h = Math.imul(h ^ hashBytes[i], 0x01000193)
     h = Math.imul(h ^ (b.isSleeping() ? 1 : 0), 0x01000193)
   }
+  // Props are folded state too: position, color, size and claim all matter
+  // for convergence, so they join the settled-hash exchange.
+  const str = (s: string) => { for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) }
+  for (const netId of [...ctx.props.keys()].sort()) {
+    const p = ctx.props.get(netId)!
+    str(netId)
+    str(p.kind)
+    hashF64[0] = p.pos.x; hashF64[1] = p.pos.y; hashF64[2] = p.pos.z; hashF64[3] = p.size
+    for (let i = 0; i < 32; i++) h = Math.imul(h ^ hashBytes[i], 0x01000193)
+    h = Math.imul(h ^ p.color, 0x01000193)
+    h = Math.imul(h ^ (p.unlit ? 1 : 0), 0x01000193)
+    str(p.claim ?? '')
+  }
   return h >>> 0
 }
 
@@ -83,6 +113,12 @@ const before = (a: Entry, b: Entry) =>
 function cloneGrabs(m: Map<string, Grab>): Map<string, Grab> {
   const out = new Map<string, Grab>()
   for (const [k, g] of m) out.set(k, { holder: g.holder, order: g.order, target: { ...g.target }, since: g.since })
+  return out
+}
+
+function cloneProps(m: Map<string, Prop>): Map<string, Prop> {
+  const out = new Map<string, Prop>()
+  for (const [k, p] of m) out.set(k, { ...p, pos: { ...p.pos } })
   return out
 }
 
@@ -159,6 +195,8 @@ export class Sim {
   tick = 0
   bodies = new Map<string, number>()
   grabs = new Map<string, Grab>()
+  /** kinematic physics-free entities (see Prop); folded state like bodies */
+  props = new Map<string, Prop>()
   /** the active glTF scene (never in `bodies`: not hashed, not dumped) */
   scene: SceneRef | null = null
   private sceneGeoms = new Map<string, SceneGeometry>()
@@ -388,6 +426,7 @@ export class Sim {
       snap: this.world.takeSnapshot(),
       bodies: new Map(this.bodies),
       grabs: cloneGrabs(this.grabs),
+      props: cloneProps(this.props),
       scene: this.scene && { ...this.scene },
     })
   }
@@ -466,6 +505,7 @@ export class Sim {
     this.world.timestep = 1 / TICK_HZ
     this.bodies = new Map(rec.bodies)
     this.grabs = cloneGrabs(rec.grabs)
+    this.props = cloneProps(rec.props)
     // handles are stable across snapshot restore, so the stored ref is valid
     this.scene = rec.scene && { ...rec.scene }
     this.tick = k
@@ -491,7 +531,9 @@ export class Sim {
     }
   }
 
-  private liveCtx(): Ctx { return { world: this.world, bodies: this.bodies, grabs: this.grabs, scene: this.scene } }
+  private liveCtx(): Ctx {
+    return { world: this.world, bodies: this.bodies, grabs: this.grabs, props: this.props, scene: this.scene }
+  }
 
   private applyTick(ctx: Ctx, tick: number) {
     if (this.tickHasBoot(tick)) {
@@ -562,6 +604,7 @@ export class Sim {
     ctx.world = buildWorld()
     ctx.bodies.clear()
     ctx.grabs.clear()
+    ctx.props.clear() // boot entries recreate them (claims included)
     ctx.scene = null
     if (scene) this.addScene(ctx, scene.url, scene.tick)
   }
@@ -595,6 +638,7 @@ export class Sim {
         snap,
         bodies: new Map(this.bodies),
         grabs: cloneGrabs(this.grabs),
+        props: cloneProps(this.props),
         scene: this.scene && { ...this.scene },
       })
       for (const key of this.history.keys()) {
@@ -671,6 +715,7 @@ export class Sim {
       world: RAPIER.World.restoreSnapshot(rec.snap),
       bodies: new Map(rec.bodies),
       grabs: cloneGrabs(rec.grabs),
+      props: cloneProps(rec.props),
       scene: rec.scene && { ...rec.scene },
     }
     ctx.world.timestep = 1 / TICK_HZ
@@ -718,6 +763,10 @@ export class Sim {
         + (g ? ` grab=${g.holder}` : '') + ` bits=${hex}`
     }
     w.free()
+    for (const [netId, p] of rec.props) {
+      out[netId] = `prop ${p.kind} p=${p.pos.x.toFixed(6)},${p.pos.y.toFixed(6)},${p.pos.z.toFixed(6)}`
+        + ` color=${p.color.toString(16)} size=${p.size}` + (p.claim ? ` claim=${p.claim}` : '')
+    }
     return out
   }
 
@@ -792,8 +841,61 @@ export class Sim {
         ctx.world = buildWorld()
         ctx.bodies.clear()
         ctx.grabs.clear()
+        ctx.props.clear()
         ctx.scene = null
         this.addScene(ctx, i.netId, tick)
+        return
+      }
+      case 'prop': {
+        if (ctx.props.has(i.netId) || ctx.bodies.has(i.netId)) return
+        ctx.props.set(i.netId, {
+          kind: i.shape ?? 'sphere', pos: { ...i.pos },
+          color: i.color ?? 0xffffff, size: i.size ?? 0.5, unlit: !!i.unlit, claim: null,
+        })
+        return
+      }
+      case 'despawn': {
+        if (ctx.props.delete(i.netId)) return
+        const h = ctx.bodies.get(i.netId)
+        if (h === undefined) return
+        const b = ctx.world.getRigidBody(h)
+        if (b) ctx.world.removeRigidBody(b)
+        ctx.bodies.delete(i.netId)
+        ctx.grabs.delete(i.netId)
+        return
+      }
+      case 'claim': {
+        // First writer wins, by timeline order: a claim against a prop
+        // someone else already holds is deterministically inert on every
+        // peer, so rival chains resolve without consensus machinery.
+        const p = ctx.props.get(i.netId)
+        if (!p || (p.claim !== null && p.claim !== i.peer)) return
+        p.claim = i.peer
+        return
+      }
+      case 'unclaim': {
+        const p = ctx.props.get(i.netId)
+        if (!p || p.claim === null) return
+        // force is the ghost-cleanup path (a claimer's session died); any
+        // author may clear any claim with it, which is fine in a
+        // cooperative world and still deterministic (pure state x op).
+        if (p.claim !== i.peer && !i.force) return
+        p.claim = null
+        return
+      }
+      case 'move': {
+        // Anyone may move a prop, claimed or not: board-structure edits
+        // (column drops after a dots clear) must win over in-flight chains,
+        // whose scripts re-validate against the new positions.
+        const p = ctx.props.get(i.netId)
+        if (!p) return
+        p.pos = { ...i.pos }
+        return
+      }
+      case 'paint': {
+        const p = ctx.props.get(i.netId)
+        if (!p || i.color === undefined) return
+        p.color = i.color
         return
       }
       case 'boot': {
@@ -801,6 +903,15 @@ export class Sim {
         // the seam (rebuild + raced-op replay) happens even in a room with
         // no entities yet.
         if (!i.netId) return
+        // Prop entities cross the seam whole (claim included): recreate in
+        // dump order, exactly like bodies.
+        if (i.prop) {
+          ctx.props.set(i.netId, {
+            kind: i.prop.kind, pos: { ...i.pos },
+            color: i.prop.color, size: i.prop.size, unlit: i.prop.unlit, claim: i.prop.claim,
+          })
+          return
+        }
         // The grab table crosses the seam too: a body mid-drag at boot time
         // must be pinned (kinematic) from the same tick on every peer.
         if (i.grab) ctx.grabs.set(i.netId, { holder: i.grab.holder, order: i.grab.order, target: { ...i.grab.target }, since: tick })
@@ -893,6 +1004,13 @@ export class Sim {
         })
       }
       world.free()
+      for (const [netId, p] of rec.props) {
+        out.push({
+          netId, color: p.color, pos: { ...p.pos },
+          rot: { x: 0, y: 0, z: 0, w: 1 }, linvel: { ...ZERO }, angvel: { ...ZERO },
+          prop: { kind: p.kind, color: p.color, size: p.size, unlit: p.unlit, claim: p.claim },
+        })
+      }
     }
     return { from, entities: out }
   }

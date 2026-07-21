@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { CSM } from 'three/addons/csm/CSM.js'
 import type { EcsStore } from './ecs'
+import { PropLayer } from './props'
 
 const IDENTITY = new THREE.Quaternion()
 const tmpQ = new THREE.Quaternion()
@@ -19,8 +20,14 @@ export class View {
   // Rubber-band state: presented pose = sim pose + err decayed to zero over rubberMs.
   errors = new Map<number, { p: THREE.Vector3; q: THREE.Quaternion; t0: number }>()
   rubberMs = 100
+  props: PropLayer
   private geo = new THREE.BoxGeometry(1, 1, 1)
   private mats = new Map<number, THREE.MeshStandardMaterial>()
+  /** ephemeral per-author chain lines (the dots selection being drawn) */
+  private peerLines = new Map<string, THREE.Line>()
+  /** persistent local decoration polylines (the dots lattice guides) */
+  private decor = new Map<string, { obj: THREE.LineSegments; targetOpacity: number }>()
+  private defaultBackground = new THREE.Color(0x0e1116)
 
   constructor(parent: HTMLElement, public ecs: EcsStore) {
     this.renderer.setSize(innerWidth, innerHeight)
@@ -131,6 +138,9 @@ export class View {
     this.grid.position.y = 0.01
     this.scene.add(this.grid)
 
+    this.props = new PropLayer(m => this.patchMaterial(m))
+    this.scene.add(this.props.group)
+
     addEventListener('resize', () => {
       this.camera.aspect = innerWidth / innerHeight
       this.camera.updateProjectionMatrix()
@@ -182,8 +192,78 @@ export class View {
   /** The ground plane and grid hide while a scene is active (tracks the
    * SIM's scene, not the visual fetch: the colliders are already gone). */
   setGroundVisible(on: boolean) {
-    this.ground.visible = on
-    this.grid.visible = on
+    this.ground.visible = on && !this.groundSuppressed
+    this.grid.visible = on && !this.groundSuppressed
+  }
+  private groundSuppressed = false
+
+  /** Script-facing cosmetic environment: background/fog colors and whether
+   * the default ground visuals show at all (the dots board floats in a
+   * white void). Local-only state, so determinism is untouched; every peer
+   * runs the same script and converges on the same look. */
+  setEnvironment(env: { background?: number; fog?: { color: number; near: number; far: number } | null; ground?: boolean }) {
+    if (env.background !== undefined) this.scene.background = new THREE.Color(env.background)
+    else this.scene.background = this.defaultBackground
+    this.scene.fog = env.fog ? new THREE.Fog(env.fog.color, env.fog.near, env.fog.far) : null
+    if (env.ground !== undefined) {
+      this.groundSuppressed = !env.ground
+      this.ground.visible = env.ground && this.ground.visible
+      this.grid.visible = env.ground && this.grid.visible
+    }
+  }
+
+  /** One-shot camera framing hint from a script (onload). */
+  setCameraPose(pos: { x: number; y: number; z: number }, target: { x: number; y: number; z: number }) {
+    this.camera.position.set(pos.x, pos.y, pos.z)
+    this.controls.target.set(target.x, target.y, target.z)
+    this.controls.update()
+  }
+
+  /** Latest-wins ephemeral chain line for one author; empty/null clears. */
+  setPeerLine(peer: string, points: { x: number; y: number; z: number }[] | null, color: number) {
+    const old = this.peerLines.get(peer)
+    if (old) {
+      this.scene.remove(old)
+      old.geometry.dispose()
+      ;(old.material as THREE.Material).dispose()
+      this.peerLines.delete(peer)
+    }
+    if (!points || points.length < 2) return
+    const geo = new THREE.BufferGeometry().setFromPoints(points.map(p => new THREE.Vector3(p.x, p.y, p.z)))
+    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color, linewidth: 2 }))
+    line.renderOrder = 999 // never buried by the props it threads through
+    this.scene.add(line)
+    this.peerLines.set(peer, line)
+  }
+
+  /** Persistent local decoration segments (the dots lattice); opacity eases
+   * toward the requested value so scripts can fade guides in and out.
+   * `segments` is a flat list of [from, to] pairs; null removes the key. */
+  setDecor(key: string, segments: [{ x: number; y: number; z: number }, { x: number; y: number; z: number }][] | null,
+    color: number, opacity: number) {
+    const existing = this.decor.get(key)
+    if (!segments) {
+      if (existing) {
+        this.scene.remove(existing.obj)
+        existing.obj.geometry.dispose()
+        ;(existing.obj.material as THREE.Material).dispose()
+        this.decor.delete(key)
+      }
+      return
+    }
+    if (existing) { // geometry assumed stable per key; only the fade target moves
+      existing.targetOpacity = opacity
+      ;(existing.obj.material as THREE.LineBasicMaterial).color.setHex(color)
+      return
+    }
+    const pts: THREE.Vector3[] = []
+    for (const [a, b] of segments) pts.push(new THREE.Vector3(a.x, a.y, a.z), new THREE.Vector3(b.x, b.y, b.z))
+    const geo = new THREE.BufferGeometry().setFromPoints(pts)
+    const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0 })
+    const obj = new THREE.LineSegments(geo, mat)
+    obj.renderOrder = 998
+    this.scene.add(obj)
+    this.decor.set(key, { obj, targetOpacity: opacity })
   }
 
   private matFor(color: number) {
@@ -275,6 +355,11 @@ export class View {
           mesh.quaternion.premultiply(tmpQ)
         }
       }
+    }
+    this.props.update(now)
+    for (const d of this.decor.values()) {
+      const m = d.obj.material as THREE.LineBasicMaterial
+      m.opacity += (d.targetOpacity - m.opacity) * 0.12
     }
     this.controls.update()
     this.csm.update() // cascade frusta track the camera; must follow controls

@@ -1,5 +1,6 @@
-import { Vector3 } from 'three'
+import { Raycaster, Vector2, Vector3 } from 'three'
 import { BOOT_LEAD_TICKS, Sim } from './sim'
+import { peerColor } from './color'
 import { cachedScene, cacheScene, configureGlbLoader, parseGlb } from './scene'
 import { fetchWorldAsset, mediaUploadLimit, uploadWorldAsset } from './matrix/world'
 import { Net } from './net'
@@ -157,18 +158,39 @@ async function main() {
     }
   }
 
+  // Ephemeral chain lines ride beside the session protocol: latest-wins per
+  // author, purely cosmetic, so they are intercepted before receive().
+  const onMsg = (from: string, msg: DcMessage) => {
+    if (msg.kind === 'line') {
+      view.setPeerLine(msg.peer, msg.points.length ? msg.points : null, msg.color)
+      return
+    }
+    session.receive(from, msg)
+  }
+  // A departed peer takes its chain line with it, and the primary clears
+  // any claims it left behind (its own session can no longer unclaim them).
+  const onLeft = (id: string) => {
+    session.peerLeft(id)
+    view.setPeerLine(id, null, 0)
+    if (isRoot()) {
+      for (const [pid, p] of sim.props) {
+        if (p.claim === id) session.emit('unclaim', pid, { pos: { x: 0, y: 0, z: 0 }, force: true })
+      }
+    }
+  }
+
   if (net instanceof Net) {
     net.onJoined = (id, order, alone) => session.identity(id, order, alone)
-    net.onMessage = (peer, msg) => session.receive(peer.id, msg)
+    net.onMessage = (peer, msg) => onMsg(peer.id, msg)
     net.onPeerConnected = peer => session.peerConnected(peer.id, peer.order)
-    net.onPeerLeft = id => session.peerLeft(id)
+    net.onPeerLeft = onLeft
     net.onLog = log
   } else {
     const m = net as import('./matrix/net').MatrixNet
     m.onJoined = (id, order, alone) => { log(`joined as ${id} (order ${order}${alone ? ', alone: rooting grid' : ''})`); session.identity(id, order, alone) }
-    m.onMessage = (from, msg) => session.receive(from, msg)
+    m.onMessage = onMsg
     m.onPeerConnected = (id, order) => { log(`peer connected ${id} (#${order})`); session.peerConnected(id, order) }
-    m.onPeerLeft = id => session.peerLeft(id)
+    m.onPeerLeft = onLeft
     m.onLog = log
     // Room already has an MSC3815 scene: fetch, parse, and adopt it before
     // the sim's first tick (connect() awaits this before joining the RTC
@@ -206,15 +228,18 @@ async function main() {
     })
   }
 
-  // --- MSC3815 script_url: WebSG-subset scripts, root-peer authority ---
-  // The script runs ONLY on the current root peer (lowest join order);
-  // everything it does leaves the sandbox as ordinary ops, which is what
-  // keeps remote peers deterministic. Every peer tracks the url so a root
-  // handover just starts the script on the successor (state resets).
+  // --- MSC3815 script_url: WebSG-subset scripts on EVERY peer ---
+  // Each peer runs its own script instance, uncoordinated: everything a
+  // script does leaves the sandbox as ordinary ops, so peers fold script
+  // effects exactly like human input. Claims coordinate sustained
+  // interactions (racing claims resolve deterministically by timeline
+  // order); single-runner logic (board init, ambient behaviour) keys off
+  // world.me.primary, which names the senior-most REACHABLE peer.
   let scriptUrl: string | null = null
   let script: import('./websg').WorldScript | null = null
   let scriptFor: string | null = null
   let scriptStarting = false
+  let scriptPointerOn = false
   let lastScriptTick = 0
   const scriptSrc = new Map<string, string>()
   const scriptFetches = new Set<string>()
@@ -223,17 +248,25 @@ async function main() {
     scriptUrl = url
     log(url ? `world script in room state: ${url}` : 'world script cleared')
   }
-  // Script authority goes to the senior-most REACHABLE peer, not the senior
+  // Primacy goes to the senior-most REACHABLE peer, not the senior
   // membership: a ghost membership (dead tab, killed session) must not hold
-  // the script hostage. During a partition both sides can briefly believe
-  // they are root (split-brain: doubled script effects) - a real fix needs
-  // consensus, which the jig deliberately does not have.
+  // single-runner logic hostage. During a partition both sides can briefly
+  // believe they are primary (split-brain: doubled effects) - a real fix
+  // needs consensus, which the jig deliberately does not have.
   const isRoot = () => {
     if (!session.ready()) return false
     for (const p of session.peers.values()) {
       if (p.order < session.order && (net.peers.get(p.id)?.connected ?? false)) return false
     }
     return true
+  }
+  const propView = (id: string, p: import('./sim').Prop) => ({
+    id, x: p.pos.x, y: p.pos.y, z: p.pos.z, color: p.color, size: p.size, kind: p.kind,
+    claimedBy: p.claim ?? '', mine: p.claim === session.id,
+  })
+  const sendChainLine = (points: { x: number; y: number; z: number }[], color: number) => {
+    view.setPeerLine(session.id, points.length ? points : null, color)
+    ;(net as NetLike).broadcast({ kind: 'line', peer: session.id, points, color })
   }
   const scriptHost: import('./websg').ScriptHost = {
     log: l => log(`[script] ${l}`),
@@ -289,13 +322,99 @@ async function main() {
       session.emit('release', id, { pos: { x: p.x, y: p.y, z: p.z }, vel: { x: vx, y: vy, z: vz } })
       return true
     },
+    me: () => ({ id: session.id, primary: isRoot(), color: peerColor(session.id) }),
+    props: () => [...sim.props].map(([id, p]) => propView(id, p)),
+    prop: id => {
+      const p = sim.props.get(id)
+      return p ? propView(id, p) : null
+    },
+    spawnProp: (kind, x, y, z, color, size, unlit) => {
+      const id = session.nextNetId()
+      session.emit('prop', id, { pos: { x, y, z }, color, shape: kind, size, unlit })
+      return id
+    },
+    despawn: id => {
+      if (!sim.props.has(id) && !sim.bodies.has(id)) return false
+      session.emit('despawn', id, { pos: { x: 0, y: 0, z: 0 } })
+      return true
+    },
+    claim: id => {
+      const p = sim.props.get(id)
+      if (!p || (p.claim !== null && p.claim !== session.id)) return false
+      session.emit('claim', id, { pos: { x: 0, y: 0, z: 0 } })
+      return true
+    },
+    unclaim: id => {
+      const p = sim.props.get(id)
+      if (!p || p.claim !== session.id) return false
+      session.emit('unclaim', id, { pos: { x: 0, y: 0, z: 0 } })
+      return true
+    },
+    setPos: (id, x, y, z) => {
+      if (!sim.props.has(id)) return false
+      session.emit('move', id, { pos: { x, y, z } })
+      return true
+    },
+    paint: (id, color) => {
+      if (!sim.props.has(id)) return false
+      session.emit('paint', id, { pos: { x: 0, y: 0, z: 0 }, color })
+      return true
+    },
+    chainLine: (pointsJson, color) => {
+      const points = pointsJson ? JSON.parse(pointsJson) as { x: number; y: number; z: number }[] : []
+      sendChainLine(points, color >= 0 ? color : peerColor(session.id))
+    },
+    decorLines: (key, segsJson, color, opacity) => {
+      view.setDecor(key, segsJson ? JSON.parse(segsJson) : null, color, opacity)
+    },
+    setEnv: json => view.setEnvironment(JSON.parse(json)),
+    setCamera: (x, y, z, tx, ty, tz) => view.setCameraPose({ x, y, z }, { x: tx, y: ty, z: tz }),
+  }
+
+  // Pointer events for the script: raycast the prop layer, hand the script
+  // the hit plus the raw ray (for its own plane math), and capture the
+  // gesture away from box spawning/grabbing when a prop was hit.
+  const scriptRay = new Raycaster()
+  const scriptNdc = new Vector2()
+  const scriptEv = (e: PointerEvent) => {
+    const r = view.renderer.domElement.getBoundingClientRect()
+    scriptNdc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1)
+    scriptRay.setFromCamera(scriptNdc, view.camera)
+    const hit = view.props.pick(scriptRay)
+    const o = scriptRay.ray.origin, d = scriptRay.ray.direction
+    return {
+      entity: hit?.id ?? null,
+      point: hit ? { x: hit.point.x, y: hit.point.y, z: hit.point.z } : null,
+      origin: { x: o.x, y: o.y, z: o.z },
+      dir: { x: d.x, y: d.y, z: d.z },
+    }
+  }
+  const scriptPointerDelegate: import('./input').ScriptPointer = {
+    down: e => {
+      if (!script || !scriptPointerOn) return false
+      const ev = scriptEv(e)
+      if (!ev.entity) return false
+      script.pointer('onpointerdown', ev)
+      return true
+    },
+    move: e => script?.pointer('onpointermove', scriptEv(e)),
+    up: e => script?.pointer('onpointerup', scriptEv(e)),
+  }
+  const stopScript = (why: string) => {
+    if (!script) return
+    script.dispose()
+    script = null
+    scriptPointerOn = false
+    sendChainLine([], 0) // take our chain line down with the script
+    view.setEnvironment({}) // back to the default look
+    log(why)
   }
   const syncScript = () => {
-    const want = scriptUrl !== null && wp !== null && isRoot()
+    // Scripts wait for the session: they read sim state and emit ops from
+    // the first dispatch, neither of which means anything before startAt.
+    const want = scriptUrl !== null && wp !== null && session.ready()
     if (script && (!want || scriptFor !== scriptUrl)) {
-      script.dispose()
-      script = null
-      log(!want ? 'world script stopped (not root here)' : 'world script replaced')
+      stopScript(!want ? 'world script stopped' : 'world script replaced')
     }
     if (!want) return
     const url = scriptUrl!
@@ -315,12 +434,13 @@ async function main() {
         .then(({ WorldScript }) => WorldScript.create(src, scriptHost))
         .then(s => {
           scriptStarting = false
-          if (scriptUrl !== url || !isRoot()) { s.dispose(); return }
+          if (scriptUrl !== url) { s.dispose(); return }
           script = s
           scriptFor = url
+          scriptPointerOn = s.handles('onpointerdown')
           lastScriptTick = sim.tick
           s.enter()
-          log('world script running (this peer is root)')
+          log(`world script running${isRoot() ? ' (this peer is primary)' : ''}`)
         })
         .catch(e => {
           scriptStarting = false
@@ -334,10 +454,8 @@ async function main() {
       lastScriptTick = sim.tick
       script.update(dt, (sim.tick - session.startTick) / 60)
       if (script.dead) {
-        script.dispose()
-        script = null
         scriptSrc.delete(scriptFor!)
-        log('world script disabled after repeated errors')
+        stopScript('world script disabled after repeated errors')
       }
     }
   }
@@ -357,6 +475,7 @@ async function main() {
     streamPose: (netId, pos) => session.streamPose(netId, pos),
   }
   const input = new Input(view, out)
+  input.scriptPointer = scriptPointerDelegate
 
   if (net instanceof Net) net.connect(room)
   else {
@@ -377,6 +496,7 @@ async function main() {
     session.advance()
     sim.mirror()
     view.syncBodies(sim.bodies.keys())
+    view.props.sync(sim.props, now)
     syncScene()
     syncScript()
     const alpha = session.calibrated
@@ -421,6 +541,14 @@ async function main() {
       if (!b) return null
       const p = b.translation()
       return { x: p.x, y: p.y, z: p.z }
+    },
+    props: () => [...sim.props].map(([id, p]) => ({ id, ...p.pos, color: p.color, claim: p.claim })),
+    screenOfProp: (netId: string) => {
+      const p = sim.props.get(netId)
+      if (!p) return null
+      const v = new Vector3(p.pos.x, p.pos.y, p.pos.z).project(view.camera)
+      const el = view.renderer.domElement
+      return { x: ((v.x + 1) / 2) * el.clientWidth, y: ((1 - v.y) / 2) * el.clientHeight }
     },
     screenPos: (netId: string) => {
       const eid = sim.ecs.entityFor(netId)

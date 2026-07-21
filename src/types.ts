@@ -20,7 +20,26 @@ export interface Quat { x: number; y: number; z: number; w: number }
 // (Matrix media repo); the op just fixes WHICH tick the collider swap
 // happens on, so every peer rebuilds the trimesh at the same point in
 // history and rollbacks re-apply it like any other op.
-export type InteractionType = 'spawn' | 'grab' | 'release' | 'boot' | 'scene'
+// Props are the second entity family: kinematic, physics-free objects
+// (spheres for the dots demo) whose position/color/claim are plain folded
+// state. 'claim'/'unclaim' are the script-facing coordination primitive:
+// claim applies only to an unclaimed prop, so racing claims resolve
+// deterministically by (tick, order, seq) with no extra consensus, and a
+// sustained interaction (chaining dots) excludes rivals for its duration.
+// 'despawn' removes a prop or a box; 'move' teleports a prop (renderers
+// animate the hop cosmetically); 'paint' recolors one.
+export type InteractionType =
+  'spawn' | 'grab' | 'release' | 'boot' | 'scene'
+  | 'prop' | 'despawn' | 'claim' | 'unclaim' | 'move' | 'paint'
+
+/** prop state carried by boot seams (and 'prop' spawns, minus claim) */
+export interface PropInfo {
+  kind: string
+  color: number
+  size: number
+  unlit: boolean
+  claim: string | null
+}
 
 export interface Interaction {
   peer: string
@@ -36,6 +55,11 @@ export interface Interaction {
   grab?: { holder: string; order: number; target: Vec3 } // boot only
   from?: number // boot only: tick of the snapshot the dump was read from
   color?: number
+  shape?: string  // prop only: 'sphere' | 'box'
+  size?: number   // prop only: radius / half-extent
+  unlit?: boolean // prop only: cosmetic hint, but folded state so it boots
+  force?: boolean // unclaim only: clear someone else's claim (ghost cleanup)
+  prop?: PropInfo // boot only: this entity is a prop, not a rigid body
 }
 
 export interface BootEntity {
@@ -46,6 +70,7 @@ export interface BootEntity {
   linvel: Vec3
   angvel: Vec3
   grab?: { holder: string; order: number; target: Vec3 }
+  prop?: PropInfo
 }
 
 export type DcMessage =
@@ -58,6 +83,9 @@ export type DcMessage =
   // The pose plane: latest-wins continuous motion for a held entity.
   // Never rolls anyone back; recorded per author and read by replays.
   | { kind: 'pose'; tick: number; peer: string; netId: string; pos: Vec3 }
+  // Ephemeral per-author polyline (a dots chain being drawn): latest-wins,
+  // purely cosmetic, never folded and never in the hash. Empty points clear.
+  | { kind: 'line'; peer: string; points: Vec3[]; color: number }
   // The heartbeat: attests the author's present (anything it stamps earlier
   // later is a provable history rewrite) and triggers the healing fold that
   // re-simulates the last interval against complete pose tracks.

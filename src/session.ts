@@ -1,5 +1,5 @@
 import { BOOT_LEAD_TICKS, Sim, TICK_MS } from './sim'
-import { wallNow, type DcMessage, type Interaction, type Quat, type Vec3 } from './types'
+import { wallNow, type DcMessage, type Interaction, type PropInfo, type Quat, type Vec3 } from './types'
 
 const HASH_EVERY_TICKS = 60
 // Only exchange tick hashes older than this. A fold can rewrite any tick in
@@ -212,6 +212,7 @@ export class Session {
   emit(type: Interaction['type'], netId: string, data: {
     pos: Vec3; vel?: Vec3; rot?: Quat; angvel?: Vec3
     grab?: { holder: string; order: number; target: Vec3 }; color?: number
+    shape?: string; size?: number; unlit?: boolean; force?: boolean; prop?: PropInfo
   }, tickOverride?: number, from?: number) {
     const i: Interaction = {
       // Stamped with the tick about to be simulated, so our own sim applies
@@ -222,6 +223,7 @@ export class Session {
       grab: data.grab && { holder: data.grab.holder, order: data.grab.order, target: this.zv(data.grab.target) },
       from,
       color: data.color,
+      shape: data.shape, size: data.size, unlit: data.unlit, force: data.force, prop: data.prop,
     }
     this.sim.insert(i)
     this.sendRaw(null, { kind: 'i', i })
@@ -353,7 +355,8 @@ export class Session {
         }
         for (const e of entities) {
           this.emit('boot', e.netId,
-            { pos: e.pos, rot: e.rot, vel: e.linvel, angvel: e.angvel, grab: e.grab, color: e.color }, seamTick, from)
+            { pos: e.pos, rot: e.rot, vel: e.linvel, angvel: e.angvel, grab: e.grab, color: e.color, prop: e.prop },
+            seamTick, from)
         }
         break
       }

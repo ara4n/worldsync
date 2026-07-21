@@ -8,15 +8,18 @@ import variant from '@jitl/quickjs-singlefile-browser-release-sync'
  * The MSC3815 script_url runtime: a WebSG-flavoured subset of thirdroom's
  * scripting API, hosted in a QuickJS-in-WASM sandbox (quickjs-emscripten).
  *
- * Where thirdroom runs the script on EVERY peer (each with its own
- * wall-clock dt, replicating owner-authoritative transforms), worldsync
- * runs it ONLY on the current root peer: every world mutation the script
- * makes leaves the sandbox as an ordinary op (spawn / grab / pose /
- * release) on the shared tick grid, so remote peers fold script effects
- * exactly like human input and determinism is preserved without the
- * sandbox ever being part of the rollback state. The cost: script *state*
- * lives on the root only, and a root handover restarts the script from
- * scratch on the successor.
+ * Execution model: every peer runs its own script instance, uncoordinated
+ * and wall-clock, exactly like thirdroom - but where thirdroom hands the
+ * script raw netcode (broadcast/listen/replicators), here the script never
+ * sees the network at all. The sim IS the network: scripts read the
+ * deterministic sim state and every mutation leaves the sandbox as an
+ * ordinary op (spawn / grab / pose / release / prop / claim / ...) on the
+ * shared tick grid, so peers fold script effects exactly like human input
+ * and the sandbox is never part of the rollback state. Claims are the
+ * coordination primitive for sustained interactions (racing claims resolve
+ * deterministically by timeline order); world.me.primary marks the senior
+ * most reachable peer for single-runner logic (board init, ambient logic),
+ * which restarts fresh on a handover.
  *
  * Sandboxing follows current quickjs-emscripten practice (tighter than
  * thirdroom's fixed-heap-only approach): a hard memory limit, a bounded
@@ -24,6 +27,19 @@ import variant from '@jitl/quickjs-singlefile-browser-release-sync'
  * onupdate cannot stall the tick loop. The script sees only what the
  * prelude exposes; there is no ambient authority, no timers, no network.
  */
+
+/** A prop as the script sees it; claimedBy '' means unclaimed. */
+export interface PropView {
+  id: string
+  x: number
+  y: number
+  z: number
+  color: number
+  size: number
+  kind: string
+  claimedBy: string
+  mine: boolean
+}
 
 /** Everything the sandboxed script can observe or do, mapped by main onto
  * sim reads and session ops. All values are primitives or JSON. */
@@ -38,6 +54,27 @@ export interface ScriptHost {
   grab(id: string): boolean
   moveTo(id: string, x: number, y: number, z: number): boolean
   release(id: string, vx: number, vy: number, vz: number): boolean
+  /** who am I: peer id, whether this peer is the current primary (senior
+   * most reachable: single-runner logic like board init keys off it), and
+   * this peer's deterministic accent color */
+  me(): { id: string; primary: boolean; color: number }
+  // -- props: kinematic physics-free entities, claims as coordination --
+  props(): PropView[]
+  prop(id: string): PropView | null
+  spawnProp(kind: string, x: number, y: number, z: number, color: number, size: number, unlit: boolean): string
+  despawn(id: string): boolean
+  claim(id: string): boolean
+  unclaim(id: string): boolean
+  setPos(id: string, x: number, y: number, z: number): boolean
+  paint(id: string, color: number): boolean
+  // -- cosmetics: local rendering plus the ephemeral chain-line channel --
+  /** broadcast + draw this peer's chain line; empty points clear it.
+   * color < 0 means "my accent color". */
+  chainLine(pointsJson: string, color: number): void
+  /** local persistent guide lines keyed for replace/fade; '' segs remove */
+  decorLines(key: string, segsJson: string, color: number, opacity: number): void
+  setEnv(json: string): void
+  setCamera(x: number, y: number, z: number, tx: number, ty: number, tz: number): void
 }
 
 const MEMORY_LIMIT = 32 * 1024 * 1024
@@ -99,9 +136,57 @@ const PRELUDE = `
     Vector3,
     PhysicsBodyType: { Rigid: 'rigid', Static: 'static', Kinematic: 'kinematic' },
     InteractableType: { Interactable: 1, Grabbable: 2 },
+    // ray/plane intersection (plane through 'point' with normal 'normal');
+    // null when parallel or behind the origin. Scripts use it for drag
+    // previews: the dots chain endpoint lives on the camera-facing plane
+    // through the last selected dot (normal = the pointer ray direction).
+    rayPlane(origin, dir, point, normal) {
+      const o = vec(origin), d = vec(dir), p = vec(point), n = vec(normal)
+      const denom = d.x * n.x + d.y * n.y + d.z * n.z
+      if (Math.abs(denom) < 1e-9) return null
+      const t = ((p.x - o.x) * n.x + (p.y - o.y) * n.y + (p.z - o.z) * n.z) / denom
+      if (t < 0) return null
+      return new Vector3(o.x + d.x * t, o.y + d.y * t, o.z + d.z * t)
+    },
   }
   globalThis.world = {
     onload: null, onenter: null, onupdate: null,
+    onpointerdown: null, onpointermove: null, onpointerup: null,
+    get me() { return parse(H.me()) },
+    props() { return parse(H.props()) },
+    prop(id) { return parse(H.prop(id)) },
+    createSphere(props = {}) {
+      const t = vec(props.position ?? props.translation)
+      return H.spawnProp('sphere', t.x, t.y, t.z,
+        typeof props.color === 'number' ? props.color : 0xffffff,
+        typeof props.radius === 'number' ? props.radius : 0.5,
+        !!props.unlit)
+    },
+    despawn(id) { return H.despawn(id) },
+    claim(id) { return H.claim(id) },
+    unclaim(id) { return H.unclaim(id) },
+    move(id, x, y, z) {
+      const v = typeof x === 'number' ? new Vector3(x, y, z) : vec(x)
+      return H.setPos(id, v.x, v.y, v.z)
+    },
+    paint(id, color) { return H.paint(id, color) },
+    chainLine(points, color) {
+      if (!points || points.length === 0) { H.chainLine('', -1); return }
+      H.chainLine(JSON.stringify(points.map((p) => { const v = vec(p); return { x: v.x, y: v.y, z: v.z } })),
+        typeof color === 'number' ? color : -1)
+    },
+    decorLines(key, segments, color, opacity) {
+      if (!segments) { H.decorLines(key, '', 0, 0); return }
+      H.decorLines(key, JSON.stringify(segments.map((s) => {
+        const a = vec(s[0]), b = vec(s[1])
+        return [{ x: a.x, y: a.y, z: a.z }, { x: b.x, y: b.y, z: b.z }]
+      })), color ?? 0xffffff, opacity ?? 1)
+    },
+    env(opts) { H.setEnv(JSON.stringify(opts ?? {})) },
+    camera(pos, target) {
+      const p = vec(pos), t = vec(target)
+      H.setCamera(p.x, p.y, p.z, t.x, t.y, t.z)
+    },
     createBoxMesh: (p) => ({ __mesh: p }),
     createCollider: (p) => ({ __collider: p }),
     createMaterial: (p) => ({ __material: p }),
@@ -122,7 +207,10 @@ const PRELUDE = `
   }
   globalThis.__dispatch = (name, a, b) => {
     const h = globalThis.world[name]
-    if (typeof h === 'function') h(a, b)
+    if (typeof h !== 'function') return
+    // string payloads are JSON events (pointer events); numbers are (dt, time)
+    if (typeof a === 'string') h(JSON.parse(a))
+    else h(a, b)
   }
 })()
 `
@@ -166,6 +254,20 @@ export class WorldScript {
   /** drive world.onupdate; dt/time in seconds, derived from sim ticks */
   update(dt: number, time: number) { this.dispatch('onupdate', dt, time) }
 
+  /** deliver a pointer event ('onpointerdown'|'onpointermove'|'onpointerup');
+   * the payload crosses as JSON and arrives parsed in the handler */
+  pointer(name: string, ev: unknown) { this.dispatch(name, JSON.stringify(ev)) }
+
+  /** does the script define this handler? (pointer capture asks first) */
+  handles(name: string): boolean {
+    const world = this.ctx.getProp(this.ctx.global, 'world')
+    const h = this.ctx.getProp(world, name)
+    const isFn = this.ctx.typeof(h) === 'function'
+    h.dispose()
+    world.dispose()
+    return isFn
+  }
+
   dispose() {
     if (this.disposed) return
     this.disposed = true
@@ -201,6 +303,29 @@ export class WorldScript {
       bool(host.moveTo(ctx.getString(id), ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z))))
     fn('release', (id, x, y, z) =>
       bool(host.release(ctx.getString(id), ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z))))
+    fn('me', () => json(host.me()))
+    fn('props', () => json(host.props()))
+    fn('prop', (id) => json(host.prop(ctx.getString(id))))
+    fn('spawnProp', (kind, x, y, z, c, size, unlit) =>
+      ctx.newString(host.spawnProp(ctx.getString(kind), ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z),
+        ctx.getNumber(c), ctx.getNumber(size), ctx.dump(unlit) === true)))
+    fn('despawn', (id) => bool(host.despawn(ctx.getString(id))))
+    fn('claim', (id) => bool(host.claim(ctx.getString(id))))
+    fn('unclaim', (id) => bool(host.unclaim(ctx.getString(id))))
+    fn('setPos', (id, x, y, z) =>
+      bool(host.setPos(ctx.getString(id), ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z))))
+    fn('paint', (id, c) => bool(host.paint(ctx.getString(id), ctx.getNumber(c))))
+    fn('chainLine', (pts, c) => { host.chainLine(ctx.getString(pts), ctx.getNumber(c)); return ctx.undefined })
+    fn('decorLines', (key, segs, c, op) => {
+      host.decorLines(ctx.getString(key), ctx.getString(segs), ctx.getNumber(c), ctx.getNumber(op))
+      return ctx.undefined
+    })
+    fn('setEnv', (j) => { host.setEnv(ctx.getString(j)); return ctx.undefined })
+    fn('setCamera', (x, y, z, tx, ty, tz) => {
+      host.setCamera(ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z),
+        ctx.getNumber(tx), ctx.getNumber(ty), ctx.getNumber(tz))
+      return ctx.undefined
+    })
     ctx.setProp(ctx.global, '__host', bridge)
     bridge.dispose()
   }
@@ -218,10 +343,14 @@ export class WorldScript {
     r.value.dispose()
   }
 
-  private dispatch(name: string, a?: number, b?: number) {
+  private dispatch(name: string, a?: number | string, b?: number) {
     if (this.dead || this.disposed) return
     const { ctx } = this
-    const args = [ctx.newString(name), ctx.newNumber(a ?? 0), ctx.newNumber(b ?? 0)]
+    const args = [
+      ctx.newString(name),
+      typeof a === 'string' ? ctx.newString(a) : ctx.newNumber(a ?? 0),
+      ctx.newNumber(b ?? 0),
+    ]
     this.deadline = performance.now() + DISPATCH_DEADLINE_MS
     const r = ctx.callFunction(this.dispatchFn, ctx.undefined, ...args)
     this.deadline = Infinity
