@@ -10,7 +10,10 @@
 //
 // Upload with "load world script (.js)". Drag same-coloured adjacent dots
 // to chain them; release to clear chains of 2+; close a loop to clear the
-// whole colour. Backtrack through the previous dot to unwind a link.
+// whole colour. Backtrack through the previous dot to unwind a link. The
+// chain may revisit its own dots (that is how loops close), but each
+// SEGMENT is unique: a link already in the chain can never be re-added,
+// in either direction.
 
 const W = 3, H = 3, D = 3
 const COLORS = [0xda664f, 0x9060b0, 0xe3db50, 0x94baf9, 0xa0e699]
@@ -131,23 +134,39 @@ world.onpointermove = (ev) => {
   updateLine()
 }
 
+/** does the chain revisit any dot? (a dot appearing twice = a loop) */
+const hasLoop = () => new Set(sel).size !== sel.length
+
 function extend(q) {
   const lastId = sel[sel.length - 1]
   if (q.id === lastId) return
   const last = world.prop(lastId)
   if (!last) return
   if (q.id === sel[sel.length - 2]) {
-    // slid back into the previous dot: unwind the newest link
-    world.unclaim(lastId)
-    sel.pop()
+    // slid back into the previous dot: unwind the newest link (keep the
+    // claim when the dot still appears earlier in the chain - a loop)
+    const popped = sel.pop()
+    if (sel.indexOf(popped) === -1) world.unclaim(popped)
+    if (!hasLoop()) cycleColor = null
     anchor = { x: q.x, y: q.y, z: q.z }
     return
   }
   if (q.color !== last.color) return
   if (dist(q, last) > 1.1) return
-  if (sel.indexOf(q.id) !== -1) { cycleColor = q.color; return } // closed a loop
-  if (q.claimedBy) return // a rival got this dot first
-  if (!world.claim(q.id)) return
+  // a segment may only ever be added once, in either direction: revisiting
+  // our own dots through FRESH segments is what defines a loop, while
+  // retracing an existing link (or backtracking) is never an extension
+  for (let i = 1; i < sel.length; i++) {
+    if ((sel[i - 1] === lastId && sel[i] === q.id) || (sel[i - 1] === q.id && sel[i] === lastId)) return
+  }
+  if (sel.indexOf(q.id) !== -1) {
+    // revisiting a dot we already hold via a new segment: a loop closed
+    if (q.claimedBy !== world.me.id) return
+    cycleColor = q.color
+  } else {
+    if (q.claimedBy) return // a rival got this dot first
+    if (!world.claim(q.id)) return
+  }
   sel.push(q.id)
   anchor = { x: q.x, y: q.y, z: q.z }
 }
@@ -176,11 +195,14 @@ function revalidate() {
     if (!p || (p.claimedBy && p.claimedBy !== me)) { bad = i; break }
   }
   if (bad !== -1) {
+    const keep = sel.slice(0, bad)
     for (let i = bad; i < sel.length; i++) {
+      if (keep.indexOf(sel[i]) !== -1) continue // still chained via a loop
       const p = world.prop(sel[i])
       if (p && p.claimedBy === me) world.unclaim(sel[i])
     }
-    sel = sel.slice(0, bad)
+    sel = keep
+    if (!hasLoop()) cycleColor = null
   }
   if (sel.length) {
     const a = world.prop(sel[sel.length - 1])
@@ -208,7 +230,8 @@ function updateLine() {
  * whose scripts revalidate against the moved dots. */
 function clearChain() {
   const me = world.me.id
-  const ids = sel.slice()
+  const ids = [] // sel deduped: loops list a dot twice but it clears once
+  for (const id of sel) if (ids.indexOf(id) === -1) ids.push(id)
   if (cycleColor !== null) {
     // a closed loop clears every dot of its colour not held by a rival
     for (const p of world.props()) {
