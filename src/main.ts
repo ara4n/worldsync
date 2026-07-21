@@ -323,8 +323,22 @@ async function main() {
   // Flipped by the first screen a script places; gates the camera toggle,
   // so worlds that never ask for video never show it.
   let videoWanted = false
+  // world.say: the script chats into the room as this user. Rate-limited
+  // here (not in the sandbox) so a buggy onupdate cannot flood the room;
+  // outside widget mode there is no room, so it just logs.
+  let lastSay = 0
+  const scriptSay = (text: string) => {
+    const t = text.slice(0, 500)
+    if (!wp) { log(`[script chat] ${t}`); return }
+    if (performance.now() - lastSay < 1000) { log(`script chat dropped (rate limit): ${t}`); return }
+    lastSay = performance.now()
+    const m = net as import('./matrix/net').MatrixNet
+    void m.client.sendTextMessage(wp.roomId, t).catch(e => logErr('script chat failed', e))
+  }
+
   const scriptHost: import('./websg').ScriptHost = {
     log: l => log(`[script] ${l}`),
+    say: scriptSay,
     boxes: () => {
       const out = []
       for (const netId of sim.bodies.keys()) {

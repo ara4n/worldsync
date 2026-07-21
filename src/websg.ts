@@ -45,6 +45,10 @@ export interface PropView {
  * sim reads and session ops. All values are primitives or JSON. */
 export interface ScriptHost {
   log(line: string): void
+  /** post a chat message into the Matrix room AS THIS USER (rate-limited
+   * by the host; a no-op log outside widget mode). Scripts narrate their
+   * own player's actions with it - chess announces each move. */
+  say(text: string): void
   /** dynamic boxes: id, translation, grab state ('mine' = held by us) */
   boxes(): { id: string; x: number; y: number; z: number; grabbed: boolean; mine: boolean }[]
   box(id: string): { x: number; y: number; z: number; grabbed: boolean; mine: boolean } | null
@@ -240,6 +244,8 @@ const PRELUDE = `
     onpointerdown: null, onpointermove: null, onpointerup: null,
     onkeydown: null,
     get me() { return parse(H.me()) },
+    // chat into the Matrix room as this user (host rate-limits it)
+    say(text) { H.say(typeof text === 'string' ? text : JSON.stringify(text)) },
     props() { return parse(H.props()) },
     prop(id) { return parse(H.prop(id)) },
     createSphere(props = {}) {
@@ -400,6 +406,7 @@ export class WorldScript {
     const json = (v: unknown) => ctx.newString(v === null ? '' : JSON.stringify(v))
     const bool = (v: boolean) => (v ? ctx.true : ctx.false)
     fn('log', (s) => { host.log(ctx.getString(s)); return ctx.undefined })
+    fn('say', (s) => { host.say(ctx.getString(s)); return ctx.undefined })
     fn('boxes', () => json(host.boxes()))
     fn('box', (id) => json(host.box(ctx.getString(id))))
     fn('sceneNode', (n) => json(host.sceneNode(ctx.getString(n))))

@@ -154,16 +154,30 @@ const updateHover = (d) => {
 
 // -- moving --
 
+// each move is narrated into the Matrix room by its mover (world.say
+// posts as that user), algebraic-ish: piece glyph, from > to, captures,
+// promotion, and the fallen king
+const FILE = 'abcdefgh'
+const sqName = (c, r) => FILE[c] + (r + 1)
+const GLYPHS = { [W]: { p: '♙', r: '♖', n: '♘', b: '♗', q: '♕', k: '♔' },
+  [B]: { p: '♟', r: '♜', n: '♞', b: '♝', q: '♛', k: '♚' } }
+
 const doMove = (d, c, r) => {
   const victim = board[c][r] && board[c][r].id !== d.id ? board[c][r] : null
   if (victim) world.despawn(victim.id) // targets() guarantees enemy or empty
-  if (d.type === 'p' && (r === 0 || r === N - 1)) { // auto-queen
+  const promoted = d.type === 'p' && (r === 0 || r === N - 1)
+  if (promoted) { // auto-queen
     world.despawn(d.id)
     world.createProp({ kind: KINDS.q, position: { x: sqX(c), y: BOARD_Y, z: sqZ(r) }, color: d.side, size: HEIGHTS.q, bounce: false })
   } else {
     world.move(d.id, { x: sqX(c), y: BOARD_Y, z: sqZ(r) })
   }
   if (turnProp) world.paint(turnProp.id, d.side === W ? B : W)
+  let msg = `${GLYPHS[d.side][d.type]} ${sqName(d.c0, d.r0)} > ${sqName(c, r)}`
+  if (victim) msg += `, takes ${GLYPHS[victim.side][victim.type]}`
+  if (promoted) msg += `, promoted to ${GLYPHS[d.side].q}`
+  if (victim && victim.type === 'k') msg += ` - ${d.side === W ? 'white' : 'black'} wins!`
+  world.say(msg)
   localLatch = now
 }
 

@@ -49,7 +49,9 @@ export async function initWidgetClient(p: WidgetParams): Promise<{ api: WidgetAp
       { eventType: EventType.RoomMember },
       { eventType: EventType.RoomEncryption },
     ],
-    sendEvent: [EventType.CallEncryptionKeysPrefix],
+    // RoomMessage: world scripts narrate their player's actions into the
+    // room via world.say (chess announces moves). Sent as this user.
+    sendEvent: [EventType.CallEncryptionKeysPrefix, EventType.RoomMessage],
     receiveEvent: [EventType.CallEncryptionKeysPrefix],
     sendDelayedEvents: true,
     updateDelayedEvents: true,

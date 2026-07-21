@@ -113,6 +113,10 @@ declare const world: {
    * most reachable: single-runner logic like board init keys off it), and
    * this peer's deterministic accent color */
   readonly me: { id: string; primary: boolean; color: number }
+  /** post a chat message into the Matrix room AS THIS USER (rate-limited
+   * to ~1/s by the host; logs locally outside widget mode). Narrate your
+   * own player's actions - e.g. chess announces each move. */
+  say(text: string): void
   /** every connected participant (self included), in join order */
   peers(): { id: string; order: number; color: number; me: boolean }[]
 
