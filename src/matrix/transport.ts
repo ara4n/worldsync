@@ -1,4 +1,4 @@
-import { Room as LivekitRoom, RoomEvent, Track } from 'livekit-client'
+import { ConnectionState, Room as LivekitRoom, RoomEvent, Track } from 'livekit-client'
 import type { MatrixClient } from 'matrix-js-sdk'
 
 /**
@@ -241,6 +241,11 @@ export class LiveKitTransport implements DataTransport {
   }
 
   send(to: string | null, data: string) {
+    // The session starts broadcasting the moment its grid roots, which can
+    // beat the SFU connect; publishData on a pre-connect engine makes
+    // livekit-client log a NegotiationError while it tries to negotiate a
+    // data channel that cannot exist yet. Drop instead, like any outage.
+    if (this.room.state !== ConnectionState.Connected) return
     void this.room.localParticipant.publishData(this.encoder.encode(data), {
       reliable: true, // retransmitted AND per-sender ordered, unlike text streams
       topic: TOPIC,
