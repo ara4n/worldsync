@@ -80,6 +80,9 @@ export class View {
       this.controls.target.add(delta)
     }, { passive: false })
 
+    // Feature stamp: stale-bundle confusion (host iframes cache hard) has
+    // burned enough debugging time that the renderer announces itself.
+    console.log('[worldsync] renderer: csm x4 backface-shadows aces (46aabb0+)')
     this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x30281e, 0.7))
     // Cascaded shadow maps with splits weighted hard toward the camera:
     // the near cascade covers only the first ~4m of view depth, so contact
