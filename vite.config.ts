@@ -2,6 +2,19 @@ import { defineConfig } from 'vite'
 import { WebSocketServer, type WebSocket, type RawData } from 'ws'
 import type { Server } from 'node:http'
 import fs from 'node:fs'
+import { execSync } from 'node:child_process'
+
+// Baked into the bundle so the panel can show which build is running.
+// Evaluated when the config loads: fresh per build, server-start-stale in dev.
+function gitCommit() {
+  try {
+    const rev = execSync('git rev-parse --short HEAD', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim()
+    const dirty = execSync('git status --porcelain -uno', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim()
+    return dirty ? `${rev}+` : rev
+  } catch {
+    return 'unknown'
+  }
+}
 
 // Tiny WebRTC signaling server piggybacked on the Vite http server at /signal.
 // Rooms are full-mesh: everyone gets told about everyone, joiners initiate offers.
@@ -62,6 +75,7 @@ export default defineConfig({
   // Relative asset urls, so the build serves from any path (github pages
   // hosts under /worldsync/, the dev server at /).
   base: './',
+  define: { __COMMIT__: JSON.stringify(gitCommit()) },
   build: {
     rollupOptions: {
       input: { main: 'index.html', mock: 'mock.html' },

@@ -41,8 +41,10 @@ export class UI {
   private lastRender = 0
 
   constructor(root: HTMLElement, hooks: Hooks) {
+    // the commit stays visible even collapsed: it answers "is this build
+    // the one I just deployed?" at a glance
     root.innerHTML = `
-      <h1>worldsync <span class="caret">▾</span></h1>
+      <h1>worldsync <span class="commit">${esc(typeof __COMMIT__ === 'string' ? __COMMIT__ : 'dev')}</span> <span class="caret">▾</span></h1>
       <div id="body">
       <div class="controls">
         <label>fake latency <input id="lat" type="range" min="0" max="1000" step="25" value="0"> <span id="latv">0ms</span></label>
