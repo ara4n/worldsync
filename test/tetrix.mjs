@@ -87,6 +87,44 @@ const laned = await b.frame.waitForFunction(() => {
 if (!laned) fail('second player piece not confined to lane 1')
 else console.log('two players, lane assignment: ok')
 
+// dropping onto a piece still in flight must REFUSE, not land on it:
+// wait for a phase where a has a fresh piece up top while b's is
+// mid-well below, steer a over b's columns, and hard-drop
+{
+  const cellsFor = (ps, mineId, wantMine) => ps
+    .filter((p) => p.claim && (p.claim === mineId) === wantMine && Math.abs(p.z) < 0.01)
+    .map((p) => ({ c: Math.round((p.x - X0) / 0.6), r: 24 - 1 - Math.round((p.y - 0.3) / 0.6) }))
+  const aligned = await a.frame.waitForFunction(() => {
+    const me = window.__jig.session.id
+    const mine = window.__jig.props().filter((p) => p.claim === me)
+    const theirs = window.__jig.props().filter((p) => p.claim && p.claim !== me)
+    if (mine.length !== 4 || theirs.length !== 4) return false
+    const row = (p) => 24 - 1 - Math.round((p.y - 0.3) / 0.6)
+    return Math.max(...mine.map(row)) <= 3 && Math.min(...theirs.map(row)) >= 6
+  }, null, { timeout: 60000 }).then(() => true).catch(() => false)
+  if (!aligned) fail('inflight: never saw a-fresh-above/b-mid-well phase')
+  await a.page.bringToFront()
+  const meId = await a.frame.evaluate(() => window.__jig.session.id)
+  let ps2 = await props(a.frame)
+  const aMin = Math.min(...cellsFor(ps2, meId, true).map((x) => x.c))
+  const bMin = Math.min(...cellsFor(ps2, meId, false).map((x) => x.c))
+  const key = bMin > aMin ? 'ArrowRight' : 'ArrowLeft'
+  for (let i = 0; i < Math.abs(bMin - aMin); i++) {
+    await a.page.keyboard.press(key)
+    await a.page.waitForTimeout(80)
+  }
+  await a.page.keyboard.press(' ')
+  await a.page.waitForTimeout(800)
+  const refused = await a.frame.evaluate(() =>
+    [...document.querySelectorAll('#log div')].some((d) => d.textContent.includes('still in flight')))
+  ps2 = await props(a.frame)
+  const stillMine = cellsFor(ps2, meId, true).length === 4
+  const stillTheirs = cellsFor(ps2, meId, false).length === 4
+  if (!refused || !stillMine || !stillTheirs) {
+    fail(`inflight: drop was not refused cleanly (refused=${refused} mine=${stillMine} theirs=${stillTheirs})`)
+  } else console.log('drop onto an in-flight piece refused: ok')
+}
+
 // line clear: fabricate a full unclaimed row mid-air (r=10) plus one
 // cell above it (r=9); the primary must flash-clear the row and drop
 // the straggler into it. Random pieces cannot be steered into a full

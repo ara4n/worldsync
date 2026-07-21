@@ -134,6 +134,21 @@ const emitPos = () => {
 const collides = (x, y, rot) =>
   blocksFor(piece.type, x, y, rot).some(([c, r]) => occupied(c, r))
 
+/** would the piece, resting at (x, y), be sitting on another player's
+ * piece that is still IN FLIGHT (claimed)? Resting there is forbidden:
+ * the flyer moves on and the locked piece is left floating mid-air.
+ * Hard drops refuse outright; gravity just hovers and retries. */
+const restingOnFlight = (x, y, rot) => {
+  const mine = myIds()
+  for (const [c, r] of blocksFor(piece.type, x, y + 1, rot)) {
+    if (c < 0 || c >= W || r >= H || r < 0) continue // walls and floor are solid ground
+    for (const cell of cells) {
+      if (!mine.has(cell.id) && cell.claimedBy !== '' && cell.c === c && cell.r === r) return true
+    }
+  }
+  return false
+}
+
 const tryMove = (x, y, rot) => {
   let collided
   if (rot !== piece.rot && piece.type !== 4 /* O never kicks */) {
@@ -212,9 +227,17 @@ world.onkeydown = (ev) => {
     case 'ArrowUp': tryMove(piece.x, piece.y, (piece.rot + 1) % 4); break
     case 'ArrowLeft': tryMove(piece.x - 1, piece.y, piece.rot); break
     case 'ArrowRight': tryMove(piece.x + 1, piece.y, piece.rot); break
-    case 'ArrowDown': if (!tryMove(piece.x, piece.y + 1, piece.rot)) lock(); break
+    case 'ArrowDown':
+      if (!tryMove(piece.x, piece.y + 1, piece.rot) && !restingOnFlight(piece.x, piece.y, piece.rot)) lock()
+      break
     case ' ': {
-      while (piece.y < H && collides(piece.x, piece.y + 1, piece.rot) === false) piece.y++
+      let y = piece.y
+      while (y < H && collides(piece.x, y + 1, piece.rot) === false) y++
+      if (restingOnFlight(piece.x, y, piece.rot)) {
+        console.log('cannot drop onto a piece still in flight - wait for it to pass')
+        break
+      }
+      piece.y = y
       emitPos()
       lock()
       break
@@ -273,7 +296,9 @@ world.onupdate = (dt, time) => {
     gravAcc += dt
     if (gravAcc >= GRAVITY_S) {
       gravAcc = 0
-      if (!tryMove(piece.x, piece.y + 1, piece.rot)) lock()
+      // blocked by a piece still in flight: hover and retry, never lock
+      // onto a support that is about to move away
+      if (!tryMove(piece.x, piece.y + 1, piece.rot) && !restingOnFlight(piece.x, piece.y, piece.rot)) lock()
     }
   }
 
