@@ -1,0 +1,232 @@
+// multiplayer snake, as a worldsync WebSG script: race on a 32x32 grid
+// to eat numbers - the bigger the number, the more your snake grows.
+// Arrow keys steer. You start parked at a random cell and nothing moves
+// until your first key; from then on your snake never stops until it
+// crashes (wall or any snake, yours included), at which point it flashes
+// out and you respawn parked somewhere new.
+//
+// Sync model: your snake is YOURS. Its body order lives only in your
+// script; what everyone shares is the props table - one sphere per
+// segment in your accent color, advanced by spawn-head/despawn-tail ops
+// each step (2 ops/step, however long the snake). Ownership rides on
+// CLAIMS, not color (accent hues can collide): each segment is claimed
+// by its owner as soon as its spawn folds, so cleanup and collision
+// exclusion key on claimedBy while color stays cosmetic. Everyone else
+// just renders and collides against those props, so late joiners see
+// every snake mid-race. Food is props too (radius encodes the number,
+// digits are local 7-segment lines), kept stocked by the primary. Two
+// heads racing into the same cell on the same tick both survive the
+// entry - worldsync ops race deterministically but this script does not
+// referee photo finishes; the NEXT step kills whoever is still there.
+//
+// Upload with "load world script (.js)" and press an arrow key.
+// (A hidden tab keeps racing on the background heartbeat, but a browser
+// that throttles it will stamp its ops late and the sim will flag
+// divergence - snake is a foreground game.)
+
+const N = 32, CELL = 0.45, Y = 0.3
+const SEG = 0.21 // segment radius; also the tag that says "snake, not food"
+const FOODC = 0xffffff
+const foodR = (v) => 0.14 + 0.02 * v // 1..9 -> 0.16..0.32, all distinct
+const foodV = (s) => Math.round((s - 0.14) / 0.02)
+const isFood = (p) => p.kind === 'sphere' && p.color === FOODC && foodV(p.size) >= 1 && foodV(p.size) <= 9
+const FOODS = 4
+const STEP = 0.14
+const cx = (c) => (c - (N - 1) / 2) * CELL
+const cz = (r) => (r - (N - 1) / 2) * CELL
+const key = (c, r) => c + ',' + r
+const DIRS = { ArrowUp: [0, -1], ArrowDown: [0, 1], ArrowLeft: [-1, 0], ArrowRight: [1, 0] }
+
+let me, myColor
+let myCells = [] // [tail..head] cell keys, the authoritative body order
+let myIds = []   // matching prop ids
+let pendingClaims = [] // spawned segments whose claim waits for the fold
+let dir = null, lastMoved = null, pendingGrowth = 0
+let acc = 0, state = 'boot', stateT = 0, now = 0
+let seedWait = -10
+const orphanSince = {} // prop id -> when it first looked ownerless
+const digits = new Map() // food id -> its local digit/pip lines
+let border = null
+
+world.onload = () => {
+  world.env({ background: 0x151b24, ground: false })
+  world.camera({ x: 0, y: 15.5, z: 8.5 }, { x: 0, y: 0, z: 0 })
+}
+
+world.onenter = () => { me = world.me; myColor = me.color }
+
+world.onkeydown = (ev) => {
+  const d = DIRS[ev.key]
+  if (!d) return
+  // no about-face: a moving snake cannot reverse into its own neck
+  if (lastMoved && myCells.length > 1 && d[0] === -lastMoved[0] && d[1] === -lastMoved[1]) return
+  dir = d
+}
+
+const cellOf = (p) => key(Math.round(p.x / CELL + (N - 1) / 2), Math.round(p.z / CELL + (N - 1) / 2))
+
+const scan = () => {
+  const segs = [], foods = []
+  for (const p of world.props()) {
+    if (p.kind !== 'sphere') continue
+    if (p.size === SEG) segs.push(p)
+    else if (isFood(p)) foods.push(p)
+  }
+  return { segs, foods }
+}
+
+const randFree = (occ) => {
+  for (let k = 0; k < 200; k++) {
+    const c = Math.floor(Math.random() * N), r = Math.floor(Math.random() * N)
+    if (!occ.has(key(c, r))) return [c, r]
+  }
+  return [0, 0]
+}
+
+const spawnSeg = (c, r) => {
+  const id = world.createSphere({ position: { x: cx(c), y: Y, z: cz(r) }, color: myColor, radius: SEG })
+  pendingClaims.push({ id, t: now })
+  return id
+}
+
+const mine = (s) => s.claimedBy === me.id || myIds.includes(s.id)
+
+const spawnAt = (c, r) => {
+  myCells = [key(c, r)]
+  myIds = [spawnSeg(c, r)]
+  dir = null
+  lastMoved = null
+  pendingGrowth = 2 // grow into a length-3 snake as you set off
+  console.log('parked - press an arrow key to go')
+}
+
+const crash = () => {
+  for (const id of myIds) world.paint(id, 0xffffff)
+  state = 'dead'
+  stateT = now
+  dir = null
+  console.log(`crashed at length ${myCells.length}`)
+}
+
+const step = (segs, foods) => {
+  const [hc, hr] = myCells[myCells.length - 1].split(',').map(Number)
+  const nc = hc + dir[0], nr = hr + dir[1]
+  const nk = key(nc, nr)
+  if (nc < 0 || nc >= N || nr < 0 || nr >= N) return crash()
+  // occupancy: other snakes from the shared table, my own body from local
+  // truth (my table entries lag my ops by the fold, so the freshly
+  // vacated tail would read as a false self-collision)
+  const occ = new Set()
+  for (const s of segs) { if (!mine(s)) occ.add(cellOf(s)) }
+  for (const k of myCells) occ.add(k)
+  if (pendingGrowth === 0) occ.delete(myCells[0]) // the tail vacates this step
+  if (occ.has(nk)) return crash()
+  myCells.push(nk)
+  myIds.push(spawnSeg(nc, nr))
+  if (pendingGrowth > 0) pendingGrowth--
+  else { world.despawn(myIds.shift()); myCells.shift() }
+  lastMoved = dir
+  const bite = foods.find((f) => cellOf(f) === nk)
+  if (bite) {
+    world.despawn(bite.id)
+    pendingGrowth += foodV(bite.size)
+    console.log(`ate a ${foodV(bite.size)} - length ${myCells.length + pendingGrowth}`)
+  }
+}
+
+// 7-segment digit above each food, drawn locally (t,tl,tr,m,bl,br,b)
+const SEGDEFS = {
+  t: [[-1, 1], [1, 1]], m: [[-1, 0], [1, 0]], b: [[-1, -1], [1, -1]],
+  tl: [[-1, 1], [-1, 0]], tr: [[1, 1], [1, 0]], bl: [[-1, 0], [-1, -1]], br: [[1, 0], [1, -1]],
+}
+const LIT = {
+  1: ['tr', 'br'], 2: ['t', 'tr', 'm', 'bl', 'b'], 3: ['t', 'tr', 'm', 'br', 'b'],
+  4: ['tl', 'tr', 'm', 'br'], 5: ['t', 'tl', 'm', 'br', 'b'], 6: ['t', 'tl', 'm', 'bl', 'br', 'b'],
+  7: ['t', 'tr', 'br'], 8: ['t', 'tl', 'tr', 'm', 'bl', 'br', 'b'], 9: ['t', 'tl', 'tr', 'm', 'br', 'b'],
+}
+const drawDigits = (foods) => {
+  const seen = new Set()
+  for (const f of foods) {
+    seen.add(f.id)
+    if (digits.has(f.id)) continue
+    // drawn just in front of the ball (screen-below, given the camera
+    // tilt), or the sphere itself would hide the number
+    const w = 0.16, h = 0.24
+    const lines = LIT[foodV(f.size)].map((name) => world.createLine({
+      points: SEGDEFS[name].map(([sx, su]) => ({ x: f.x + sx * w, y: Y + 0.02, z: f.z + 0.72 - su * h })),
+      color: 0xffc45e, width: 0.045, worldUnits: true,
+    }))
+    digits.set(f.id, lines)
+  }
+  for (const [id, lines] of [...digits]) {
+    if (!seen.has(id)) { for (const l of lines) l.despawn(); digits.delete(id) }
+  }
+}
+
+world.onupdate = (dt, time) => {
+  if (!me) return // identity arrives with onenter
+  now = time
+  const { segs, foods } = scan()
+  drawDigits(foods)
+  if (!border) {
+    const e = (N / 2) * CELL + 0.1
+    border = world.createLine({
+      points: [{ x: -e, y: Y, z: -e }, { x: e, y: Y, z: -e }, { x: e, y: Y, z: e }, { x: -e, y: Y, z: e }, { x: -e, y: Y, z: -e }],
+      color: 0x5a6673, width: 0.06, worldUnits: true,
+    })
+  }
+  // claim each new segment once its spawn has folded (claims are checked
+  // against the local sim, so a same-dispatch claim would be refused)
+  pendingClaims = pendingClaims.filter((pc) => {
+    const s = segs.find((x) => x.id === pc.id)
+    if (!s) return now - pc.t < 3
+    if (s.claimedBy === '') world.claim(pc.id)
+    return false
+  })
+  if (state === 'boot') {
+    // clear our own leftovers from a previous session (same widget id =
+    // same claim), then park
+    for (const s of segs) if (s.claimedBy === me.id) world.despawn(s.id)
+    const occ = new Set(segs.map(cellOf))
+    spawnAt(...randFree(occ))
+    state = 'alive'
+  } else if (state === 'alive') {
+    if (dir) {
+      acc += dt
+      while (acc >= STEP && state === 'alive') { acc -= STEP; step(segs, foods) }
+    } else acc = 0
+  } else if (state === 'dead') {
+    if (now - stateT > 0.4 && myIds.length) { for (const id of myIds) world.despawn(id); myIds = []; myCells = [] }
+    if (now - stateT > 1.4) {
+      const occ = new Set(segs.map(cellOf))
+      for (const f of foods) occ.add(cellOf(f))
+      spawnAt(...randFree(occ))
+      state = 'alive'
+    }
+  }
+  // the primary keeps the grid stocked with numbers and sweeps up snakes
+  // whose player left (their script alone drove them; nobody else will).
+  // world.me is read live: primacy hands over when the senior peer goes.
+  if (world.me.primary && time > seedWait + 1.5) {
+    if (foods.length < FOODS) {
+      const occ = new Set(segs.map(cellOf))
+      for (const f of foods) occ.add(cellOf(f))
+      for (let k = foods.length; k < FOODS; k++) {
+        const v = 1 + Math.floor(Math.random() * 9)
+        const [c, r] = randFree(occ)
+        occ.add(key(c, r))
+        world.createSphere({ position: { x: cx(c), y: Y, z: cz(r) }, color: FOODC, radius: foodR(v), unlit: true })
+      }
+      seedWait = time
+    }
+    // ownerless segments: the player left (their claims were force-cleared
+    // on departure) or a claim never landed; either way nobody will ever
+    // drive them again. The grace covers the spawn-to-claim window.
+    const live = new Set(world.peers().map((p) => p.id))
+    for (const s of segs) {
+      if (s.claimedBy !== '' && live.has(s.claimedBy)) { delete orphanSince[s.id]; continue }
+      if (orphanSince[s.id] === undefined) orphanSince[s.id] = time
+      else if (time - orphanSince[s.id] > 5) { world.despawn(s.id); delete orphanSince[s.id] }
+    }
+  }
+}
