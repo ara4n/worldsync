@@ -16,6 +16,9 @@ import {
 
 const qs = new URLSearchParams(location.search)
 const room = qs.get('room') ?? 'default'
+// Test hook: withhold the widget's own m.call.member echo, simulating
+// hosts that lose it (what the widget's lone-boot fallback exists for).
+const dropOwnEcho = qs.get('dropOwnEcho') === '1'
 const roomId = `!${room}:mock.localhost`
 const userId = `@u${Math.random().toString(36).slice(2, 8)}:mock.localhost`
 const deviceId = `MOCK${Math.random().toString(36).slice(2, 6).toUpperCase()}`
@@ -81,6 +84,7 @@ class MockDriver extends WidgetDriver {
       this.state.set(key, ev)
     }
     if (gossip) this.ch.postMessage({ t: 'state', ev } satisfies HostSync)
+    if (dropOwnEcho && ev.sender === userId && ev.type === 'org.matrix.msc3401.call.member') return
     if (this.api) {
       // Deferred: when the widget itself sent this event, its send request
       // must resolve before the echo arrives (like a real /sync round trip),

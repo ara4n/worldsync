@@ -136,6 +136,13 @@ export class MatrixNet {
     manager.start()
     this.rtc = manager.getRoomSession(room)
     this.rtc.on(MatrixRTCSessionEvent.MembershipsChanged, () => this.reconcile())
+    // The sdk's MembershipManager can die quietly (its errors go to the
+    // sdk logger, invisible next to our panel log): a widget-mapped error
+    // the retry classifier does not recognise kills the join loop and the
+    // membership is never published. Surface it where we look.
+    this.rtc.on(MatrixRTCSessionEvent.MembershipManagerError, (e: unknown) => {
+      this.onLog(`membership manager error (join status ${this.rtc.membershipStatus}): ${e}`)
+    })
     // The widget client surfaces injected events via ClientEvent.Event, but
     // the session manager's RoomStateEvent re-emission does not always fire
     // down this path (it does under hosts that negotiate update_state).
@@ -250,8 +257,9 @@ export class MatrixNet {
       if (!echoWarned && Date.now() - echoStart > 15000) {
         echoWarned = true
         this.onLog(`own membership echo still missing after 15s (${this.rtc.memberships.length} memberships `
-          + 'visible), still retrying every 1s - if this never resolves, the host is probably not '
-          + 'granting the m.call.member receive capability; re-add the widget and approve everything')
+          + `visible, join status ${this.rtc.membershipStatus}), still retrying every 1s - if this never `
+          + 'resolves, the host is probably not granting the m.call.member receive capability; '
+          + 're-add the widget and approve everything')
       }
     }, 1000)
 
@@ -265,6 +273,25 @@ export class MatrixNet {
     // pong to hand it the existing grid (Session adopts any calibrated
     // peer's grid, whatever its order).
     setTimeout(() => {
+      if (!this.joined) {
+        // Lone-boot fallback: the whole session hangs off our own
+        // membership echo, and real hosts do lose it (a dead membership
+        // manager, a host that never pushes the state back). When NOBODY
+        // else is on the transport there is nobody to disagree with:
+        // self-assign an identity and root the grid rather than strand
+        // the user in a dead world. The polls keep running; a late echo
+        // just confirms a membership we already act under. (Its server ts
+        // may differ from our local order - a peer joining inside that
+        // window resolves against the sim via calibration, not orders.)
+        if (this.reachable.size === 0) {
+          this.onLog('own membership echo missing but nobody else is on the transport: starting alone '
+            + '(the echo can catch up later)')
+          this.joined = true
+          this.order = Date.now()
+          this.onJoined(this.id, this.order, true)
+        }
+        return // the ghost scan below is meaningless without an identity
+      }
       let senior = false, reachableSenior = false
       for (const m of this.rtc.memberships) {
         const id = `${m.userId}:${m.deviceId}`
