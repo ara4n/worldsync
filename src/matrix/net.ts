@@ -76,17 +76,27 @@ export class MatrixNet {
   private joined = false
 
   /** The SFU identity for a membership id. The lk-jwt-service does not
-   * necessarily mint identities as `${userId}:${deviceId}` (the modern
-   * /get_token slot flow can prefix or reshape them), and an unmatched
-   * identity silently kills ALL targeted traffic (pings, pongs, boots) -
-   * broadcasts still arrive, which is maximally confusing. Match
-   * tolerantly and log the raw sets so a new format is visible. */
+   * necessarily mint identities as `${userId}:${deviceId}` - the modern
+   * /get_token slot flow mints OPAQUE HASHES - and an unmatched identity
+   * silently kills ALL targeted traffic (pings, pongs, boots) while
+   * broadcasts still arrive, which is maximally confusing. The reliable
+   * mapping comes from the hello broadcast (each client introduces its
+   * membership id over the transport); the string heuristics remain for
+   * services that do mint member-id-shaped identities, where they let
+   * reachability resolve a hello round-trip earlier. */
   private matchParticipant(memberId: string): string | null {
+    const known = this.sfuIdFor.get(memberId)
+    if (known !== undefined && this.reachable.has(known)) return known
     if (this.reachable.has(memberId)) return memberId
     for (const pi of this.reachable) {
       if (pi.endsWith(memberId) || pi.includes(memberId) || memberId.startsWith(pi)) return pi
     }
     return null
+  }
+
+  /** introduce our membership id to everyone on the transport */
+  private sayHello() {
+    this.transport?.send(null, JSON.stringify({ kind: 'hello', peer: this.id }))
   }
 
   private memberIdFor(sfuId: string): string | null {
@@ -149,13 +159,25 @@ export class MatrixNet {
     this.transport.onLog = l => this.onLog(l)
     this.transport.onData = (from, data) => {
       // 'from' is the SFU identity; the session keys peers by membership id
-      try { this.onMessage(this.memberIdFor(from) ?? from, JSON.parse(data)) } catch { /* not ours */ }
+      let msg: DcMessage
+      try { msg = JSON.parse(data) } catch { return /* not ours */ }
+      if (msg.kind === 'hello') {
+        if (this.sfuIdFor.get(msg.peer) !== from) {
+          this.sfuIdFor.set(msg.peer, from)
+          this.onLog(`hello: ${msg.peer} is sfu identity ${from}`)
+          this.sayHello() // answer, so a newcomer learns us as fast
+          this.reconcile()
+        }
+        return
+      }
+      this.onMessage(this.memberIdFor(from) ?? from, msg)
     }
     this.transport.onParticipants = ids => {
       const changed = ids.size !== this.reachable.size || [...ids].some(i => !this.reachable.has(i))
       this.reachable = ids
       if (changed && !p.mockTransport) {
         this.onLog(`transport participants: ${[...ids].join(', ') || '(none)'}`)
+        this.sayHello() // whoever appeared needs our membership id mapping
       }
       this.reconcile()
     }
@@ -180,6 +202,7 @@ export class MatrixNet {
     // event remains the backstop when this postMessage never lands).
     addEventListener('pagehide', () => this.leave())
     await this.transport.connect()
+    if (!p.mockTransport) this.sayHello()
     this.reconcile()
 
     // A missing own-membership echo is a capability problem, not a race:
