@@ -146,7 +146,25 @@ async function uploadScript(t, path, name) {
     window.__jig.net.client.getRooms().flatMap((r) => r.timeline ?? [])
       .some((ev) => ev.getType() === 'm.room.message' && ev.getContent().body === 'e4'))
   if (!said) fail('chess: move was not announced as SAN in the room')
-  if (process.exitCode !== 1) console.log('chess: seat, drag legality gate, move ease, turn flip and move chat work')
+
+  // capture: claim black too (solo testing), reply d5, take exd5 - the
+  // captured black pawn must ease off to white's graveyard on the -x
+  // side (the taker's left), not despawn
+  const blackSeat = ps.find((p) => p.color === 0x241d16 && near(p.y, 0.6))
+  await clickProp(t, blackSeat.id)
+  await t.page.waitForTimeout(1000) // localLatch between moves
+  await dragTo(sqX(3), sqZ(6), sqX(3), sqZ(4)) // d7 -> d5
+  await t.page.waitForTimeout(1000)
+  await dragTo(sqX(4), sqZ(3), sqX(3), sqZ(4)) // e4 pawn takes d5
+  ps = await props(t.frame)
+  const grave = findProp(ps, -5.4, 0.02, 4.2)
+  if (!grave || grave.color !== 0x241d16) fail('chess: captured pawn is not standing in white\'s graveyard')
+  if (findProp(ps, sqX(3), 0.02, sqZ(4))?.color !== 0xf3ead6) fail('chess: white pawn did not take the square')
+  const sanCap = await t.frame.evaluate(() =>
+    window.__jig.net.client.getRooms().flatMap((r) => r.timeline ?? [])
+      .some((ev) => ev.getType() === 'm.room.message' && ev.getContent().body === 'exd5'))
+  if (!sanCap) fail('chess: capture was not announced as exd5')
+  if (process.exitCode !== 1) console.log('chess: seat, drag legality, move ease, turn flip, chat and graveyard work')
   await t.page.close()
 }
 

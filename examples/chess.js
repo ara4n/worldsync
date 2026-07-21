@@ -68,6 +68,11 @@ const scan = () => {
       const c = Math.round(p.x / CELL + 3.5), r = Math.round(3.5 - p.z / CELL)
       const piece = { id: p.id, type: TYPE_OF[p.kind], side: p.color, c, r, x: p.x, z: p.z }
       pieces.push(piece)
+      // the piece we are dragging must not shadow the board: its hover
+      // position rounds onto whatever square it floats over (the capture
+      // TARGET at release, hiding the victim behind the own-piece guard);
+      // its logical square was frozen at lift
+      if (drag && p.id === drag.id) continue
       if (c >= 0 && c < N && r >= 0 && r < N) board[c][r] = piece
     } else if (p.kind === 'sphere' && p.size === SEAT) {
       seats[p.color] = p
@@ -75,7 +80,9 @@ const scan = () => {
       turnProp = p
     }
   }
-  const kings = pieces.filter((p) => p.type === 'k')
+  // only kings still ON the board count: a captured king stands in the
+  // graveyard, it does not keep the game alive
+  const kings = pieces.filter((p) => p.type === 'k' && inb(p.c, p.r))
   gameOver = pieces.length > 0 && kings.length === 1 ? kings[0].side : null
 }
 
@@ -176,6 +183,7 @@ const san = (d, c, r, victim, promoted) => {
     if (board[cc][rr] && board[cc][rr].id === d.id) board[cc][rr] = null
   }
   const rivals = pieces.filter((p) => p.id !== d.id && p.side === d.side && p.type === d.type
+    && inb(p.c, p.r) // a captured twin in the graveyard forces nothing
     && targets(p).some(([tc, tr]) => tc === c && tr === r))
   let dis = ''
   if (rivals.length) {
@@ -186,9 +194,22 @@ const san = (d, c, r, victim, promoted) => {
   return LETTER[d.type] + dis + (victim ? 'x' : '') + sqName(c, r)
 }
 
+// Captured pieces are not despawned: they ease off to stand in a line
+// beside the board, on the TAKER'S LEFT (white faces -z so its left is
+// the -x side; black's is +x), filling from the taker's home edge
+// outward. Off-board pieces fall out of board[] naturally (their cell
+// rounds out of range), so they stop playing but survive for the eye;
+// reset despawns them with everything else.
+const GRAVE_X = 5.4
+const graveSpot = (taker) => {
+  const sign = taker === W ? -1 : 1
+  const count = pieces.filter((p) => !inb(p.c, p.r) && Math.sign(p.x) === sign).length
+  return { x: sign * GRAVE_X, y: BOARD_Y, z: (taker === W ? 1 : -1) * (4.2 - count * 0.55) }
+}
+
 const doMove = (d, c, r) => {
   const victim = board[c][r] && board[c][r].id !== d.id ? board[c][r] : null
-  if (victim) world.despawn(victim.id) // targets() guarantees enemy or empty
+  if (victim) world.move(victim.id, graveSpot(d.side)) // targets() guarantees enemy or empty
   const promoted = d.type === 'p' && (r === 0 || r === N - 1)
   if (promoted) { // auto-queen
     world.despawn(d.id)
@@ -229,6 +250,7 @@ world.onpointerdown = (ev) => {
   const turn = turnProp.color
   const piece = pieces.find((p) => p.id === ev.entity)
   if (!piece || piece.side !== turn) return
+  if (!inb(piece.c, piece.r)) return // captured pieces rest in peace
   if (!(seats[turn] && seats[turn].mine)) {
     console.log('claim the', turn === W ? 'white' : 'black', 'seat to play')
     return
@@ -261,12 +283,15 @@ world.onpointermove = (ev) => {
 world.onpointerup = (ev) => {
   if (!drag) return
   const d = drag
+  // scan while drag is still set: the dropped piece's prop is parked at
+  // its hover position, and only the drag-exclusion keeps it from
+  // shadowing the destination square (hiding the capture victim)
+  scan()
   drag = null
   clearDragLines()
   const p = WebSG.rayPlane(ev.origin, ev.dir, { x: 0, y: LIFT, z: 0 }, { x: 0, y: 1, z: 0 })
   const x = p ? p.x : d.x, z = p ? p.z : d.z
   const c = Math.round(x / CELL + 3.5), r = Math.round(3.5 - z / CELL)
-  scan()
   if (!pieces.some((pp) => pp.id === d.id)) return
   if (d.targets.some(([tc, tr]) => tc === c && tr === r) && !(c === d.c0 && r === d.r0)) {
     doMove(d, c, r) // eases into the center of the square
