@@ -126,12 +126,13 @@ declare const world: {
   // -- props: kinematic physics-free entities, claims as coordination --
   props(): WorldProp[]
   prop(id: string): WorldProp | null
-  /** spawn a kinematic sphere prop; returns its id */
+  /** spawn a kinematic sphere prop; returns its id. bounce:false makes
+   * discrete moves ease instead of bounce-dropping on vertical falls */
   createSphere(props?: { position?: Vec3Like; translation?: Vec3Like; color?: number; radius?: number
-    unlit?: boolean }): string
+    unlit?: boolean; bounce?: boolean }): string
   /** spawn a kinematic cube prop (a 2*size cube); returns its id */
   createBox(props?: { position?: Vec3Like; translation?: Vec3Like; color?: number; size?: number
-    unlit?: boolean }): string
+    unlit?: boolean; bounce?: boolean }): string
   /** an invisible fixed cuboid collider (folded sim state: boxes bounce
    * off it identically on every peer). yaw about Y, dims are full extents.
    * Despawn/move it like any prop. Returns its id. */

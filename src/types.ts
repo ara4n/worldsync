@@ -38,6 +38,7 @@ export interface PropInfo {
   color: number
   size: number
   unlit: boolean
+  bounce?: boolean // false: discrete moves ease instead of bounce-dropping
   claim: string | null
   yaw?: number    // solid only: rotation about Y
   dims?: Vec3     // solid only: cuboid extents
@@ -61,6 +62,7 @@ export interface Interaction {
   shape?: string  // prop only: 'sphere' | 'box' | 'collider'
   size?: number   // prop only: radius / half-extent
   unlit?: boolean // prop only: cosmetic hint, but folded state so it boots
+  bounce?: boolean // prop only: false = ease vertical falls, never bounce
   yaw?: number    // prop only, solid: rotation about Y
   dims?: Vec3     // prop only, solid: cuboid extents
   solid?: boolean // prop only: create a fixed collider in the physics world

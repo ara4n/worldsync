@@ -77,7 +77,7 @@ export class PropLayer {
       }
       st.claim = p.claim
       if (st.pos.x !== p.pos.x || st.pos.y !== p.pos.y || st.pos.z !== p.pos.z) {
-        this.startMove(id, st.pos.clone(), new THREE.Vector3(p.pos.x, p.pos.y, p.pos.z), now)
+        this.startMove(id, st.pos.clone(), new THREE.Vector3(p.pos.x, p.pos.y, p.pos.z), now, p.bounce !== false)
         st.pos.set(p.pos.x, p.pos.y, p.pos.z)
       }
     }
@@ -90,10 +90,10 @@ export class PropLayer {
     }
   }
 
-  private startMove(id: string, from: THREE.Vector3, to: THREE.Vector3, now: number) {
+  private startMove(id: string, from: THREE.Vector3, to: THREE.Vector3, now: number, bounce: boolean) {
     const dy = to.y - from.y
     const lateral = Math.hypot(to.x - from.x, to.z - from.z)
-    if (dy < -0.1 && lateral < 0.05) {
+    if (bounce && dy < -0.1 && lateral < 0.05) {
       // vertical fall: dots-3d bounce chain (uniform start height so
       // simultaneous drops look tidy, like the original's clobbered y)
       const y = to.y + Math.max(1, -dy)
