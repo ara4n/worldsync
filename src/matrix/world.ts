@@ -35,6 +35,29 @@ export const worldUrls = (content: Record<string, unknown>) => ({
 
 const MIME = { scene: 'model/gltf-binary', script: 'text/javascript' }
 
+// MSC4039 media actions only answer after the host has moved the whole
+// blob to/from the homeserver, so the transport's default 10s reply window
+// (right for state sends and other small actions) guarantees "Request
+// timed out" for any scene beyond a few MB on a home connection. Hold the
+// window open while media is in flight and restore it when the last
+// concurrent transfer lands, so small actions keep fast failure detection.
+// (timeoutSeconds is read when a request is SENT, so requests already in
+// flight keep the window they started with.)
+const MEDIA_TIMEOUT_S = 300
+let mediaOps = 0
+let idleTimeoutS = 10
+async function withMediaTimeout<T>(api: WidgetApi, op: () => Promise<T>): Promise<T> {
+  if (mediaOps++ === 0) {
+    idleTimeoutS = api.transport.timeoutSeconds
+    api.transport.timeoutSeconds = MEDIA_TIMEOUT_S
+  }
+  try {
+    return await op()
+  } finally {
+    if (--mediaOps === 0) api.transport.timeoutSeconds = idleTimeoutS
+  }
+}
+
 /** Upload an asset and merge it into the room's world state event (a
  * scene upload must not clobber script_url, and vice versa). */
 export async function uploadWorldAsset(
@@ -48,7 +71,7 @@ export async function uploadWorldAsset(
   // the bytes here (where the grant is valid) and re-wrapping as a Blob
   // makes them travel by value.
   const blob = new Blob([await file.arrayBuffer()], { type: file.type || MIME[kind] })
-  const { content_uri } = await api.uploadFile(blob)
+  const { content_uri } = await withMediaTimeout(api, () => api.uploadFile(blob))
   const sendState = client.sendStateEvent.bind(client) as
     (roomId: string, type: string, content: unknown, stateKey: string) => Promise<unknown>
   const patch: Record<string, unknown> = kind === 'scene'
@@ -79,6 +102,6 @@ export async function mediaUploadLimit(api: WidgetApi): Promise<number | null> {
 }
 
 export async function fetchWorldAsset(api: WidgetApi, mxc: string): Promise<ArrayBuffer> {
-  const { file } = await api.downloadFile(mxc)
+  const { file } = await withMediaTimeout(api, () => api.downloadFile(mxc))
   return await new Response(file as BodyInit).arrayBuffer()
 }
