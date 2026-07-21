@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
+import { CSM } from 'three/addons/csm/CSM.js'
 import type { EcsStore } from './ecs'
 
 const IDENTITY = new THREE.Quaternion()
@@ -76,20 +77,35 @@ export class View {
     }, { passive: false })
 
     this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x30281e, 0.7))
-    this.sun = new THREE.DirectionalLight(0xffffff, 1.6)
-    this.sun.castShadow = true
-    this.sun.shadow.mapSize.set(4096, 4096)
-    // normalBias trades acne for a light-leak fringe at contact points
-    // (gap ~ 1.4x the bias under this sun angle): keep it at about one
-    // shadow texel, the floor below which the fringe cannot shrink anyway.
-    this.sun.shadow.bias = -0.00015
-    this.sun.shadow.normalBias = 0.02
-    this.scene.add(this.sun)
-    this.scene.add(this.sun.target)
-    this.fitShadows(null)
-    this.ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(40, 40),
-      new THREE.MeshStandardMaterial({ color: 0x2a3140, roughness: 1 }))
+    // Cascaded shadow maps with splits weighted hard toward the camera:
+    // the near cascade covers only the first ~4m of view depth, so contact
+    // shadows get millimetre texels and the bias needed to prevent acne
+    // (which is what peter-pans the shadow off the contact point) shrinks
+    // below visibility. Outer cascades keep distant casters shadowing at
+    // progressively coarser resolution, with fade blending the seams.
+    this.csm = new CSM({
+      camera: this.camera,
+      parent: this.scene,
+      cascades: 4,
+      maxFar: 150,
+      mode: 'custom',
+      customSplitsCallback: (_cascades: number, _near: number, _far: number, breaks: number[]) => {
+        breaks.push(0.03, 0.1, 0.35, 1)
+      },
+      shadowMapSize: 2048,
+      lightDirection: new THREE.Vector3(-0.45, -0.8, -0.35).normalize(),
+      lightIntensity: 1.6,
+    })
+    this.csm.fade = true
+    // bias scales with each cascade's texel size
+    const normalBias = [0.004, 0.012, 0.04, 0.12]
+    this.csm.lights.forEach((l, i) => {
+      l.shadow.bias = -0.00002 * (i + 1)
+      l.shadow.normalBias = normalBias[i]
+    })
+    const groundMat = new THREE.MeshStandardMaterial({ color: 0x2a3140, roughness: 1 })
+    this.csm.setupMaterial(groundMat)
+    this.ground = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), groundMat)
     this.ground.rotation.x = -Math.PI / 2
     this.ground.receiveShadow = true
     this.scene.add(this.ground)
@@ -101,44 +117,27 @@ export class View {
       this.camera.aspect = innerWidth / innerHeight
       this.camera.updateProjectionMatrix()
       this.renderer.setSize(innerWidth, innerHeight)
+      this.csm.updateFrustums()
     })
   }
 
   private sceneRoot: THREE.Object3D | null = null
   private ground!: THREE.Mesh
   private grid!: THREE.GridHelper
-  private sun!: THREE.DirectionalLight
+  private csm!: CSM
+  private csmPatched = new WeakSet<THREE.Material>()
 
-  // The shadow frustum is a tight window that FOLLOWS the orbit target
-  // rather than covering the whole scene: fitting a ~300-unit world into
-  // one 4096 map leaves each box a dozen texels (blocky chevron acne).
-  // Nearby shadows stay crisp; geometry beyond the window casts none.
-  private readonly shadowRadius = 32
-  private shadowReach = 40
-  private readonly sunDir = new THREE.Vector3(0.45, 0.8, 0.35).normalize()
-
-  /** Scene bounds only tune the vertical reach; the frustum tracks the
-   * camera target per-frame (updateShadowFollow). */
-  private fitShadows(box: THREE.Box3 | null) {
-    const size = box ? box.getSize(new THREE.Vector3()) : new THREE.Vector3(40, 8, 40)
-    this.shadowReach = Math.max(size.y, 20)
-    const r = this.shadowRadius
-    const cam = this.sun.shadow.camera
-    cam.left = -r; cam.right = r; cam.top = r; cam.bottom = -r
-    cam.near = 0.1
-    cam.far = this.shadowReach * 3 + r * 4
-    cam.updateProjectionMatrix()
-  }
-
-  private updateShadowFollow() {
-    // snap the window to the shadow-map texel grid, or the follow motion
-    // makes every shadow edge shimmer as the camera pans
-    const texel = (2 * this.shadowRadius) / this.sun.shadow.mapSize.width
-    const cx = Math.round(this.controls.target.x / texel) * texel
-    const cz = Math.round(this.controls.target.z / texel) * texel
-    this.sun.target.position.set(cx, 0, cz)
-    this.sun.position.set(cx, 0, cz).addScaledVector(this.sunDir, this.shadowReach + this.shadowRadius * 2)
-    this.sun.target.updateMatrixWorld()
+  /** Route a lit material through the CSM shader patch (idempotent).
+   * Every lit material MUST be patched, or it sums all cascade lights
+   * and renders several times too bright; unlit materials ignore lights
+   * and are left alone. */
+  private patchMaterial(m: THREE.Material) {
+    const lit = m as THREE.MeshStandardMaterial
+    if (!lit.isMeshStandardMaterial && !(m as THREE.MeshPhongMaterial).isMeshPhongMaterial
+      && !(m as THREE.MeshLambertMaterial).isMeshLambertMaterial) return
+    if (this.csmPatched.has(m)) return
+    this.csmPatched.add(m)
+    this.csm.setupMaterial(m)
   }
 
   /** Swap the rendered glTF scene (null removes it). Idempotent per object. */
@@ -149,12 +148,14 @@ export class View {
     if (obj) {
       obj.traverse(node => {
         const mesh = node as THREE.Mesh
-        if (mesh.isMesh) { mesh.castShadow = true; mesh.receiveShadow = true }
+        if (!mesh.isMesh) return
+        mesh.castShadow = true
+        mesh.receiveShadow = true
+        for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
+          this.patchMaterial(m)
+        }
       })
       this.scene.add(obj)
-      this.fitShadows(new THREE.Box3().setFromObject(obj))
-    } else {
-      this.fitShadows(null)
     }
   }
 
@@ -169,6 +170,7 @@ export class View {
     let m = this.mats.get(color)
     if (!m) {
       m = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05 })
+      this.csm.setupMaterial(m)
       this.mats.set(color, m)
     }
     return m
@@ -234,7 +236,6 @@ export class View {
    * one tick behind but smooth.
    */
   frame(now: number, alpha: number) {
-    this.updateShadowFollow()
     const { Position, Rotation, PrevPosition, PrevRotation } = this.ecs
     for (const [eid, mesh] of this.meshes) {
       mesh.position.set(
@@ -256,6 +257,7 @@ export class View {
       }
     }
     this.controls.update()
+    this.csm.update() // cascade frusta track the camera; must follow controls
     this.renderer.render(this.scene, this.camera)
   }
 }
