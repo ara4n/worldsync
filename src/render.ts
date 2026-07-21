@@ -23,10 +23,8 @@ export class View {
   props: PropLayer
   private geo = new THREE.BoxGeometry(1, 1, 1)
   private mats = new Map<number, THREE.MeshStandardMaterial>()
-  /** ephemeral per-author chain lines (the dots selection being drawn) */
-  private peerLines = new Map<string, THREE.Line>()
-  /** persistent local decoration polylines (the dots lattice guides) */
-  private decor = new Map<string, { obj: THREE.LineSegments; targetOpacity: number }>()
+  /** cosmetic line entities keyed "author/lineId"; scripts animate them */
+  private lines = new Map<string, { obj: THREE.Line; pointsKey: string }>()
   private defaultBackground = new THREE.Color(0x0e1116)
 
   constructor(parent: HTMLElement, public ecs: EcsStore) {
@@ -219,51 +217,46 @@ export class View {
     this.controls.update()
   }
 
-  /** Latest-wins ephemeral chain line for one author; empty/null clears. */
-  setPeerLine(peer: string, points: { x: number; y: number; z: number }[] | null, color: number) {
-    const old = this.peerLines.get(peer)
-    if (old) {
-      this.scene.remove(old)
-      old.geometry.dispose()
-      ;(old.material as THREE.Material).dispose()
-      this.peerLines.delete(peer)
-    }
-    if (!points || points.length < 2) return
-    const geo = new THREE.BufferGeometry().setFromPoints(points.map(p => new THREE.Vector3(p.x, p.y, p.z)))
-    const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color, linewidth: 2 }))
-    line.renderOrder = 999 // never buried by the props it threads through
-    this.scene.add(line)
-    this.peerLines.set(peer, line)
-  }
-
-  /** Persistent local decoration segments (the dots lattice); opacity eases
-   * toward the requested value so scripts can fade guides in and out.
-   * `segments` is a flat list of [from, to] pairs; null removes the key. */
-  setDecor(key: string, segments: [{ x: number; y: number; z: number }, { x: number; y: number; z: number }][] | null,
-    color: number, opacity: number) {
-    const existing = this.decor.get(key)
-    if (!segments) {
+  /** Cosmetic line entity, keyed "author/lineId": full state per call,
+   * latest wins; null or fewer than 2 points removes it. Geometry rebuilds
+   * only when the points actually change, so per-frame color/opacity
+   * animation from a script stays a material-only update. */
+  setLine(key: string, points: { x: number; y: number; z: number }[] | null, color: number, opacity: number) {
+    const existing = this.lines.get(key)
+    if (!points || points.length < 2) {
       if (existing) {
         this.scene.remove(existing.obj)
         existing.obj.geometry.dispose()
         ;(existing.obj.material as THREE.Material).dispose()
-        this.decor.delete(key)
+        this.lines.delete(key)
       }
       return
     }
-    if (existing) { // geometry assumed stable per key; only the fade target moves
-      existing.targetOpacity = opacity
-      ;(existing.obj.material as THREE.LineBasicMaterial).color.setHex(color)
+    const pointsKey = JSON.stringify(points)
+    if (existing) {
+      if (existing.pointsKey !== pointsKey) {
+        existing.obj.geometry.dispose()
+        existing.obj.geometry = new THREE.BufferGeometry().setFromPoints(
+          points.map(p => new THREE.Vector3(p.x, p.y, p.z)))
+        existing.pointsKey = pointsKey
+      }
+      const m = existing.obj.material as THREE.LineBasicMaterial
+      m.color.setHex(color)
+      m.opacity = opacity
       return
     }
-    const pts: THREE.Vector3[] = []
-    for (const [a, b] of segments) pts.push(new THREE.Vector3(a.x, a.y, a.z), new THREE.Vector3(b.x, b.y, b.z))
-    const geo = new THREE.BufferGeometry().setFromPoints(pts)
-    const mat = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0 })
-    const obj = new THREE.LineSegments(geo, mat)
-    obj.renderOrder = 998
+    const geo = new THREE.BufferGeometry().setFromPoints(points.map(p => new THREE.Vector3(p.x, p.y, p.z)))
+    const obj = new THREE.Line(geo, new THREE.LineBasicMaterial({ color, transparent: true, opacity }))
+    obj.renderOrder = 999 // never buried by the props it threads through
     this.scene.add(obj)
-    this.decor.set(key, { obj, targetOpacity: opacity })
+    this.lines.set(key, { obj, pointsKey })
+  }
+
+  /** Remove every line whose key starts with prefix (an author's "id/"). */
+  removeLines(prefix: string) {
+    for (const key of [...this.lines.keys()]) {
+      if (key.startsWith(prefix)) this.setLine(key, null, 0, 0)
+    }
   }
 
   private matFor(color: number) {
@@ -357,10 +350,6 @@ export class View {
       }
     }
     this.props.update(now)
-    for (const d of this.decor.values()) {
-      const m = d.obj.material as THREE.LineBasicMaterial
-      m.opacity += (d.targetOpacity - m.opacity) * 0.12
-    }
     this.controls.update()
     this.csm.update() // cascade frusta track the camera; must follow controls
     this.renderer.render(this.scene, this.camera)

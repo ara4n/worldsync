@@ -297,8 +297,8 @@ const hostFor = (p: HubPeer): ScriptHost => ({
     p.session.emit('paint', id, { pos: { x: 0, y: 0, z: 0 }, color })
     return true
   },
-  chainLine: () => {},
-  decorLines: () => {},
+  line: () => {},
+  removeLine: () => {},
   setEnv: () => {},
   setCamera: () => {},
   boxes: () => [...p.sim.bodies.keys()].map(id => {

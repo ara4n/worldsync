@@ -96,8 +96,12 @@ const claimed = await b.frame.waitForFunction(
 if (!claimed) fail('b never saw a\'s claims on the chained dots')
 else console.log('b sees both dots claimed by a')
 const lineSeen = await b.frame.waitForFunction(
-  () => window.__jig.view.peerLines && window.__jig.view.peerLines.size >= 1,
-  null, { timeout: 5000 }).then(() => true).catch(() => false)
+  id => {
+    const lines = window.__jig.view.lines
+    if (!lines) return false
+    for (const key of lines.keys()) if (key.startsWith(id + '/')) return true
+    return false
+  }, aId, { timeout: 5000 }).then(() => true).catch(() => false)
 if (!lineSeen) fail('b never saw a\'s chain line')
 else console.log('b sees a\'s chain line')
 

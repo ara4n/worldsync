@@ -30,21 +30,30 @@ let anchor = null     // world position of the chain's last dot
 let planeN = null     // preview plane normal: pointer ray at chain start
 let preview = null    // current preview endpoint on that plane
 let seeded = false
+let chain = null      // shared line entity: my chain, everyone sees it
+let latticeLines = [] // local line entities, one per grid guide
+let latticeTarget = 0.25
 
 world.onload = () => {
   world.env({ background: 0xffffff, fog: { color: 0xffffff, near: 4.5, far: 11 }, ground: false })
   world.camera({ x: 0, y: ORG.y + 1, z: 5.2 }, { x: 0, y: ORG.y + 1, z: 0 })
-  lattice(0.25)
-}
-
-function lattice(opacity) {
   const segs = []
   for (let x = 0; x < W; x++) {
     for (let y = 0; y < H; y++) segs.push([at(x, y, 0), at(x, y, D - 1)])
     for (let z = 0; z < D; z++) segs.push([at(x, 0, z), at(x, H - 1, z)])
   }
   for (let y = 0; y < H; y++) for (let z = 0; z < D; z++) segs.push([at(0, y, z), at(W - 1, y, z)])
-  world.decorLines('lattice', segs, 0xdddddd, opacity)
+  latticeLines = segs.map((s) => world.createLine({ points: s, color: 0xdddddd, opacity: 0 }))
+  chain = world.createLine({ points: [], color: world.me.color, shared: true })
+}
+
+/** ease the lattice toward its target opacity; called every update */
+function fadeLattice() {
+  for (const l of latticeLines) {
+    const d = latticeTarget - l.opacity
+    if (Math.abs(d) > 0.01) l.opacity += d * 0.12
+    else if (l.opacity !== latticeTarget) l.opacity = latticeTarget
+  }
 }
 
 /** does any adjacent same-colour pair exist in a full board colour map? */
@@ -81,6 +90,7 @@ world.onupdate = () => {
     revalidate()
     updateLine()
   }
+  fadeLattice()
 }
 
 world.onpointerdown = (ev) => {
@@ -94,7 +104,7 @@ world.onpointerdown = (ev) => {
   planeN = ev.dir
   anchor = { x: p.x, y: p.y, z: p.z }
   preview = null
-  lattice(1.0)
+  latticeTarget = 1.0
 }
 
 world.onpointermove = (ev) => {
@@ -131,14 +141,14 @@ function extend(q) {
 world.onpointerup = () => {
   if (!drawing) return
   drawing = false
-  lattice(0.25)
+  latticeTarget = 0.25
   revalidate()
   if (sel.length > 1 || (cycleColor !== null && sel.length > 0)) clearChain()
   else for (const id of sel) world.unclaim(id)
   sel = []
   cycleColor = null
   preview = null
-  world.chainLine([])
+  chain.points = []
 }
 
 /** Rollback folds can hand a raced dot to a rival after we optimistically
@@ -163,8 +173,8 @@ function revalidate() {
     if (a) anchor = { x: a.x, y: a.y, z: a.z }
   } else if (drawing) {
     drawing = false
-    lattice(0.25)
-    world.chainLine([])
+    latticeTarget = 0.25
+    chain.points = []
   }
 }
 
@@ -175,7 +185,7 @@ function updateLine() {
     if (p) pts.push({ x: p.x, y: p.y, z: p.z })
   }
   if (preview) pts.push(preview)
-  world.chainLine(pts.length >= 2 ? pts : [])
+  chain.points = pts.length >= 2 ? pts : []
 }
 
 /** The acting peer computes the whole outcome (clears, drops, refills, a

@@ -83,9 +83,10 @@ export type DcMessage =
   // The pose plane: latest-wins continuous motion for a held entity.
   // Never rolls anyone back; recorded per author and read by replays.
   | { kind: 'pose'; tick: number; peer: string; netId: string; pos: Vec3 }
-  // Ephemeral per-author polyline (a dots chain being drawn): latest-wins,
-  // purely cosmetic, never folded and never in the hash. Empty points clear.
-  | { kind: 'line'; peer: string; points: Vec3[]; color: number }
+  // Ephemeral cosmetic line entity: latest-wins full state per (author,
+  // id), purely cosmetic, never folded and never in the hash. Fewer than 2
+  // points removes the line; a departed peer's lines go with it.
+  | { kind: 'line'; peer: string; id: string; points: Vec3[]; color: number; opacity: number }
   // The heartbeat: attests the author's present (anything it stamps earlier
   // later is a provable history rewrite) and triggers the healing fold that
   // re-simulates the last interval against complete pose tracks.

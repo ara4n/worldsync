@@ -67,12 +67,14 @@ export interface ScriptHost {
   unclaim(id: string): boolean
   setPos(id: string, x: number, y: number, z: number): boolean
   paint(id: string, color: number): boolean
-  // -- cosmetics: local rendering plus the ephemeral chain-line channel --
-  /** broadcast + draw this peer's chain line; empty points clear it.
-   * color < 0 means "my accent color". */
-  chainLine(pointsJson: string, color: number): void
-  /** local persistent guide lines keyed for replace/fade; '' segs remove */
-  decorLines(key: string, segsJson: string, color: number, opacity: number): void
+  // -- cosmetics: generic line entities, animated by the script itself --
+  /** create/update a cosmetic line entity's full state (fewer than 2
+   * points hides it). Shared lines are additionally broadcast latest-wins
+   * per (author, id) so every peer draws them; local ones never leave the
+   * client. Never folded, never hashed. */
+  line(id: string, pointsJson: string, color: number, opacity: number, shared: boolean): void
+  /** remove a line entity (broadcast to everyone if it was shared) */
+  removeLine(id: string): void
   setEnv(json: string): void
   setCamera(x: number, y: number, z: number, tx: number, ty: number, tz: number): void
 }
@@ -132,6 +134,36 @@ const PRELUDE = `
     if (!n) { n = new Node(id, scene); nodes.set(id, n) }
     return n
   }
+  // Cosmetic line entity: the script owns and animates it (points, color,
+  // opacity); every mutation ships the full state to the host. shared:true
+  // makes it visible to every peer (latest-wins broadcast); animate those
+  // sparingly, since each mutation is a network message.
+  let lineSeq = 0
+  class Line {
+    constructor(opts = {}) {
+      this._id = 'l' + (++lineSeq)
+      this._shared = !!opts.shared
+      this._points = (opts.points ?? []).map((p) => { const v = vec(p); return { x: v.x, y: v.y, z: v.z } })
+      this._color = typeof opts.color === 'number' ? opts.color : 0xffffff
+      this._opacity = typeof opts.opacity === 'number' ? opts.opacity : 1
+      this._dead = false
+      this._sync()
+    }
+    _sync() {
+      if (this._dead) return
+      H.line(this._id, JSON.stringify(this._points), this._color, this._opacity, this._shared)
+    }
+    get points() { return this._points.map((p) => new Vector3(p.x, p.y, p.z)) }
+    set points(ps) {
+      this._points = (ps ?? []).map((p) => { const v = vec(p); return { x: v.x, y: v.y, z: v.z } })
+      this._sync()
+    }
+    get color() { return this._color }
+    set color(c) { this._color = c; this._sync() }
+    get opacity() { return this._opacity }
+    set opacity(o) { this._opacity = o; this._sync() }
+    despawn() { if (!this._dead) { this._dead = true; H.removeLine(this._id) } }
+  }
   globalThis.WebSG = {
     Vector3,
     PhysicsBodyType: { Rigid: 'rigid', Static: 'static', Kinematic: 'kinematic' },
@@ -170,18 +202,7 @@ const PRELUDE = `
       return H.setPos(id, v.x, v.y, v.z)
     },
     paint(id, color) { return H.paint(id, color) },
-    chainLine(points, color) {
-      if (!points || points.length === 0) { H.chainLine('', -1); return }
-      H.chainLine(JSON.stringify(points.map((p) => { const v = vec(p); return { x: v.x, y: v.y, z: v.z } })),
-        typeof color === 'number' ? color : -1)
-    },
-    decorLines(key, segments, color, opacity) {
-      if (!segments) { H.decorLines(key, '', 0, 0); return }
-      H.decorLines(key, JSON.stringify(segments.map((s) => {
-        const a = vec(s[0]), b = vec(s[1])
-        return [{ x: a.x, y: a.y, z: a.z }, { x: b.x, y: b.y, z: b.z }]
-      })), color ?? 0xffffff, opacity ?? 1)
-    },
+    createLine(props) { return new Line(props) },
     env(opts) { H.setEnv(JSON.stringify(opts ?? {})) },
     camera(pos, target) {
       const p = vec(pos), t = vec(target)
@@ -315,11 +336,12 @@ export class WorldScript {
     fn('setPos', (id, x, y, z) =>
       bool(host.setPos(ctx.getString(id), ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z))))
     fn('paint', (id, c) => bool(host.paint(ctx.getString(id), ctx.getNumber(c))))
-    fn('chainLine', (pts, c) => { host.chainLine(ctx.getString(pts), ctx.getNumber(c)); return ctx.undefined })
-    fn('decorLines', (key, segs, c, op) => {
-      host.decorLines(ctx.getString(key), ctx.getString(segs), ctx.getNumber(c), ctx.getNumber(op))
+    fn('line', (id, pts, c, op, shared) => {
+      host.line(ctx.getString(id), ctx.getString(pts), ctx.getNumber(c), ctx.getNumber(op),
+        ctx.dump(shared) === true)
       return ctx.undefined
     })
+    fn('removeLine', (id) => { host.removeLine(ctx.getString(id)); return ctx.undefined })
     fn('setEnv', (j) => { host.setEnv(ctx.getString(j)); return ctx.undefined })
     fn('setCamera', (x, y, z, tx, ty, tz) => {
       host.setCamera(ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z),

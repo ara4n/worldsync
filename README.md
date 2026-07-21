@@ -131,13 +131,15 @@ color / size / claim are folded sim state - via `world.createSphere`,
 pointer input via `world.onpointerdown/move/up(ev)` where `ev` carries
 the hit prop plus the raw ray (`WebSG.rayPlane` does plane math for drag
 previews) and a prop hit captures the gesture away from box spawning;
-cosmetics via `world.chainLine(points)` (an ephemeral, latest-wins,
-per-author polyline broadcast beside the protocol - never folded, never
-hashed - drawn in each author's deterministic accent color),
-`world.decorLines` (local guide lines with eased opacity), `world.env`
-(background/fog/ground) and `world.camera`. Prop motion is animated
-client-side (bounce drops, fade-in spawns, pop-out despawns): the sim
-stores logical poses, renderers add the juice.
+cosmetics via generic line entities - `world.createLine({points, color,
+opacity, shared})` returns a handle whose points/color/opacity the
+script mutates (and animates) itself; `shared` lines are broadcast
+latest-wins per (author, id) beside the protocol - never folded, never
+hashed - while local ones never leave the client (`world.me.color` is
+each peer's deterministic accent color for drawing in) - plus
+`world.env` (background/fog/ground) and `world.camera`. Prop motion is
+animated client-side (bounce drops, fade-in spawns, pop-out despawns):
+the sim stores logical poses, renderers add the juice.
 
 **`examples/dots.js` is dots-3d ported whole into the sandbox** - the
 proving example for all of the above. The 3x3x3 board is props; players

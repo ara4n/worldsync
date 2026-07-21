@@ -158,20 +158,21 @@ async function main() {
     }
   }
 
-  // Ephemeral chain lines ride beside the session protocol: latest-wins per
-  // author, purely cosmetic, so they are intercepted before receive().
+  // Ephemeral shared line entities ride beside the session protocol:
+  // latest-wins per (author, id), purely cosmetic, so they are intercepted
+  // before receive().
   const onMsg = (from: string, msg: DcMessage) => {
     if (msg.kind === 'line') {
-      view.setPeerLine(msg.peer, msg.points.length ? msg.points : null, msg.color)
+      view.setLine(`${msg.peer}/${msg.id}`, msg.points.length ? msg.points : null, msg.color, msg.opacity)
       return
     }
     session.receive(from, msg)
   }
-  // A departed peer takes its chain line with it, and the primary clears
+  // A departed peer takes its shared lines with it, and the primary clears
   // any claims it left behind (its own session can no longer unclaim them).
   const onLeft = (id: string) => {
     session.peerLeft(id)
-    view.setPeerLine(id, null, 0)
+    view.removeLines(`${id}/`)
     if (isRoot()) {
       for (const [pid, p] of sim.props) {
         if (p.claim === id) session.emit('unclaim', pid, { pos: { x: 0, y: 0, z: 0 }, force: true })
@@ -264,10 +265,9 @@ async function main() {
     id, x: p.pos.x, y: p.pos.y, z: p.pos.z, color: p.color, size: p.size, kind: p.kind,
     claimedBy: p.claim ?? '', mine: p.claim === session.id,
   })
-  const sendChainLine = (points: { x: number; y: number; z: number }[], color: number) => {
-    view.setPeerLine(session.id, points.length ? points : null, color)
-    ;(net as NetLike).broadcast({ kind: 'line', peer: session.id, points, color })
-  }
+  // The script's line entities: rendered locally under our author key, and
+  // (when shared) broadcast as full latest-wins state per (author, id).
+  const scriptLines = new Map<string, boolean>() // id -> shared
   const scriptHost: import('./websg').ScriptHost = {
     log: l => log(`[script] ${l}`),
     boxes: () => {
@@ -360,12 +360,18 @@ async function main() {
       session.emit('paint', id, { pos: { x: 0, y: 0, z: 0 }, color })
       return true
     },
-    chainLine: (pointsJson, color) => {
+    line: (id, pointsJson, color, opacity, shared) => {
       const points = pointsJson ? JSON.parse(pointsJson) as { x: number; y: number; z: number }[] : []
-      sendChainLine(points, color >= 0 ? color : peerColor(session.id))
+      scriptLines.set(id, shared)
+      view.setLine(`${session.id}/${id}`, points, color, opacity)
+      if (shared) (net as NetLike).broadcast({ kind: 'line', peer: session.id, id, points, color, opacity })
     },
-    decorLines: (key, segsJson, color, opacity) => {
-      view.setDecor(key, segsJson ? JSON.parse(segsJson) : null, color, opacity)
+    removeLine: id => {
+      const shared = scriptLines.get(id)
+      if (shared === undefined) return
+      scriptLines.delete(id)
+      view.setLine(`${session.id}/${id}`, null, 0, 0)
+      if (shared) (net as NetLike).broadcast({ kind: 'line', peer: session.id, id, points: [], color: 0, opacity: 0 })
     },
     setEnv: json => view.setEnvironment(JSON.parse(json)),
     setCamera: (x, y, z, tx, ty, tz) => view.setCameraPose({ x, y, z }, { x: tx, y: ty, z: tz }),
@@ -405,7 +411,7 @@ async function main() {
     script.dispose()
     script = null
     scriptPointerOn = false
-    sendChainLine([], 0) // take our chain line down with the script
+    for (const id of [...scriptLines.keys()]) scriptHost.removeLine(id) // its lines go with it
     view.setEnvironment({}) // back to the default look
     log(why)
   }
