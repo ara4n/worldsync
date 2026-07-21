@@ -105,7 +105,10 @@ export class View {
     // session at phantom staleness.
     console.log('[worldsync] renderer: csm x4 backface-shadows aces '
       + `(${typeof __COMMIT__ === 'string' ? __COMMIT__ : 'dev'})`)
-    this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x30281e, 0.85))
+    // Fixtures are named for the inspector's whole-scene tree.
+    const hemi = new THREE.HemisphereLight(0xbfd4ff, 0x30281e, 0.85)
+    hemi.name = 'hemisphere'
+    this.scene.add(hemi)
     // Cascaded shadow maps with splits weighted hard toward the camera:
     // the near cascade covers only the first ~4m of view depth, so contact
     // shadows get millimetre texels and the bias needed to prevent acne
@@ -143,14 +146,17 @@ export class View {
     const groundMat = new THREE.MeshStandardMaterial({ color: 0x2a3140, roughness: 1 })
     this.patchMaterial(groundMat)
     this.ground = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), groundMat)
+    this.ground.name = 'ground'
     this.ground.rotation.x = -Math.PI / 2
     this.ground.receiveShadow = true
     this.scene.add(this.ground)
     this.grid = new THREE.GridHelper(40, 40, 0x39414d, 0x252b33)
+    this.grid.name = 'grid'
     this.grid.position.y = 0.01
     this.scene.add(this.grid)
 
     this.props = new PropLayer(m => this.patchMaterial(m))
+    this.props.group.name = 'props'
     this.scene.add(this.props.group)
 
     addEventListener('resize', () => {
@@ -300,6 +306,7 @@ export class View {
     const mat = new LineMaterial({ color, transparent: true, opacity, linewidth: width, worldUnits })
     mat.resolution.set(innerWidth, innerHeight)
     const obj = new Line2(lineGeo(), mat)
+    obj.name = key // "author/lineId", for the inspector
     obj.visible = opacity > 0
     obj.computeLineDistances()
     obj.renderOrder = 999 // never buried by the props it threads through
@@ -327,6 +334,7 @@ export class View {
     let s = this.screens.get(key)
     if (!s) {
       s = { obj: new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.screenMat(peer)), peer }
+      s.obj.name = key
       this.scene.add(s.obj)
       this.screens.set(key, s)
     } else if (s.peer !== peer) {
@@ -399,11 +407,11 @@ export class View {
     const live = new Set<number>()
     for (const id of liveNetIds) {
       const eid = this.ecs.entityFor(id)
-      if (eid !== undefined) live.add(eid)
-    }
-    for (const eid of live) {
+      if (eid === undefined) continue
+      live.add(eid)
       if (this.meshes.has(eid)) continue
       const mesh = new THREE.Mesh(this.geo, this.matFor(this.ecs.Tint.value[eid]))
+      mesh.name = id // the box's net id, for the inspector
       mesh.castShadow = true
       mesh.receiveShadow = true
       mesh.userData.eid = eid

@@ -61,6 +61,7 @@ export class PropLayer {
         mat.transparent = true
         mat.opacity = 0
         mesh = new THREE.Mesh(this.geoFor(p.kind, p.size), mat)
+        mesh.name = id // the prop's net id, for the inspector
         mesh.position.set(p.pos.x, p.pos.y, p.pos.z)
         if (!p.unlit) { mesh.castShadow = true; mesh.receiveShadow = true }
         mesh.userData.netId = id

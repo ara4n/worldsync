@@ -59,7 +59,7 @@ export class UI {
         <button id="script">load world script (.js)</button>
         <input id="scriptfile" type="file" accept=".js,text/javascript" style="display:none">
         <button id="editscript">edit world script</button>
-        <button id="inspect">inspect glTF scene</button>
+        <button id="inspect">inspect scene</button>
       </div>
       <div id="status"></div>
       <div id="log"></div>

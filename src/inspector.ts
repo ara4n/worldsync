@@ -1,9 +1,12 @@
 import * as THREE from 'three'
 
 /**
- * glTF scene inspector (ported from thirdroom's hierarchy/properties
- * editor panels, minus React): a docked overlay with the loaded GLB's
- * node tree on top and the selected node's properties below. Transform,
+ * Scene inspector (ported from thirdroom's hierarchy/properties editor
+ * panels, minus React): a docked overlay with the WHOLE rendered scene's
+ * node tree on top - the glTF world plus every live entity: physics
+ * boxes, props, cosmetic lines and screens, lights, ground - and the
+ * selected node's properties below. The tree tracks the scene live, so
+ * spawns and despawns appear as they happen. Transform,
  * visibility, name, material and light fields are editable - as LOCAL
  * PREVIEWS only: nothing is replicated to other peers, and the physics
  * colliders were baked from the GLB at parse time, so edits move pixels,
@@ -14,9 +17,11 @@ import * as THREE from 'three'
  */
 
 export interface InspectorHooks {
-  /** the active glTF scene root, or null when no scene is loaded */
+  /** the whole rendered scene: glTF world, boxes, props, lines, lights */
   root(): THREE.Object3D | null
-  /** its mxc url, for the header */
+  /** the active glTF scene root within it, tagged in the tree */
+  gltfRoot(): THREE.Object3D | null
+  /** the glTF's mxc url, for the header */
   url(): string | null
   /** highlight these objects with the view's outline pass ([] clears) */
   setOutline(objects: THREE.Object3D[]): void
@@ -40,7 +45,7 @@ export class SceneInspector {
     this.el.style.display = 'none'
     this.el.innerHTML = `
       <div class="bar">
-        <b>glTF inspector</b> <span class="state" id="insphead"></span>
+        <b>scene inspector</b> <span class="state" id="insphead"></span>
         <span class="spacer"></span>
         <button id="inspclose" title="close (esc)">×</button>
       </div>
@@ -78,23 +83,32 @@ export class SceneInspector {
 
   toggle() { this.isOpen ? this.close() : this.open() }
 
+  // Entities spawn and despawn while the panel is open, so the tree
+  // refreshes whenever the graph's SHAPE changes (a cheap traversal
+  // signature); expansion state survives, keyed by object identity.
+  private shownSig = ''
+
   private refresh() {
     const root = this.hooks.root()
-    if (root === this.shownRoot) return
-    this.shownRoot = root
-    this.select(null)
-    if (!root) {
-      this.headEl.textContent = ''
-      this.treeEl.innerHTML = '<div class="hint">no glTF scene loaded (use "load glTF scene")</div>'
-      return
-    }
+    if (!root) return
     let nodes = 0, tris = 0
+    const names: string[] = []
     root.traverse(o => {
       nodes++
+      names.push(o.name)
       const g = (o as THREE.Mesh).isMesh ? (o as THREE.Mesh).geometry : null
       if (g) tris += (g.getIndex()?.count ?? g.getAttribute('position')?.count ?? 0) / 3
     })
-    this.headEl.textContent = `${this.hooks.url() ?? ''} · ${nodes} nodes · ${Math.round(tris)} tris`
+    const sig = names.join('|')
+    if (root === this.shownRoot && sig === this.shownSig) return
+    this.shownRoot = root
+    this.shownSig = sig
+    // a despawned selection has nothing left to outline or edit
+    let p: THREE.Object3D | null = this.selected
+    while (p && p !== root) p = p.parent
+    if (this.selected && p !== root) { this.select(null) }
+    const url = this.hooks.url()
+    this.headEl.textContent = `${nodes} nodes · ${Math.round(tris)} tris${url ? ` · ${url}` : ''}`
     this.expanded.add(root)
     this.renderTree()
   }
@@ -112,8 +126,9 @@ export class SceneInspector {
     const kids = obj.children.length > 0
     const open = this.expanded.has(obj)
     const label = obj.name || `(${obj.type})`
+    const t = obj === this.hooks.gltfRoot() ? 'glTF scene' : tag(obj)
     row.innerHTML = `<span class="twist">${kids ? (open ? '▾' : '▸') : '·'}</span>`
-      + `<span class="name">${esc(label)}</span> <span class="type">${esc(tag(obj))}</span>`
+      + `<span class="name">${esc(label)}</span> <span class="type">${esc(t)}</span>`
     ;(row.querySelector('.twist') as HTMLElement).onclick = e => {
       e.stopPropagation()
       if (!kids) return
@@ -256,7 +271,8 @@ export class SceneInspector {
 const RAD2DEG = 180 / Math.PI
 
 const tag = (o: THREE.Object3D) =>
-  (o as THREE.Mesh).isMesh ? ((o as THREE.InstancedMesh).isInstancedMesh ? 'instanced' : 'mesh')
+  o.type === 'Line2' ? 'line'
+  : (o as THREE.Mesh).isMesh ? ((o as THREE.InstancedMesh).isInstancedMesh ? 'instanced' : 'mesh')
   : (o as THREE.Light).isLight ? 'light'
   : (o as THREE.Camera).isCamera ? 'camera'
   : (o as THREE.Bone).isBone ? 'bone'

@@ -130,7 +130,8 @@ async function main() {
     onInspectScene: async () => {
       const { SceneInspector } = await import('./inspector')
       inspector ??= new SceneInspector(document.body, {
-        root: () => sim.sceneUrl ? cachedScene(sim.sceneUrl)?.object ?? null : null,
+        root: () => view.scene,
+        gltfRoot: () => sim.sceneUrl ? cachedScene(sim.sceneUrl)?.object ?? null : null,
         url: () => sim.sceneUrl,
         setOutline: objs => view.setOutline(objs),
       })
