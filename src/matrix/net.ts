@@ -152,6 +152,17 @@ export class MatrixNet {
     await this.transport.connect()
     this.reconcile()
 
+    // A missing own-membership echo is a capability problem, not a race:
+    // publishing succeeded, so if it never comes back the host is not
+    // delivering m.call.member state to us. Say so instead of hanging.
+    setTimeout(() => {
+      if (!this.joined) {
+        this.onLog(`own membership echo still missing after 5s (${this.rtc.memberships.length} memberships `
+          + 'visible): the host is probably not granting the m.call.member receive capability - '
+          + 'check the widget permission prompt / re-add the widget and approve everything')
+      }
+    }, 5000)
+
     // Ghost-membership fallback: a crashed session leaves its m.call.member
     // behind (the delayed leave event may never fire), and a joiner would
     // wait forever to calibrate against a senior that cannot answer. Give
