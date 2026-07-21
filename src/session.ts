@@ -127,10 +127,22 @@ export class Session {
   ready() { return this.id !== '' && this.started }
   nextNetId() { return `${this.id}-${this.spawnCount++}` }
 
+  /** Has the late-join boot settled? Scripts must not start (and e.g.
+   * seed a board) while the world they would read is still in flight:
+   * a rejoining peer that seeds before its boot seam folds plants a
+   * second board on everyone. */
+  worldSettled() {
+    return !this.bootAsked || this.bootHealed || this.clock() - this.startedAtMs > 5000
+  }
+  private bootHealed = false
+  private startedAtMs = 0
+  private calibratedFrom: string | null = null
+
   /** calibration is done: pin the sim to the grid and open for business */
   private start() {
     if (this.started) return
     this.started = true
+    this.startedAtMs = this.clock()
     this.sim.startAt(Math.ceil(this.tickClock.tickTimeAt(this.clock())))
     this.startTick = this.sim.tick
     this.nextHashTick = this.sim.tick + HASH_EVERY_TICKS
@@ -148,18 +160,23 @@ export class Session {
     return min
   }
 
-  // Late joiners pull a state snapshot from the first senior peer, but only
-  // once the tick grid is calibrated: boot ops carry tick stamps that mean
-  // nothing to an unstarted sim.
+  // Late joiners pull a state snapshot, but only once the tick grid is
+  // calibrated: boot ops carry tick stamps that mean nothing to an
+  // unstarted sim. The dump comes from the senior-most peer - the most
+  // settled world; a fresh joiner's dump can race in-flight ops and its
+  // seam then drops them everywhere - and only when NO senior exists
+  // (a senior rejoining a room of juniors) from the peer whose grid we
+  // adopted: it has the running world, whatever its join order.
   private maybeBootReq() {
     if (!this.started || this.bootAsked) return
-    let senior: SessionPeer | null = null
+    let target: SessionPeer | null = null
     for (const p of this.peers.values()) {
-      if (p.order < this.order && (senior === null || p.order < senior.order)) senior = p
+      if (p.order < this.order && (target === null || p.order < target.order)) target = p
     }
-    if (senior) {
+    if (!target && this.calibratedFrom) target = this.peers.get(this.calibratedFrom) ?? null
+    if (target) {
       this.bootAsked = true
-      this.sendRaw(senior.id, { kind: 'boot-req' })
+      this.sendRaw(target.id, { kind: 'boot-req' })
     }
   }
 
@@ -285,18 +302,21 @@ export class Session {
         const best = peer.samples.reduce((a, b) => (b.rtt < a.rtt ? b : a))
         peer.rtt = best.rtt
         peer.offset = best.offset
-        // Tick-clock discipline against the responder's grid reading. A
-        // senior peer's first usable pong calibrates us outright; after
-        // that, only the current root steers, and only by bounded slew, so
-        // one bad sample cannot yank the grid. Phase error is harmless for
-        // convergence (ops fold at their stamped tick everywhere); this
-        // just keeps "now" aligned so folds stay shallow.
-        if (msg.tt >= 0 && peer.order < this.order) {
+        // Tick-clock discipline against the responder's grid reading. Any
+        // calibrated peer's first usable pong calibrates us outright - a
+        // senior rejoining a running room must adopt the world that exists,
+        // not wait for (or out-rank) the juniors already playing on it.
+        // After that, only the current root steers, and only by bounded
+        // slew, so one bad sample cannot yank the grid. Phase error is
+        // harmless for convergence (ops fold at their stamped tick
+        // everywhere); this just keeps "now" aligned so folds stay shallow.
+        if (msg.tt >= 0) {
           const est = msg.tt + (t3 - msg.t0) / 2 / TICK_MS
           if (!this.tickClock.calibrated) {
+            this.calibratedFrom = fromId
             this.tickClock.set(t3, est)
             this.start()
-          } else if (peer.order === this.rootOrder()) {
+          } else if (peer.order < this.order && peer.order === this.rootOrder()) {
             const delta = est - this.tickClock.tickTimeAt(t3)
             if (Math.abs(delta) > HARD_RESYNC_TICKS) {
               this.onLog(`tick clock ${delta.toFixed(1)} ticks off root; hard resync`)
@@ -310,6 +330,7 @@ export class Session {
       }
       case 'i': {
         if (peer.excluded) return
+        if (msg.i.type === 'boot') this.bootHealed = true // our seam answer is landing
         if (!this.started) { this.pendingOps.push({ from: fromId, i: msg.i }); return }
         if (!this.admissible(peer, msg.i.tick)) return
         const k = this.sim.insert(msg.i)

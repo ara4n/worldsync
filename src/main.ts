@@ -441,7 +441,10 @@ async function main() {
         .catch(e => { scriptFetches.delete(url); log(`script fetch failed: ${e}`) })
       return
     }
-    if (!script && !scriptStarting) {
+    // A boot seam still in flight means the world the script would read
+    // (and might seed!) is about to be replaced: hold the start until it
+    // lands, or a rejoining primary plants a second board on everyone.
+    if (!script && !scriptStarting && session.worldSettled()) {
       scriptStarting = true
       import('./websg')
         .then(({ WorldScript }) => WorldScript.create(src, scriptHost))
