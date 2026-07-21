@@ -122,6 +122,7 @@ export class MatrixNet {
     this.transport = p.mockTransport
       ? new BroadcastTransport(p.roomId, this.id)
       : new LiveKitTransport(client, serviceUrl!, p.roomId, p.userId, p.deviceId)
+    this.transport.onLog = l => this.onLog(l)
     this.transport.onData = (from, data) => {
       try { this.onMessage(from, JSON.parse(data)) } catch { /* not ours */ }
     }

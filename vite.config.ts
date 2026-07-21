@@ -70,8 +70,9 @@ export default defineConfig({
     // getUserMedia want a secure origin). Recreate with:
     //   mkcert -cert-file certs/pegasus.local.pem \
     //     -key-file certs/pegasus.local-key.pem pegasus.local localhost 127.0.0.1 ::1
-    // certs/ is gitignored; without it the server stays plain http.
-    https: fs.existsSync('certs/pegasus.local-key.pem') ? {
+    // certs/ is gitignored; without it the server stays plain http, and
+    // WORLDSYNC_HTTP=1 forces http regardless (the e2e scripts use it).
+    https: !process.env.WORLDSYNC_HTTP && fs.existsSync('certs/pegasus.local-key.pem') ? {
       key: fs.readFileSync('certs/pegasus.local-key.pem'),
       cert: fs.readFileSync('certs/pegasus.local.pem'),
     } : undefined,
