@@ -107,8 +107,8 @@ async function main() {
     // event; the state echo (ours and every other peer's watch) feeds the
     // script driver below, which runs it only on the current root peer.
     onScriptFile: file => uploadScript(file).catch(() => {}),
-    // The monaco editor is a heavy overlay most peers never open; it
-    // lives in its own dynamically-imported chunk.
+    // The monaco editor and glTF inspector are heavy overlays most peers
+    // never open; each lives in its own dynamically-imported chunk.
     onEditScript: async () => {
       const { ScriptEditor } = await import('./editor')
       editor ??= new ScriptEditor(document.body, room, {
@@ -127,8 +127,18 @@ async function main() {
       })
       editor.toggle()
     },
+    onInspectScene: async () => {
+      const { SceneInspector } = await import('./inspector')
+      inspector ??= new SceneInspector(document.body, {
+        root: () => sim.sceneUrl ? cachedScene(sim.sceneUrl)?.object ?? null : null,
+        url: () => sim.sceneUrl,
+        overlay: view.scene,
+      })
+      inspector.toggle()
+    },
   })
   let editor: import('./editor').ScriptEditor | null = null
+  let inspector: import('./inspector').SceneInspector | null = null
   // Shared by the file picker and the editor's Save & Run; throws so the
   // editor can show the failure, after it has been logged here.
   const uploadScript = async (file: File) => {

@@ -30,25 +30,37 @@
   #panel .hint { color: #8b949e; }
   #panel #status { margin-top: 8px; }
   #panel #log { margin-top: 8px; border-top: 1px solid #30363d; padding-top: 6px; color: #8b949e; }
-  /* script editor: overlay docked left, out of the stats panel's way,
-     sharing the panel's dark chrome */
-  #editor {
+  /* script editor and glTF inspector: overlays docked left, out of the
+     stats panel's way, sharing the panel's dark chrome */
+  #editor, #inspector {
     position: fixed; top: 10px; left: 10px; bottom: 10px; z-index: 10;
     display: flex; flex-direction: column;
     background: rgba(13, 17, 23, 0.96); border: 1px solid #30363d; border-radius: 8px;
     color: #c9d1d9; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
     box-sizing: border-box; overflow: hidden;
-    width: min(620px, calc(100vw - 340px));
   }
-  #editor .bar {
+  #editor { width: min(620px, calc(100vw - 340px)); }
+  #inspector { width: min(360px, calc(100vw - 340px)); }
+  #editor .bar, #inspector .bar {
     display: flex; align-items: center; gap: 6px; flex: none;
     padding: 8px 10px; border-bottom: 1px solid #30363d; color: #e6edf3;
   }
-  #editor .bar .spacer { flex: 1; }
-  #editor .bar .state {
+  #editor .bar .spacer, #inspector .bar .spacer { flex: 1; }
+  #editor .bar .state, #inspector .bar .state {
     color: #8b949e; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   #editor .code { flex: 1; min-height: 0; }
+  #inspector .tree { flex: 1; min-height: 0; overflow: auto; padding: 6px 8px; user-select: none; }
+  #inspector .props { flex: none; max-height: 45%; overflow: auto; border-top: 1px solid #30363d; padding: 6px 10px; }
+  #inspector .row { cursor: pointer; white-space: nowrap; border-radius: 4px; padding-right: 6px; }
+  #inspector .row:hover { background: #161b22; }
+  #inspector .row.sel { background: #1f6feb33; }
+  #inspector .row .twist { display: inline-block; width: 14px; color: #8b949e; }
+  #inspector .row .type { color: #8b949e; }
+  #inspector .props table { border-collapse: collapse; width: 100%; }
+  #inspector .props th { text-align: left; color: #8b949e; font-weight: normal; padding-right: 8px; vertical-align: top; white-space: nowrap; }
+  #inspector .props td { word-break: break-all; }
+  #inspector .hint { color: #8b949e; }
   #help {
     position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); white-space: nowrap;
     color: #8b949e; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
