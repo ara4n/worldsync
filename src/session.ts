@@ -240,6 +240,7 @@ export class Session {
     pos: Vec3; vel?: Vec3; rot?: Quat; angvel?: Vec3
     grab?: { holder: string; order: number; target: Vec3 }; color?: number
     shape?: string; size?: number; unlit?: boolean; force?: boolean; prop?: PropInfo
+    yaw?: number; dims?: Vec3; solid?: boolean
   }, tickOverride?: number, from?: number) {
     const i: Interaction = {
       // Stamped with the tick about to be simulated, so our own sim applies
@@ -251,6 +252,8 @@ export class Session {
       from,
       color: data.color,
       shape: data.shape, size: data.size, unlit: data.unlit, force: data.force, prop: data.prop,
+      yaw: data.yaw !== undefined ? this.z(data.yaw) : undefined,
+      dims: data.dims && this.zv(data.dims), solid: data.solid,
     }
     this.sim.insert(i)
     this.sendRaw(null, { kind: 'i', i })

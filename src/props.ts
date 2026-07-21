@@ -49,6 +49,9 @@ export class PropLayer {
   /** Reconcile against the sim's prop table; call once per frame. */
   sync(props: Map<string, Prop>, now: number) {
     for (const [id, p] of props) {
+      // solid colliders are invisible: whatever they support (screens)
+      // draws its own visuals, and no mesh also means no picking
+      if (p.kind === 'collider') continue
       let mesh = this.meshes.get(id)
       if (!mesh) {
         const mat = p.unlit

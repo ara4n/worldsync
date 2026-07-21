@@ -36,7 +36,13 @@ interface Grab { holder: string; order: number; target: Vec3; since: number }
  * plain folded state, mutated only by ops, so it participates in rollback
  * and the cross-peer hash like body poses do. `claim` is the coordination
  * primitive: set by the first 'claim' op to arrive in timeline order. */
-export interface Prop { kind: string; pos: Vec3; color: number; size: number; unlit: boolean; claim: string | null }
+export interface Prop {
+  kind: string; pos: Vec3; color: number; size: number; unlit: boolean; claim: string | null
+  yaw?: number; dims?: Vec3; solid?: boolean
+  /** solid only: the fixed body's handle. Valid across snapshot restores
+   * (rapier serialization preserves handles); cleared with the world. */
+  handle?: number
+}
 /** Baked triangle soup for a glTF scene's fixed collider; every peer parses
  * it from the same GLB bytes, so the arrays are bit-identical everywhere. */
 export interface SceneGeometry { vertices: Float32Array; indices: Uint32Array }
@@ -98,6 +104,11 @@ function hashCtx(ctx: Ctx): number {
     for (let i = 0; i < 32; i++) h = Math.imul(h ^ hashBytes[i], 0x01000193)
     h = Math.imul(h ^ p.color, 0x01000193)
     h = Math.imul(h ^ (p.unlit ? 1 : 0), 0x01000193)
+    if (p.solid && p.dims) {
+      // a solid's collider geometry shapes box physics: hash it too
+      hashF64[0] = p.yaw ?? 0; hashF64[1] = p.dims.x; hashF64[2] = p.dims.y; hashF64[3] = p.dims.z
+      for (let i = 0; i < 32; i++) h = Math.imul(h ^ hashBytes[i], 0x01000193)
+    }
     str(p.claim ?? '')
   }
   return h >>> 0
@@ -787,6 +798,19 @@ export class Sim {
     return { equal: s1.length === s2.length && firstDiff === -1, firstDiff, len1: s1.length, len2: s2.length }
   }
 
+  /** A solid prop's fixed cuboid body. Created only inside op folds, so
+   * creation order (and thus handle assignment) is timeline order on every
+   * peer; the handle rides the Prop so despawn/move/dump can find the body
+   * again after any snapshot restore. */
+  private addSolidBody(ctx: Ctx, p: Prop) {
+    const half = (p.yaw ?? 0) / 2
+    const body = ctx.world.createRigidBody(RAPIER.RigidBodyDesc.fixed()
+      .setTranslation(p.pos.x, p.pos.y, p.pos.z)
+      .setRotation({ x: 0, y: Math.sin(half), z: 0, w: Math.cos(half) }))
+    ctx.world.createCollider(RAPIER.ColliderDesc.cuboid(p.dims!.x / 2, p.dims!.y / 2, p.dims!.z / 2), body)
+    p.handle = body.handle
+  }
+
   private applyTo(ctx: Ctx, i: Interaction, tick: number) {
     switch (i.type) {
       case 'spawn': {
@@ -848,14 +872,25 @@ export class Sim {
       }
       case 'prop': {
         if (ctx.props.has(i.netId) || ctx.bodies.has(i.netId)) return
-        ctx.props.set(i.netId, {
+        const p: Prop = {
           kind: i.shape ?? 'sphere', pos: { ...i.pos },
           color: i.color ?? 0xffffff, size: i.size ?? 0.5, unlit: !!i.unlit, claim: null,
-        })
+          yaw: i.yaw, dims: i.dims && { ...i.dims }, solid: !!i.solid,
+        }
+        if (p.solid && p.dims) this.addSolidBody(ctx, p)
+        ctx.props.set(i.netId, p)
         return
       }
       case 'despawn': {
-        if (ctx.props.delete(i.netId)) return
+        const sp = ctx.props.get(i.netId)
+        if (sp) {
+          if (sp.handle !== undefined) {
+            const b = ctx.world.getRigidBody(sp.handle)
+            if (b) ctx.world.removeRigidBody(b)
+          }
+          ctx.props.delete(i.netId)
+          return
+        }
         const h = ctx.bodies.get(i.netId)
         if (h === undefined) return
         const b = ctx.world.getRigidBody(h)
@@ -890,6 +925,7 @@ export class Sim {
         const p = ctx.props.get(i.netId)
         if (!p) return
         p.pos = { ...i.pos }
+        if (p.handle !== undefined) ctx.world.getRigidBody(p.handle)?.setTranslation(p.pos, true)
         return
       }
       case 'paint': {
@@ -906,10 +942,15 @@ export class Sim {
         // Prop entities cross the seam whole (claim included): recreate in
         // dump order, exactly like bodies.
         if (i.prop) {
-          ctx.props.set(i.netId, {
+          const p: Prop = {
             kind: i.prop.kind, pos: { ...i.pos },
             color: i.prop.color, size: i.prop.size, unlit: i.prop.unlit, claim: i.prop.claim,
-          })
+            yaw: i.prop.yaw, dims: i.prop.dims && { ...i.prop.dims }, solid: !!i.prop.solid,
+          }
+          // the seam rebuilt the world from empty: the fixed body must be
+          // recreated with the prop, in dump order like everything else
+          if (p.solid && p.dims) this.addSolidBody(ctx, p)
+          ctx.props.set(i.netId, p)
           return
         }
         // The grab table crosses the seam too: a body mid-drag at boot time
@@ -1008,7 +1049,10 @@ export class Sim {
         out.push({
           netId, color: p.color, pos: { ...p.pos },
           rot: { x: 0, y: 0, z: 0, w: 1 }, linvel: { ...ZERO }, angvel: { ...ZERO },
-          prop: { kind: p.kind, color: p.color, size: p.size, unlit: p.unlit, claim: p.claim },
+          prop: {
+            kind: p.kind, color: p.color, size: p.size, unlit: p.unlit, claim: p.claim,
+            yaw: p.yaw, dims: p.dims && { ...p.dims }, solid: p.solid,
+          },
         })
       }
     }
