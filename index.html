@@ -60,6 +60,19 @@
   #inspector .props table { border-collapse: collapse; width: 100%; }
   #inspector .props th { text-align: left; color: #8b949e; font-weight: normal; padding-right: 8px; vertical-align: top; white-space: nowrap; }
   #inspector .props td { word-break: break-all; }
+  #inspector .props input[type=number] {
+    width: 52px; background: #161b22; color: #c9d1d9;
+    border: 1px solid #30363d; border-radius: 4px; margin: 1px 2px 1px 0;
+  }
+  #inspector .props input[type=text].wide {
+    width: 95%; background: #161b22; color: #c9d1d9;
+    border: 1px solid #30363d; border-radius: 4px;
+  }
+  #inspector .props input[type=color] {
+    width: 40px; height: 18px; padding: 0; border: 1px solid #30363d; border-radius: 4px;
+    background: #161b22; vertical-align: middle;
+  }
+  #inspector .props .hint { margin-top: 6px; }
   #inspector .hint { color: #8b949e; }
   #help {
     position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); white-space: nowrap;

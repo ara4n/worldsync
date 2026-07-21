@@ -132,7 +132,7 @@ async function main() {
       inspector ??= new SceneInspector(document.body, {
         root: () => sim.sceneUrl ? cachedScene(sim.sceneUrl)?.object ?? null : null,
         url: () => sim.sceneUrl,
-        overlay: view.scene,
+        setOutline: objs => view.setOutline(objs),
       })
       inspector.toggle()
     },

@@ -2,11 +2,14 @@ import * as THREE from 'three'
 
 /**
  * glTF scene inspector (ported from thirdroom's hierarchy/properties
- * editor panels, minus React and minus editing): a docked overlay with
- * the loaded GLB's node tree on top and the selected node's properties
- * below. Read-only on purpose - the scene graph feeds the deterministic
- * collider bake, so local mutations would desync peers. Selection drops
- * a BoxHelper into the view so the node lights up in 3D.
+ * editor panels, minus React): a docked overlay with the loaded GLB's
+ * node tree on top and the selected node's properties below. Transform,
+ * visibility, name, material and light fields are editable - as LOCAL
+ * PREVIEWS only: nothing is replicated to other peers, and the physics
+ * colliders were baked from the GLB at parse time, so edits move pixels,
+ * not the world. (Scripts reading node positions see the edits, since
+ * they read the same graph.) Selection lights the node up in 3D through
+ * the view's silhouette outline pass, like thirdroom's.
  * Dynamically imported on first open, like the script editor.
  */
 
@@ -15,8 +18,8 @@ export interface InspectorHooks {
   root(): THREE.Object3D | null
   /** its mxc url, for the header */
   url(): string | null
-  /** where the selection highlight lives */
-  overlay: THREE.Scene
+  /** highlight these objects with the view's outline pass ([] clears) */
+  setOutline(objects: THREE.Object3D[]): void
 }
 
 export class SceneInspector {
@@ -29,7 +32,6 @@ export class SceneInspector {
   private shownRoot: THREE.Object3D | null | undefined = undefined
   private selected: THREE.Object3D | null = null
   private expanded = new WeakSet<THREE.Object3D>()
-  private helper: THREE.BoxHelper | null = null
   private timer: ReturnType<typeof setInterval> | null = null
 
   constructor(parent: HTMLElement, private hooks: InspectorHooks) {
@@ -51,7 +53,10 @@ export class SceneInspector {
     ;(this.el.querySelector('#inspclose') as HTMLButtonElement).onclick = () => this.close()
     this.el.tabIndex = -1
     this.el.addEventListener('keydown', e => {
-      if (e.key === 'Escape') { e.stopPropagation(); this.close() }
+      if (e.key === 'Escape' && (e.target as HTMLElement).tagName !== 'INPUT') {
+        e.stopPropagation()
+        this.close()
+      }
     })
   }
 
@@ -123,67 +128,132 @@ export class SceneInspector {
 
   private select(obj: THREE.Object3D | null) {
     this.selected = obj
-    if (this.helper) {
-      this.hooks.overlay.remove(this.helper)
-      this.helper.dispose()
-      this.helper = null
-    }
-    if (obj) {
-      this.helper = new THREE.BoxHelper(obj, 0x58a6ff)
-      this.hooks.overlay.add(this.helper)
-    }
+    this.hooks.setOutline(obj ? [obj] : [])
     if (this.isOpen) this.renderTree()
     this.renderProps()
   }
 
   private renderProps() {
     const o = this.selected
+    this.propsEl.innerHTML = ''
     if (!o) { this.propsEl.innerHTML = '<div class="hint">select a node</div>'; return }
-    const v3 = (v: THREE.Vector3) => `${f(v.x)}, ${f(v.y)}, ${f(v.z)}`
-    const rows: [string, string][] = [
-      ['name', o.name || '(unnamed)'],
-      ['type', o.type],
-      ['visible', String(o.visible)],
-      ['position', v3(o.position)],
-      ['rotation', `${d(o.rotation.x)}°, ${d(o.rotation.y)}°, ${d(o.rotation.z)}°`],
-      ['scale', v3(o.scale)],
-      ['world pos', v3(o.getWorldPosition(new THREE.Vector3()))],
-    ]
+
+    const table = document.createElement('table')
+    const row = (label: string, ...cells: (HTMLElement | string)[]) => {
+      const tr = document.createElement('tr')
+      const th = document.createElement('th')
+      th.textContent = label
+      const td = document.createElement('td')
+      for (const c of cells) c instanceof HTMLElement ? td.appendChild(c) : td.append(c)
+      tr.append(th, td)
+      table.appendChild(tr)
+      return td
+    }
+    // Live read-only world position: edits below poke refreshWorld, so the
+    // derived value tracks without rebuilding the form under the cursor.
+    let worldTd: HTMLElement
+    const refreshWorld = () => {
+      const v = o.getWorldPosition(new THREE.Vector3())
+      worldTd.textContent = `${f(v.x)}, ${f(v.y)}, ${f(v.z)}`
+    }
+
+    const num = (get: () => number, set: (v: number) => void, step = 0.1, min?: number, max?: number) => {
+      const inp = document.createElement('input')
+      inp.type = 'number'
+      inp.step = String(step)
+      if (min !== undefined) inp.min = String(min)
+      if (max !== undefined) inp.max = String(max)
+      inp.value = f(get())
+      inp.oninput = () => {
+        const v = Number(inp.value)
+        if (!Number.isFinite(v)) return
+        set(v)
+        refreshWorld()
+      }
+      return inp
+    }
+    const vec3 = (label: string, get: () => THREE.Vector3, scale = 1) =>
+      row(label,
+        num(() => get().x * scale, v => { get().x = v / scale }),
+        num(() => get().y * scale, v => { get().y = v / scale }),
+        num(() => get().z * scale, v => { get().z = v / scale }))
+    const check = (get: () => boolean, set: (v: boolean) => void) => {
+      const inp = document.createElement('input')
+      inp.type = 'checkbox'
+      inp.checked = get()
+      inp.onchange = () => set(inp.checked)
+      return inp
+    }
+    const color = (get: () => THREE.Color, set: (hex: string) => void) => {
+      const inp = document.createElement('input')
+      inp.type = 'color'
+      inp.value = `#${get().getHexString()}`
+      inp.oninput = () => set(inp.value)
+      return inp
+    }
+    const text = (get: () => string, set: (v: string) => void) => {
+      const inp = document.createElement('input')
+      inp.type = 'text'
+      inp.className = 'wide'
+      inp.value = get()
+      inp.onchange = () => { set(inp.value); this.renderTree() } // tree shows names
+      return inp
+    }
+
+    row('name', text(() => o.name, v => { o.name = v }))
+    row('type', o.type)
+    row('visible', check(() => o.visible, v => { o.visible = v }))
+    vec3('position', () => o.position)
+    // rotation edits in degrees; Euler exposes .x/.y/.z, so vec3 fits
+    vec3('rotation °', () => o.rotation as unknown as THREE.Vector3, RAD2DEG)
+    vec3('scale', () => o.scale)
+    worldTd = row('world pos', '')
+    refreshWorld()
+
     const mesh = o as THREE.Mesh
     if (mesh.isMesh) {
       const g = mesh.geometry
       const pos = g.getAttribute('position')
-      rows.push(['vertices', String(pos?.count ?? 0)])
-      rows.push(['triangles', String(Math.round((g.getIndex()?.count ?? pos?.count ?? 0) / 3))])
-      rows.push(['attributes', Object.keys(g.attributes).join(', ')])
+      row('vertices', String(pos?.count ?? 0))
+      row('triangles', String(Math.round((g.getIndex()?.count ?? pos?.count ?? 0) / 3)))
+      row('attributes', Object.keys(g.attributes).join(', '))
       const inst = mesh as THREE.InstancedMesh
-      if (inst.isInstancedMesh) rows.push(['instances', String(inst.count)])
+      if (inst.isInstancedMesh) row('instances', String(inst.count))
       for (const m of Array.isArray(mesh.material) ? mesh.material : [mesh.material]) {
-        rows.push(['material', `${m.name || '(unnamed)'} · ${m.type}`])
+        row('material', `${m.name || '(unnamed)'} · ${m.type}`)
         const std = m as THREE.MeshStandardMaterial
-        if (std.color) rows.push(['color', `#${std.color.getHexString()}`])
+        if (std.color) row('color', color(() => std.color, hex => std.color.set(hex)))
         if (std.isMeshStandardMaterial) {
-          rows.push(['metal/rough', `${f(std.metalness)} / ${f(std.roughness)}`])
+          row('metalness', num(() => std.metalness, v => { std.metalness = v }, 0.05, 0, 1))
+          row('roughness', num(() => std.roughness, v => { std.roughness = v }, 0.05, 0, 1))
         }
         const maps = (['map', 'normalMap', 'metalnessMap', 'roughnessMap', 'aoMap', 'emissiveMap'] as const)
           .filter(k => std[k])
-        if (maps.length) rows.push(['textures', maps.join(', ')])
-        if (m.transparent) rows.push(['opacity', f(m.opacity)])
-        rows.push(['side', m.side === THREE.DoubleSide ? 'double' : m.side === THREE.BackSide ? 'back' : 'front'])
+        if (maps.length) row('textures', maps.join(', '))
+        row('opacity', num(() => m.opacity, v => {
+          m.opacity = v
+          m.transparent = v < 1 // opaque materials ignore opacity otherwise
+          m.needsUpdate = true
+        }, 0.05, 0, 1))
+        row('side', m.side === THREE.DoubleSide ? 'double' : m.side === THREE.BackSide ? 'back' : 'front')
       }
     }
     const light = o as THREE.Light
     if (light.isLight) {
-      rows.push(['light color', `#${light.color.getHexString()}`])
-      rows.push(['intensity', f(light.intensity)])
+      row('light color', color(() => light.color, hex => light.color.set(hex)))
+      row('intensity', num(() => light.intensity, v => { light.intensity = v }, 0.1, 0))
     }
-    if (Object.keys(o.userData).length) {
-      rows.push(['userData', JSON.stringify(o.userData)])
-    }
-    this.propsEl.innerHTML = `<table>${rows.map(([k, v]) =>
-      `<tr><th>${esc(k)}</th><td>${esc(v)}</td></tr>`).join('')}</table>`
+    if (Object.keys(o.userData).length) row('userData', JSON.stringify(o.userData))
+
+    this.propsEl.appendChild(table)
+    const hint = document.createElement('div')
+    hint.className = 'hint'
+    hint.textContent = 'edits are local previews: not replicated, colliders unchanged'
+    this.propsEl.appendChild(hint)
   }
 }
+
+const RAD2DEG = 180 / Math.PI
 
 const tag = (o: THREE.Object3D) =>
   (o as THREE.Mesh).isMesh ? ((o as THREE.InstancedMesh).isInstancedMesh ? 'instanced' : 'mesh')
@@ -193,7 +263,6 @@ const tag = (o: THREE.Object3D) =>
   : o.children.length ? 'group' : ''
 
 const f = (n: number) => (Math.round(n * 1000) / 1000).toString()
-const d = (rad: number) => Math.round(THREE.MathUtils.radToDeg(rad) * 10) / 10
 
 const esc = (s: string) =>
   s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!)

@@ -4,6 +4,10 @@ import { CSM } from 'three/addons/csm/CSM.js'
 import { Line2 } from 'three/addons/lines/Line2.js'
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js'
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
+import { OutlinePass } from 'three/addons/postprocessing/OutlinePass.js'
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import type { EcsStore } from './ecs'
 import { PropLayer } from './props'
 
@@ -153,10 +157,35 @@ export class View {
       this.camera.aspect = innerWidth / innerHeight
       this.camera.updateProjectionMatrix()
       this.renderer.setSize(innerWidth, innerHeight)
+      this.composer?.setSize(innerWidth, innerHeight)
       this.csm.updateFrustums()
       // fat-line widths are screen-space: their materials carry the viewport
       for (const l of this.lines.values()) l.obj.material.resolution.set(innerWidth, innerHeight)
     })
+  }
+
+  // Selection outline (the inspector's): a post silhouette like thirdroom's,
+  // via EffectComposer + OutlinePass. The composer only exists after the
+  // first selection and only renders while one is active, so the everyday
+  // frame keeps the plain single-pass path.
+  private composer: EffectComposer | null = null
+  private outlinePass: OutlinePass | null = null
+  setOutline(objects: THREE.Object3D[]) {
+    if (objects.length && !this.composer) {
+      this.composer = new EffectComposer(this.renderer)
+      this.composer.setPixelRatio(Math.min(devicePixelRatio, 2))
+      this.composer.addPass(new RenderPass(this.scene, this.camera))
+      this.outlinePass = new OutlinePass(new THREE.Vector2(innerWidth, innerHeight), this.scene, this.camera)
+      this.outlinePass.edgeStrength = 4
+      this.outlinePass.edgeThickness = 1
+      this.outlinePass.visibleEdgeColor.set(0x58a6ff)
+      this.outlinePass.hiddenEdgeColor.set(0x1f4e8c) // dimmer through walls
+      this.composer.addPass(this.outlinePass)
+      // tone mapping + sRGB happen here when composing (render targets get
+      // neither), matching the direct path's on-screen output
+      this.composer.addPass(new OutputPass())
+    }
+    if (this.outlinePass) this.outlinePass.selectedObjects = objects
   }
 
   private sceneRoot: THREE.Object3D | null = null
@@ -444,6 +473,7 @@ export class View {
     this.props.update(now)
     this.controls.update()
     this.csm.update() // cascade frusta track the camera; must follow controls
-    this.renderer.render(this.scene, this.camera)
+    if (this.outlinePass?.selectedObjects.length) this.composer!.render()
+    else this.renderer.render(this.scene, this.camera)
   }
 }
