@@ -269,6 +269,10 @@ async function main() {
   // The script's line entities: rendered locally under our author key, and
   // (when shared) broadcast as full latest-wins state per (author, id).
   const scriptLines = new Map<string, boolean>() // id -> shared
+  const scriptScreens = new Set<string>()
+  // Flipped by the first screen a script places; gates the camera toggle,
+  // so worlds that never ask for video never show it.
+  let videoWanted = false
   const scriptHost: import('./websg').ScriptHost = {
     log: l => log(`[script] ${l}`),
     boxes: () => {
@@ -324,6 +328,13 @@ async function main() {
       return true
     },
     me: () => ({ id: session.id, primary: isRoot(), color: peerColor(session.id) }),
+    peers: () => {
+      const out = [{ id: session.id, order: session.order, color: peerColor(session.id), me: true }]
+      for (const p of session.peers.values()) {
+        if (!p.excluded) out.push({ id: p.id, order: p.order, color: peerColor(p.id), me: false })
+      }
+      return out.sort((a, b) => a.order - b.order)
+    },
     props: () => [...sim.props].map(([id, p]) => propView(id, p)),
     prop: id => {
       const p = sim.props.get(id)
@@ -380,6 +391,15 @@ async function main() {
         })
       }
     },
+    screen: (id, peer, x, y, z, yaw, w, h) => {
+      scriptScreens.add(id)
+      if (!videoWanted) { videoWanted = true; camUi() }
+      view.setScreen(`${session.id}/${id}`, peer, { x, y, z }, yaw, w, h)
+    },
+    removeScreen: id => {
+      scriptScreens.delete(id)
+      view.removeScreen(`${session.id}/${id}`)
+    },
     setEnv: json => view.setEnvironment(JSON.parse(json)),
     setCamera: (x, y, z, tx, ty, tz) => view.setCameraPose({ x, y, z }, { x: tx, y: ty, z: tz }),
   }
@@ -419,6 +439,11 @@ async function main() {
     script = null
     scriptPointerOn = false
     for (const id of [...scriptLines.keys()]) scriptHost.removeLine(id) // its lines go with it
+    for (const id of [...scriptScreens]) scriptHost.removeScreen(id) // and its screens
+    if (videoWanted) {
+      videoWanted = false
+      stopCam() // no world is asking for video anymore: stop publishing
+    }
     view.setEnvironment({}) // back to the default look
     log(why)
   }
@@ -536,11 +561,56 @@ async function main() {
   }
   micUi()
 
+  // Camera, same lifecycle as the mic (never captured until the first
+  // enable), but only offered while a world script has placed video
+  // screens: without one the pixels would have nowhere to go.
+  let camLive = false
+  let camBusy = false
+  const videoNet = net as { hasVideo?: () => boolean; setCameraEnabled?: (on: boolean) => Promise<boolean> }
+  const toggleCam = () => {
+    if (!videoWanted) return
+    if (!videoNet.hasVideo?.()) {
+      log('video needs the LiveKit transport (the mock host and ws demo have no media path)')
+      return
+    }
+    if (camBusy) return // a permission prompt is likely up; don't queue flips
+    camBusy = true
+    videoNet.setCameraEnabled!(!camLive)
+      .then(on => { camLive = on; log(on ? 'camera live (V stops it)' : 'camera off (V shares it)') })
+      .catch(e => logErr('camera toggle failed', e))
+      .finally(() => { camBusy = false; camUi() })
+  }
+  const stopCam = () => {
+    if (camLive) void videoNet.setCameraEnabled?.(false).then(() => { camLive = false; camUi() })
+    else camUi()
+  }
+  addEventListener('keydown', e => {
+    if ((e.key !== 'v' && e.key !== 'V') || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return
+    const t = e.target as HTMLElement | null
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
+    toggleCam()
+  })
+  const camBtn = document.createElement('button')
+  camBtn.style.cssText = 'position:fixed;left:12px;bottom:52px;z-index:20;display:none;'
+    + 'padding:8px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.3);cursor:pointer;'
+    + 'font:13px system-ui,sans-serif;color:#fff;background:rgba(20,24,32,0.75)'
+  camBtn.onclick = () => toggleCam()
+  document.body.appendChild(camBtn)
+  const camUi = () => {
+    if (!videoWanted || !videoNet.hasVideo?.()) { camBtn.style.display = 'none'; return }
+    camBtn.style.display = 'block'
+    camBtn.textContent = camLive ? '\u{1F4F9} camera live · click to stop (V)' : '\u{1F4F7} camera off · click to share (V)'
+    camBtn.style.background = camLive ? 'rgba(46,125,50,0.9)' : 'rgba(20,24,32,0.75)'
+  }
+  if ('onVideo' in net) {
+    (net as import('./matrix/net').MatrixNet).onVideo = (peer, track) => view.setVideoTrack(peer, track)
+  }
+
   if (net instanceof Net) net.connect(room)
   else {
     (net as import('./matrix/net').MatrixNet)
       .connect(wp!, params.get('lkService'), widgetBoot!)
-      .then(() => micUi())
+      .then(() => { micUi(); camUi() })
       .catch(e => { log(`matrix connect failed: ${e}`); console.error('[worldsync]', e) })
   }
 

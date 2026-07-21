@@ -58,6 +58,8 @@ export interface ScriptHost {
    * most reachable: single-runner logic like board init keys off it), and
    * this peer's deterministic accent color */
   me(): { id: string; primary: boolean; color: number }
+  /** every connected participant (self included), in join order */
+  peers(): { id: string; order: number; color: number; me: boolean }[]
   // -- props: kinematic physics-free entities, claims as coordination --
   props(): PropView[]
   prop(id: string): PropView | null
@@ -76,6 +78,13 @@ export interface ScriptHost {
     shared: boolean): void
   /** remove a line entity (broadcast to everyone if it was shared) */
   removeLine(id: string): void
+  /** create/update a cosmetic video screen: a plane at (x,y,z), yawed
+   * about Y, w x h world units, showing the given peer's camera when one
+   * is live. Local-only (every peer's script builds its own view); the
+   * first call marks the world as video-wanting, which reveals the
+   * camera toggle. */
+  screen(id: string, peer: string, x: number, y: number, z: number, yaw: number, w: number, h: number): void
+  removeScreen(id: string): void
   setEnv(json: string): void
   setCamera(x: number, y: number, z: number, tx: number, ty: number, tz: number): void
 }
@@ -171,6 +180,39 @@ const PRELUDE = `
     set width(w) { this._width = w; this._sync() }
     despawn() { if (!this._dead) { this._dead = true; H.removeLine(this._id) } }
   }
+  // Cosmetic video screen: a plane showing a peer's camera stream (dark
+  // placeholder until they unmute). Local-only: every peer's script
+  // instance lays out its own view. Creating one asks the host for video,
+  // which reveals the on-canvas camera toggle.
+  let screenSeq = 0
+  class Screen {
+    constructor(opts = {}) {
+      this._id = 'v' + (++screenSeq)
+      this._peer = String(opts.peer ?? '')
+      const p = vec(opts.position)
+      this._pos = { x: p.x, y: p.y, z: p.z }
+      this._yaw = typeof opts.yaw === 'number' ? opts.yaw : 0
+      this._w = typeof opts.width === 'number' ? opts.width : 1.6
+      this._h = typeof opts.height === 'number' ? opts.height : 0.9
+      this._dead = false
+      this._sync()
+    }
+    _sync() {
+      if (this._dead) return
+      H.screen(this._id, this._peer, this._pos.x, this._pos.y, this._pos.z, this._yaw, this._w, this._h)
+    }
+    get peer() { return this._peer }
+    set peer(id) { this._peer = String(id); this._sync() }
+    get position() { return new Vector3(this._pos.x, this._pos.y, this._pos.z) }
+    set position(p) { const v = vec(p); this._pos = { x: v.x, y: v.y, z: v.z }; this._sync() }
+    get yaw() { return this._yaw }
+    set yaw(y) { this._yaw = y; this._sync() }
+    get width() { return this._w }
+    set width(w) { this._w = w; this._sync() }
+    get height() { return this._h }
+    set height(h) { this._h = h; this._sync() }
+    despawn() { if (!this._dead) { this._dead = true; H.removeScreen(this._id) } }
+  }
   globalThis.WebSG = {
     Vector3,
     PhysicsBodyType: { Rigid: 'rigid', Static: 'static', Kinematic: 'kinematic' },
@@ -210,6 +252,8 @@ const PRELUDE = `
     },
     paint(id, color) { return H.paint(id, color) },
     createLine(props) { return new Line(props) },
+    createScreen(props) { return new Screen(props) },
+    peers() { return parse(H.peers()) },
     env(opts) { H.setEnv(JSON.stringify(opts ?? {})) },
     camera(pos, target) {
       const p = vec(pos), t = vec(target)
@@ -349,6 +393,13 @@ export class WorldScript {
       return ctx.undefined
     })
     fn('removeLine', (id) => { host.removeLine(ctx.getString(id)); return ctx.undefined })
+    fn('peers', () => json(host.peers()))
+    fn('screen', (id, peer, x, y, z, yaw, w, h) => {
+      host.screen(ctx.getString(id), ctx.getString(peer), ctx.getNumber(x), ctx.getNumber(y),
+        ctx.getNumber(z), ctx.getNumber(yaw), ctx.getNumber(w), ctx.getNumber(h))
+      return ctx.undefined
+    })
+    fn('removeScreen', (id) => { host.removeScreen(ctx.getString(id)); return ctx.undefined })
     fn('setEnv', (j) => { host.setEnv(ctx.getString(j)); return ctx.undefined })
     fn('setCamera', (x, y, z, tx, ty, tz) => {
       host.setCamera(ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z),
