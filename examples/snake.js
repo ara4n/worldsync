@@ -41,6 +41,12 @@ let me, myColor
 let myCells = [] // [tail..head] cell keys, the authoritative body order
 let myIds = []   // matching prop ids
 let pendingClaims = [] // spawned segments whose claim waits for the fold
+// Turns queue rather than overwrite: two keys inside one step interval
+// (down then left, say) both take effect, one step each. Each key is
+// validated against the direction it will actually FOLLOW - the queue
+// tail, not the last step - or a quick second key would read as an
+// about-face against a turn that has not happened yet and get dropped.
+let dirQueue = []
 let dir = null, lastMoved = null, pendingGrowth = 0
 let acc = 0, state = 'boot', stateT = 0, now = 0
 let seedWait = -10
@@ -58,9 +64,11 @@ world.onenter = () => { me = world.me; myColor = me.color }
 world.onkeydown = (ev) => {
   const d = DIRS[ev.key]
   if (!d) return
+  const prev = dirQueue.length ? dirQueue[dirQueue.length - 1] : lastMoved
   // no about-face: a moving snake cannot reverse into its own neck
-  if (lastMoved && myCells.length > 1 && d[0] === -lastMoved[0] && d[1] === -lastMoved[1]) return
-  dir = d
+  if (prev && myCells.length > 1 && d[0] === -prev[0] && d[1] === -prev[1]) return
+  if (prev && d[0] === prev[0] && d[1] === prev[1]) return // held key, not a turn
+  if (dirQueue.length < 3) dirQueue.push(d)
 }
 
 const cellOf = (p) => key(Math.round(p.x / CELL + (N - 1) / 2), Math.round(p.z / CELL + (N - 1) / 2))
@@ -94,6 +102,7 @@ const spawnAt = (c, r) => {
   myCells = [key(c, r)]
   myIds = [spawnSeg(c, r)]
   dir = null
+  dirQueue = []
   lastMoved = null
   pendingGrowth = 2 // grow into a length-3 snake as you set off
   console.log('parked - press an arrow key to go')
@@ -108,6 +117,14 @@ const crash = () => {
 }
 
 const step = (segs, foods) => {
+  while (dirQueue.length) {
+    const d = dirQueue.shift()
+    // re-check the reverse rule: the snake may have grown a neck since
+    // this key was accepted (enqueued at length 1, consumed longer)
+    if (lastMoved && myCells.length > 1 && d[0] === -lastMoved[0] && d[1] === -lastMoved[1]) continue
+    dir = d
+    break
+  }
   const [hc, hr] = myCells[myCells.length - 1].split(',').map(Number)
   const nc = hc + dir[0], nr = hr + dir[1]
   const nk = key(nc, nr)
@@ -190,7 +207,7 @@ world.onupdate = (dt, time) => {
     spawnAt(...randFree(occ))
     state = 'alive'
   } else if (state === 'alive') {
-    if (dir) {
+    if (dir || dirQueue.length) {
       acc += dt
       while (acc >= STEP && state === 'alive') { acc -= STEP; step(segs, foods) }
     } else acc = 0

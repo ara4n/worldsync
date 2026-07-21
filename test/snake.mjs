@@ -72,6 +72,39 @@ console.log('parked until first key: ok')
 // spawns a stray physics box; snake ignores boxes)
 await a.frame.click('canvas', { position: { x: 40, y: 40 } })
 
+// rapid turns must QUEUE, not overwrite or drop: while running along X,
+// a vertical key immediately followed by the reverse-of-X key is a legal
+// two-turn sequence (the second follows the first, not the current
+// heading) - the old code compared it against the unstepped heading and
+// dropped it. Steer toward the grid center to keep clear of walls.
+{
+  const myColor2 = still[0].color
+  const spawn = cellOf(still[0])
+  const firstKey = spawn.c < 16 ? 'ArrowRight' : 'ArrowLeft'
+  const vertKey = spawn.r < 16 ? 'ArrowDown' : 'ArrowUp'
+  const reverseKey = firstKey === 'ArrowRight' ? 'ArrowLeft' : 'ArrowRight'
+  const expectDx = firstKey === 'ArrowRight' ? -1 : 1 // ends up reversed
+  await a.page.keyboard.press(firstKey)
+  await a.page.waitForTimeout(400)
+  await a.page.keyboard.press(vertKey)
+  await a.page.keyboard.press(reverseKey) // within the same step interval
+  await a.page.waitForTimeout(800) // both queued turns consumed by now
+  const mean = async () => {
+    const segs = snakes((await state(a.frame)).props).filter((p) => p.color === myColor2)
+    return {
+      x: segs.reduce((s, p) => s + p.x, 0) / segs.length,
+      z: segs.reduce((s, p) => s + p.z, 0) / segs.length,
+    }
+  }
+  const m1 = await mean()
+  await a.page.waitForTimeout(450)
+  const m2 = await mean()
+  if ((m2.x - m1.x) * expectDx < 0.3 || Math.abs(m2.z - m1.z) > 0.35) {
+    fail(`second rapid key was dropped: drift ${(m2.x - m1.x).toFixed(2)},${(m2.z - m1.z).toFixed(2)} `
+      + `(wanted x sign ${expectDx})`)
+  } else console.log('rapid two-key turns queue: ok')
+}
+
 // steer to a food with arrow keys; watch length grow by the value.
 // values are not in the jig view, so read growth from segment count.
 const myColor = still[0].color
