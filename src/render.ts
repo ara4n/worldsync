@@ -101,14 +101,17 @@ export class View {
       lightIntensity: 1.6,
     })
     this.csm.fade = true
-    // bias scales with each cascade's texel size
-    const normalBias = [0.004, 0.012, 0.04, 0.12]
+    // Near-zero bias on every cascade: casters render their BACK faces
+    // into the shadow maps (shadowSide in patchMaterial), so acne lands on
+    // faces the sun never lights and no bias is needed to hide it - and
+    // without bias there is nothing to push a shadow off its contact
+    // point (peter-panning) or to make cascades disagree.
     this.csm.lights.forEach((l, i) => {
       l.shadow.bias = -0.00002 * (i + 1)
-      l.shadow.normalBias = normalBias[i]
+      l.shadow.normalBias = 0
     })
     const groundMat = new THREE.MeshStandardMaterial({ color: 0x2a3140, roughness: 1 })
-    this.csm.setupMaterial(groundMat)
+    this.patchMaterial(groundMat)
     this.ground = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), groundMat)
     this.ground.rotation.x = -Math.PI / 2
     this.ground.receiveShadow = true
@@ -134,8 +137,10 @@ export class View {
   /** Route a lit material through the CSM shader patch (idempotent).
    * Every lit material MUST be patched, or it sums all cascade lights
    * and renders several times too bright; unlit materials ignore lights
-   * and are left alone. */
+   * and are left alone. Casters draw back faces into the shadow maps
+   * (see the bias comment in the constructor). */
   private patchMaterial(m: THREE.Material) {
+    m.shadowSide = THREE.BackSide
     const lit = m as THREE.MeshStandardMaterial
     if (!lit.isMeshStandardMaterial && !(m as THREE.MeshPhongMaterial).isMeshPhongMaterial
       && !(m as THREE.MeshLambertMaterial).isMeshLambertMaterial) return
@@ -174,7 +179,7 @@ export class View {
     let m = this.mats.get(color)
     if (!m) {
       m = new THREE.MeshStandardMaterial({ color, roughness: 0.55, metalness: 0.05 })
-      this.csm.setupMaterial(m)
+      this.patchMaterial(m)
       this.mats.set(color, m)
     }
     return m
