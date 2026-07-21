@@ -164,6 +164,21 @@ export class LiveKitTransport implements DataTransport {
     this.room.on(RoomEvent.LocalTrackUnpublished, pub => {
       if (pub.track?.source === Track.Source.Camera) this.onLocalVideo(null)
     })
+    // setCameraEnabled(false) MUTES rather than unpublishes, stopping the
+    // underlying MediaStreamTrack; re-enabling restarts the track, minting
+    // a NEW MediaStreamTrack. A texture bound to the old one shows black
+    // forever, so re-emit around mute state changes (both directions fire
+    // for local and remote participants alike).
+    this.room.on(RoomEvent.TrackMuted, (pub, participant) => {
+      if (pub.kind !== Track.Kind.Video) return
+      if (participant.isLocal) this.onLocalVideo(null)
+      else this.onVideoTrack(participant.identity, null)
+    })
+    this.room.on(RoomEvent.TrackUnmuted, (pub, participant) => {
+      if (pub.kind !== Track.Kind.Video || !pub.track) return
+      if (participant.isLocal) this.onLocalVideo(pub.track.mediaStreamTrack)
+      else this.onVideoTrack(participant.identity, pub.track.mediaStreamTrack)
+    })
     // Autoplay policy may hold playback until a user gesture; resume on
     // the next one.
     this.room.on(RoomEvent.AudioPlaybackStatusChanged, () => {
