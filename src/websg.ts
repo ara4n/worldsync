@@ -247,6 +247,15 @@ const PRELUDE = `
         typeof props.radius === 'number' ? props.radius : 0.5,
         !!props.unlit)
     },
+    // a kinematic cube prop (rendered as a 2*size cube), same lifecycle as
+    // spheres: move/paint/claim/despawn; no physics
+    createBox(props = {}) {
+      const t = vec(props.position ?? props.translation)
+      return H.spawnProp('box', t.x, t.y, t.z,
+        typeof props.color === 'number' ? props.color : 0xffffff,
+        typeof props.size === 'number' ? props.size : 0.5,
+        !!props.unlit)
+    },
     despawn(id) { return H.despawn(id) },
     claim(id) { return H.claim(id) },
     unclaim(id) { return H.unclaim(id) },
