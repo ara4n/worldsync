@@ -201,7 +201,12 @@ overrides all of that. Status: verified END-TO-END against Element
 Desktop + matrix.org + livekit-jwt.call.matrix.org - handshake,
 capability grant (the widget logs the approved/denied sets, since a
 quietly-denied capability presents as a silent hang), OpenID -> SFU JWT
-exchange, LiveKit connect, scene upload/download and play. LiveKit text
+exchange, LiveKit connect, scene upload/download and play. Voice rides
+the same LiveKit room: the mic starts muted and is never captured or
+published until the first unmute (M toggles, so joining never prompts
+for permission by itself), while remote peers' audio always plays -
+hearing others needs no mic of your own (the mock host and the ws demo
+have no media path, so M just logs there). LiveKit text
 streams are not yet end-to-end encrypted - wiring the MatrixRTC key
 events into payload encryption is the natural next step. Ghost
 `m.call.member`s from killed sessions no longer stall calibration: a

@@ -13,6 +13,7 @@ export interface Stats {
   room: string
   id: string
   order: number
+  mic: string
   entities: number
   tick: number
   stepMs: number
@@ -113,7 +114,7 @@ export class UI {
         <td>${p.excluded ? 'EXCLUDED' : p.connected ? 'ok' : 'connecting'}</td>
       </tr>`).join('')
     this.statusEl.innerHTML = `
-      <div>room <b>${esc(s.room)}</b> as <b>${esc(s.id || '...')}</b> (#${s.order})</div>
+      <div>room <b>${esc(s.room)}</b> as <b>${esc(s.id || '...')}</b> (#${s.order}) | mic <b>${esc(s.mic)}</b></div>
       <div class="hint">open this URL in another tab or browser to join (?room=name picks a room)</div>
       <div>entities ${s.entities} | tick ${s.tick} | step ${s.stepMs.toFixed(1)}ms
         (snap ${s.perf.snap.toFixed(1)} + ${esc(s.norm)} ${s.perf.norm.toFixed(1)} + phys ${s.perf.phys.toFixed(1)} + hash ${s.perf.hash.toFixed(1)})

@@ -1,4 +1,4 @@
-import { Room as LivekitRoom, RoomEvent } from 'livekit-client'
+import { Room as LivekitRoom, RoomEvent, Track } from 'livekit-client'
 import type { MatrixClient } from 'matrix-js-sdk'
 
 /**
@@ -13,6 +13,10 @@ export interface DataTransport {
   onData: (from: string, data: string) => void
   /** fires with the full set of reachable identities on every change */
   onParticipants: (identities: Set<string>) => void
+  /** publish/unpublish the local microphone, where the transport has a
+   * media path (LiveKit does, the mock does not); resolves to the
+   * resulting state */
+  setMicEnabled?(on: boolean): Promise<boolean>
   close(): void
 }
 
@@ -78,9 +82,40 @@ export class LiveKitTransport implements DataTransport {
     this.room.on(RoomEvent.ParticipantConnected, emit)
     this.room.on(RoomEvent.ParticipantDisconnected, emit)
     this.room.on(RoomEvent.Connected, emit)
+    // Voice rides the same room: attach every subscribed audio track to a
+    // hidden <audio> element, so hearing others needs no mic of your own.
+    this.room.on(RoomEvent.TrackSubscribed, track => {
+      if (track.kind !== Track.Kind.Audio) return
+      const el = track.attach()
+      el.style.display = 'none'
+      document.body.appendChild(el)
+    })
+    this.room.on(RoomEvent.TrackUnsubscribed, track => {
+      if (track.kind !== Track.Kind.Audio) return
+      for (const el of track.detach()) el.remove()
+    })
+    // Autoplay policy may hold playback until a user gesture; resume on
+    // the next one.
+    this.room.on(RoomEvent.AudioPlaybackStatusChanged, () => {
+      if (this.room.canPlaybackAudio) return
+      const resume = () => {
+        removeEventListener('pointerdown', resume)
+        removeEventListener('keydown', resume)
+        void this.room.startAudio().catch(() => {})
+      }
+      addEventListener('pointerdown', resume)
+      addEventListener('keydown', resume)
+    })
     const sfu = await getSFUConfig(this.client, this.serviceUrl, this.roomId, this.userId, this.deviceId)
     await this.room.connect(sfu.url, sfu.jwt)
     emit()
+  }
+
+  /** First enable triggers the browser's permission prompt; the track is
+   * only ever published while enabled, so "muted" sends nothing. */
+  async setMicEnabled(on: boolean): Promise<boolean> {
+    await this.room.localParticipant.setMicrophoneEnabled(on)
+    return this.room.localParticipant.isMicrophoneEnabled
   }
 
   send(to: string | null, data: string) {

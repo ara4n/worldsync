@@ -483,6 +483,32 @@ async function main() {
   const input = new Input(view, out)
   input.scriptPointer = scriptPointerDelegate
 
+  // Voice, muted by default: the mic is never captured or published until
+  // the first unmute (M toggles it), so joining a world never prompts for
+  // permission on its own. Remote peers' audio always plays - hearing
+  // others needs no mic of your own.
+  let micLive = false
+  let micBusy = false
+  const audioNet = net as { hasAudio?: () => boolean; setMicEnabled?: (on: boolean) => Promise<boolean> }
+  const toggleMic = () => {
+    if (!audioNet.hasAudio?.()) {
+      log('voice needs the LiveKit transport (the mock host and ws demo have no media path)')
+      return
+    }
+    if (micBusy) return // a permission prompt is likely up; don't queue flips
+    micBusy = true
+    audioNet.setMicEnabled!(!micLive)
+      .then(on => { micLive = on; log(on ? 'mic live (M mutes)' : 'mic muted (M unmutes)') })
+      .catch(e => logErr('mic toggle failed', e))
+      .finally(() => { micBusy = false })
+  }
+  addEventListener('keydown', e => {
+    if ((e.key !== 'm' && e.key !== 'M') || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return
+    const t = e.target as HTMLElement | null
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
+    toggleMic()
+  })
+
   if (net instanceof Net) net.connect(room)
   else {
     (net as import('./matrix/net').MatrixNet)
@@ -511,6 +537,7 @@ async function main() {
     view.frame(now, alpha)
     ui.maybe(now, () => ({
       room, id: session.id, order: session.order,
+      mic: audioNet.hasAudio?.() ? (micLive ? 'live - M mutes' : 'muted - M unmutes') : 'n/a',
       entities: sim.bodies.size, tick: sim.tick - session.startTick, stepMs: sim.stepMs,
       perf: sim.perf, norm: sim.cadence > 1 ? `${sim.normalizeMode}/${sim.cadence}` : sim.normalizeMode,
       rollbacks: sim.rollbacks, lastDepth: sim.lastReplayDepth,

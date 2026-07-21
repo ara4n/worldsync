@@ -264,6 +264,15 @@ export class MatrixNet {
   sendToId(id: string, msg: DcMessage) { this.sendRaw(id, msg) }
   broadcast(msg: DcMessage) { this.sendRaw(null, msg) }
 
+  /** true once the transport has a media path (LiveKit; not the mock) */
+  hasAudio(): boolean { return !!this.transport?.setMicEnabled }
+
+  /** publish/unpublish the local mic; resolves to the resulting state
+   * (false when the transport has no media path) */
+  async setMicEnabled(on: boolean): Promise<boolean> {
+    return this.transport?.setMicEnabled ? this.transport.setMicEnabled(on) : false
+  }
+
   leave() {
     this.rtc?.leaveRoomSession(1000)
     this.transport?.close()
