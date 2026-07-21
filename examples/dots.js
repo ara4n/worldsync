@@ -34,7 +34,7 @@ let planeN = null     // preview plane normal: pointer ray at chain start
 let preview = null    // current preview endpoint on that plane
 let seeded = false
 let chain = null      // shared line entity: my chain, everyone sees it
-let latticeLines = [] // local line entities, one per grid guide
+let latticeLines = [] // local line entities, one per grid edge: { edge, line }
 let latticeTarget = 0.25
 let pendingDrops = [] // refills spawned above the board, dropped a beat later
 let dropWait = 0
@@ -42,25 +42,52 @@ let dropWait = 0
 world.onload = () => {
   world.env({ background: 0xffffff, fog: { color: 0xffffff, near: 4.5, far: 11 }, ground: false })
   world.camera({ x: 0, y: ORG.y + 1, z: 5.2 }, { x: 0, y: ORG.y + 1, z: 0 })
+  // one guide per unit edge (not per full row), so the guide under a
+  // chained link can hide: the wire is coincident with it and they z-fight
   const segs = []
-  for (let x = 0; x < W; x++) {
-    for (let y = 0; y < H; y++) segs.push([at(x, y, 0), at(x, y, D - 1)])
-    for (let z = 0; z < D; z++) segs.push([at(x, 0, z), at(x, H - 1, z)])
+  for (let x = 0; x < W; x++) for (let y = 0; y < H; y++) for (let z = 0; z < D; z++) {
+    if (x + 1 < W) segs.push([{ x, y, z }, { x: x + 1, y, z }])
+    if (y + 1 < H) segs.push([{ x, y, z }, { x, y: y + 1, z }])
+    if (z + 1 < D) segs.push([{ x, y, z }, { x, y, z: z + 1 }])
   }
-  for (let y = 0; y < H; y++) for (let z = 0; z < D; z++) segs.push([at(0, y, z), at(W - 1, y, z)])
-  latticeLines = segs.map((s) => world.createLine({ points: s, color: 0xdddddd, opacity: 0, width: 1 }))
+  latticeLines = segs.map(([a, b]) => ({
+    edge: edgeKey(a, b),
+    line: world.createLine({ points: [at(a.x, a.y, a.z), at(b.x, b.y, b.z)], color: 0xdddddd, opacity: 0, width: 1 }),
+  }))
   // the wire: world-units width after the original's cylinder segments
   // (radius 0.0286 at dot radius 0.15), recolored per drag to the chained
   // dots' color
   chain = world.createLine({ points: [], color: world.me.color, width: 0.06, worldUnits: true, shared: true })
 }
 
-/** ease the lattice toward its target opacity; called every update */
+/** direction-independent key for the unit edge between grid coords a, b */
+function edgeKey(a, b) {
+  const ka = key(a.x, a.y, a.z), kb = key(b.x, b.y, b.z)
+  return ka < kb ? ka + '|' + kb : kb + '|' + ka
+}
+
+/** edge keys currently covered by my chain's links */
+function chainedEdges() {
+  const covered = {}
+  for (let i = 1; i < sel.length; i++) {
+    const a = world.prop(sel[i - 1]), b = world.prop(sel[i])
+    if (a && b) covered[edgeKey(gridOf(a), gridOf(b))] = true
+  }
+  return covered
+}
+
+/** ease the lattice toward its target opacity; called every update. Guides
+ * under a chained link snap to 0 instead (the wire replaces them exactly) */
 function fadeLattice() {
+  const covered = chainedEdges()
   for (const l of latticeLines) {
-    const d = latticeTarget - l.opacity
-    if (Math.abs(d) > 0.01) l.opacity += d * 0.12
-    else if (l.opacity !== latticeTarget) l.opacity = latticeTarget
+    if (covered[l.edge]) {
+      if (l.line.opacity !== 0) l.line.opacity = 0
+      continue
+    }
+    const d = latticeTarget - l.line.opacity
+    if (Math.abs(d) > 0.01) l.line.opacity += d * 0.12
+    else if (l.line.opacity !== latticeTarget) l.line.opacity = latticeTarget
   }
 }
 
