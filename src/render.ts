@@ -79,8 +79,11 @@ export class View {
     this.sun = new THREE.DirectionalLight(0xffffff, 1.6)
     this.sun.castShadow = true
     this.sun.shadow.mapSize.set(4096, 4096)
-    this.sun.shadow.bias = -0.0001
-    this.sun.shadow.normalBias = 0.05
+    // normalBias trades acne for a light-leak fringe at contact points
+    // (gap ~ 1.4x the bias under this sun angle): keep it at about one
+    // shadow texel, the floor below which the fringe cannot shrink anyway.
+    this.sun.shadow.bias = -0.00015
+    this.sun.shadow.normalBias = 0.02
     this.scene.add(this.sun)
     this.scene.add(this.sun.target)
     this.fitShadows(null)
@@ -110,7 +113,7 @@ export class View {
   // rather than covering the whole scene: fitting a ~300-unit world into
   // one 4096 map leaves each box a dozen texels (blocky chevron acne).
   // Nearby shadows stay crisp; geometry beyond the window casts none.
-  private readonly shadowRadius = 40
+  private readonly shadowRadius = 32
   private shadowReach = 40
   private readonly sunDir = new THREE.Vector3(0.45, 0.8, 0.35).normalize()
 
