@@ -96,7 +96,11 @@ export class View {
 
     // Feature stamp: stale-bundle confusion (host iframes cache hard) has
     // burned enough debugging time that the renderer announces itself.
-    console.log('[worldsync] renderer: csm x4 backface-shadows aces (46aabb0+)')
+    // The commit comes from the build (vite define), not a hand-updated
+    // string: a hardcoded one drifted for weeks and pointed a debugging
+    // session at phantom staleness.
+    console.log('[worldsync] renderer: csm x4 backface-shadows aces '
+      + `(${typeof __COMMIT__ === 'string' ? __COMMIT__ : 'dev'})`)
     this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x30281e, 0.85))
     // Cascaded shadow maps with splits weighted hard toward the camera:
     // the near cascade covers only the first ~4m of view depth, so contact
