@@ -216,6 +216,37 @@ export class MatrixNet {
     }
     this.onWorldScript(readWorldScriptUrl(client, p.roomId))
 
+    // A dead session's stale membership does worse than linger on an
+    // msc4140-less homeserver: the sdk PRESERVES its created_ts when
+    // rejoining (join-order stability) and computes expiry relative to
+    // it (created_ts + expires), so every fresh membership this device
+    // sends after the old one expired is BORN EXPIRED and ignored by
+    // every peer, itself included - the device can never rejoin however
+    // often it retries. Clear our own expired membership first (and
+    // inject the cleared event locally: the clear's own echo can be
+    // lost like any push) so the join starts from scratch.
+    try {
+      for (const ev of room.currentState.getStateEvents(EventType.GroupCallMemberPrefix)) {
+        const key = ev.getStateKey() ?? ''
+        if (!key.includes(`${p.userId}_${p.deviceId}`)) continue
+        const c = ev.getContent() as { created_ts?: number; expires?: number }
+        if (Object.keys(c).length === 0) continue // already left
+        const expiresAt = (c.created_ts ?? ev.getTs()) + (c.expires ?? 14400000)
+        if (expiresAt > Date.now()) continue // live (another tab?): leave it
+        this.onLog('clearing our stale rtc membership (expired '
+          + `${Math.round((Date.now() - expiresAt) / 60000)}min ago) so the rejoin is not born expired`)
+        const sendState = client.sendStateEvent.bind(client) as
+          (roomId: string, type: string, content: unknown, stateKey: string) => Promise<{ event_id: string }>
+        const { event_id } = await sendState(p.roomId, EventType.GroupCallMemberPrefix, {}, key)
+        this.injectStateEvent(p, {
+          type: EventType.GroupCallMemberPrefix, state_key: key, content: {}, event_id,
+          room_id: p.roomId, sender: p.userId, origin_server_ts: Date.now(), unsigned: {},
+        })
+      }
+    } catch (e) {
+      this.onLog(`stale membership cleanup failed (continuing): ${e}`)
+    }
+
     this.rtc.joinRTCSession(
       { userId: p.userId, deviceId: p.deviceId, memberId: this.id },
       p.mockTransport || !serviceUrl ? [] : [{ type: 'livekit', livekit_service_url: serviceUrl }],
@@ -348,19 +379,23 @@ export class MatrixNet {
       const have = room?.currentState.getStateEvents(raw.type, raw.state_key ?? '')
       if (have && (have.getId() === raw.event_id || (have.getTs() ?? 0) > (raw.origin_server_ts ?? 0))) continue
       this.onLog(`state push lost by the host: recovering ${raw.type} ${raw.state_key ?? ''} by direct read`)
-      // Impersonate the host's update_state push: RoomWidgetClient's
-      // handler injects it into room state on every host flavour (the
-      // unsupported-version case only warns). The fabricated requestId
-      // makes its ack an unsolicited response the host quietly drops.
-      this.api.emit(`action:${WidgetApiToWidgetAction.UpdateState}`,
-        new CustomEvent(`action:${WidgetApiToWidgetAction.UpdateState}`, {
-          cancelable: true,
-          detail: {
-            api: 'toWidget', widgetId: p.widgetId, requestId: `worldsync-recover-${raw.event_id}`,
-            action: WidgetApiToWidgetAction.UpdateState, data: { state: [raw] },
-          },
-        }))
+      this.injectStateEvent(p, raw)
     }
+  }
+
+  /** Impersonate the host's update_state push: RoomWidgetClient's
+   * handler injects it into room state on every host flavour (the
+   * unsupported-version case only warns). The fabricated requestId
+   * makes its ack an unsolicited response the host quietly drops. */
+  private injectStateEvent(p: WidgetParams, raw: IRoomEvent) {
+    this.api.emit(`action:${WidgetApiToWidgetAction.UpdateState}`,
+      new CustomEvent(`action:${WidgetApiToWidgetAction.UpdateState}`, {
+        cancelable: true,
+        detail: {
+          api: 'toWidget', widgetId: p.widgetId, requestId: `worldsync-inject-${raw.event_id}`,
+          action: WidgetApiToWidgetAction.UpdateState, data: { state: [raw] },
+        },
+      }))
   }
 
   /** the focus advertised by the OLDEST other member (the session's owner,

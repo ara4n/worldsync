@@ -82,5 +82,29 @@ if (ok) {
   await b.page.close()
 }
 
+// --- scenario 3: a stale expired own membership must be cleared, not
+// inherited (the sdk preserves created_ts on rejoin, so without the
+// pre-join cleanup every fresh membership is born expired and the
+// device can never rejoin) ---
+{
+  const page = await browser.newPage()
+  await page.goto(`${base}/mock.html?room=lb${Math.random().toString(36).slice(2, 8)}&staleOwnMembership=1`)
+  await page.waitForFunction(() => {
+    const w = document.getElementById('widget')?.contentWindow
+    return !!(w && w.__jig && w.__jig.session)
+  }, null, { timeout: 30000 })
+  const frame = page.frames().find((f) => f !== page.mainFrame())
+  const ready = await frame.waitForFunction(() => window.__jig.session.ready(), null, { timeout: 20000 })
+    .then(() => true).catch(() => false)
+  const logs = await frame.evaluate(() =>
+    [...document.querySelectorAll('#log div')].map((d) => d.textContent))
+  if (!logs.some((l) => l.includes('clearing our stale rtc membership'))) {
+    fail(`stale membership was not cleared before joining: ${logs.slice(-6).join(' | ')}`)
+  }
+  if (!ready) fail('session never started with a stale own membership seeded')
+  else console.log('stale expired membership cleared before rejoin: ok')
+  await page.close()
+}
+
 if (process.exitCode !== 1) console.log('LONEBOOT TEST PASSED')
 await browser.close()

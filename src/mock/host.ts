@@ -19,6 +19,11 @@ const room = qs.get('room') ?? 'default'
 // Test hook: withhold the widget's own m.call.member echo, simulating
 // hosts that lose it (what the widget's lone-boot fallback exists for).
 const dropOwnEcho = qs.get('dropOwnEcho') === '1'
+// Test hook: seed an EXPIRED membership for this device, reproducing a
+// dead session on an msc4140-less homeserver (the sdk would preserve
+// its created_ts and rejoin born-expired forever without the widget's
+// pre-join cleanup).
+const staleOwnMembership = qs.get('staleOwnMembership') === '1'
 const roomId = `!${room}:mock.localhost`
 const userId = `@u${Math.random().toString(36).slice(2, 8)}:mock.localhost`
 const deviceId = `MOCK${Math.random().toString(36).slice(2, 6).toUpperCase()}`
@@ -218,6 +223,21 @@ function boot() {
     url: widgetUrl.toString(),
   })
   const driver = new MockDriver()
+  if (staleOwnMembership) {
+    // five hours old with a four-hour relative expiry: dead on arrival,
+    // exactly what a crashed session leaves on an msc4140-less server
+    const key = `_${userId}_${deviceId}_m.call`
+    const ts = Date.now() - 5 * 3600_000
+    driver.state.set(`org.matrix.msc3401.call.member|${key}`, {
+      room_id: roomId, event_id: `$stale-${userId}`, origin_server_ts: ts, sender: userId,
+      type: 'org.matrix.msc3401.call.member', state_key: key, unsigned: {},
+      content: {
+        application: 'm.call', call_id: '', scope: 'm.room', device_id: deviceId,
+        membershipID: `${userId}:${deviceId}`, expires: 4 * 3600_000, created_ts: ts,
+        focus_active: { type: 'livekit', focus_selection: 'oldest_membership' }, foci_preferred: [],
+      },
+    } as IRoomEvent)
+  }
   const api = new ClientWidgetApi(widget, iframe, driver)
   driver.attach(api)
   ;(window as unknown as Record<string, unknown>).__mockhost = { driver, api }
