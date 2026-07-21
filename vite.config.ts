@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite'
 import { WebSocketServer, type WebSocket, type RawData } from 'ws'
 import type { Server } from 'node:http'
+import fs from 'node:fs'
 
 // Tiny WebRTC signaling server piggybacked on the Vite http server at /signal.
 // Rooms are full-mesh: everyone gets told about everyone, joiners initiate offers.
@@ -65,6 +66,15 @@ export default defineConfig({
   },
   server: {
     allowedHosts: ['pegasus.local'],
+    // Serve https when a local mkcert cert is present (widget hosts and
+    // getUserMedia want a secure origin). Recreate with:
+    //   mkcert -cert-file certs/pegasus.local.pem \
+    //     -key-file certs/pegasus.local-key.pem pegasus.local localhost 127.0.0.1 ::1
+    // certs/ is gitignored; without it the server stays plain http.
+    https: fs.existsSync('certs/pegasus.local-key.pem') ? {
+      key: fs.readFileSync('certs/pegasus.local-key.pem'),
+      cert: fs.readFileSync('certs/pegasus.local.pem'),
+    } : undefined,
   },
   plugins: [{
     name: 'signaling-server',
