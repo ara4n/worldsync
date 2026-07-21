@@ -184,7 +184,8 @@ class MockDriver extends WidgetDriver {
 
 function boot() {
   const iframe = document.getElementById('widget') as HTMLIFrameElement
-  const widgetUrl = new URL('/', location.origin)
+  // relative to wherever mock.html is served (subpath hosts included)
+  const widgetUrl = new URL('.', location.href)
   widgetUrl.searchParams.set('widgetId', `worldsync-${room}`)
   widgetUrl.searchParams.set('parentUrl', location.href)
   widgetUrl.searchParams.set('roomId', roomId)

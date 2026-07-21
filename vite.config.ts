@@ -59,6 +59,9 @@ function attachSignaling(httpServer: Server | null) {
 }
 
 export default defineConfig({
+  // Relative asset urls, so the build serves from any path (github pages
+  // hosts under /worldsync/, the dev server at /).
+  base: './',
   build: {
     rollupOptions: {
       input: { main: 'index.html', mock: 'mock.html' },

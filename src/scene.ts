@@ -29,8 +29,8 @@ let loader: GLTFLoader | null = null
  */
 export function configureGlbLoader(renderer: THREE.WebGLRenderer) {
   if (loader) return
-  const ktx2 = new KTX2Loader().setTranscoderPath('/basis/').detectSupport(renderer)
-  const draco = new DRACOLoader().setDecoderPath('/draco/')
+  const ktx2 = new KTX2Loader().setTranscoderPath(`${import.meta.env.BASE_URL}basis/`).detectSupport(renderer)
+  const draco = new DRACOLoader().setDecoderPath(`${import.meta.env.BASE_URL}draco/`)
   loader = new GLTFLoader()
     .setKTX2Loader(ktx2)
     .setDRACOLoader(draco)
