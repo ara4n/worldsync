@@ -33,6 +33,8 @@ let seeded = false
 let chain = null      // shared line entity: my chain, everyone sees it
 let latticeLines = [] // local line entities, one per grid guide
 let latticeTarget = 0.25
+let pendingDrops = [] // refills spawned above the board, dropped a beat later
+let dropWait = 0
 
 world.onload = () => {
   world.env({ background: 0xffffff, fog: { color: 0xffffff, near: 4.5, far: 11 }, ground: false })
@@ -43,8 +45,11 @@ world.onload = () => {
     for (let z = 0; z < D; z++) segs.push([at(x, 0, z), at(x, H - 1, z)])
   }
   for (let y = 0; y < H; y++) for (let z = 0; z < D; z++) segs.push([at(0, y, z), at(W - 1, y, z)])
-  latticeLines = segs.map((s) => world.createLine({ points: s, color: 0xdddddd, opacity: 0 }))
-  chain = world.createLine({ points: [], color: world.me.color, shared: true })
+  latticeLines = segs.map((s) => world.createLine({ points: s, color: 0xdddddd, opacity: 0, width: 1 }))
+  // the wire: world-units width after the original's cylinder segments
+  // (radius 0.0286 at dot radius 0.15), recolored per drag to the chained
+  // dots' color
+  chain = world.createLine({ points: [], color: world.me.color, width: 0.06, worldUnits: true, shared: true })
 }
 
 /** ease the lattice toward its target opacity; called every update */
@@ -90,6 +95,14 @@ world.onupdate = () => {
     revalidate()
     updateLine()
   }
+  // Refills spawn above the board and settle a couple of ticks later: the
+  // spawn and the move must land on different ticks for every renderer to
+  // see the drop (a same-tick move would just create them in place).
+  if (pendingDrops.length && ++dropWait >= 2) {
+    for (const d of pendingDrops) world.move(d.id, d.pos)
+    pendingDrops = []
+    dropWait = 0
+  }
   fadeLattice()
 }
 
@@ -101,6 +114,7 @@ world.onpointerdown = (ev) => {
   sel = [p.id]
   drawing = true
   cycleColor = null
+  chain.color = p.color
   planeN = ev.dir
   anchor = { x: p.x, y: p.y, z: p.z }
   preview = null
@@ -220,9 +234,13 @@ function clearChain() {
         if (list[i].y !== i) world.move(list[i].id, at(x, i, z))
         cells.push({ id: list[i].id, key: key(x, i, z), color: list[i].color })
       }
+      // new dots fall in from above the board, like the original: spawn
+      // them a column-gap up (fading in), then drop them onto their cells
+      const gap = H - list.length
       for (let y = list.length; y < H; y++) {
         const c = COLORS[rnd(COLORS.length)]
-        const id = world.createSphere({ position: at(x, y, z), color: c, radius: R, unlit: true })
+        const id = world.createSphere({ position: at(x, y + gap, z), color: c, radius: R, unlit: true })
+        pendingDrops.push({ id, pos: at(x, y, z) })
         cells.push({ id, key: key(x, y, z), color: c })
       }
     }
