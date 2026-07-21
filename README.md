@@ -1,8 +1,14 @@
 # worldsync
 
-A test jig for experimenting with peer-to-peer multiplayer physics: Three.js
-rendering, bitECS entities, Rapier simulation, WebRTC data channels, and
-rollback netcode with rubber-band presentation.
+Peer-to-peer multiplayer physics on Matrix: Three.js rendering, bitECS
+entities, deterministic Rapier simulation, and rollback netcode with
+rubber-band presentation, running as a Matrix widget on MatrixRTC (the
+E2EE calling stack behind Element Call). Identity, membership and
+encryption come from the host client through the matryoshka widget API;
+sim data and voice ride the MatrixRTC LiveKit SFU. The original
+standalone jig (Vite dev server signaling a WebRTC mesh) survives as the
+zero-infrastructure dev loop, and a mock widget host exercises the full
+widget stack without a homeserver.
 
 Every participant runs their own full Rapier simulation. There is no server
 authority. Replication happens on two planes: discrete ops (spawn, grab,
@@ -11,7 +17,7 @@ peer folds in by rolling the physics world back and replaying, while
 continuous drag motion travels as latest-wins pose streams that never cause
 rollbacks and are healed in batches by heartbeat folds.
 
-## Run it
+## Run it (standalone demo)
 
 ```
 npm install
@@ -46,8 +52,12 @@ Matrix widget instead of the ws demo: matrix-widget-api + matrix-js-sdk's
 `createRoomWidgetClient` proxy everything through the host client, so
 identity and encryption are inherited from it. Room presence is MatrixRTC
 (`m.call.member` state events); each member's `createdTs` is its join
-order, and the oldest member roots the tick grid. Data travels as LiveKit
-text streams (topic `worldsync`), with the SFU url + JWT obtained via the
+order, and the oldest member roots the tick grid. Data travels over
+LiveKit's reliable data channel (topic `worldsync`): retransmitted and
+per-sender ordered, which the session's beat-attestation rule depends on
+(text streams were tried first, but each sendText is its own chunked
+stream delivered in completion order, so a beat could overtake the ops
+sent just before it and get them struck). The SFU url + JWT come from the
 OpenID exchange against an lk-jwt-service (element-call's flow; override
 the service url with `?lkService=`). The Session and Sim are identical in
 both modes - MatrixNet is just another transport behind the same seam.
@@ -191,6 +201,10 @@ To embed for real, serve the app (dev server works: `npm run dev --
 
 ```
 /addwidget http://HOST:5173/?widgetId=$matrix_widget_id&userId=$matrix_user_id&deviceId=$org.matrix.msc3819.matrix_device_id&baseUrl=$org.matrix.msc4039.matrix_base_url&roomId=$matrix_room_id
+
+or for CI on the dots branch:
+
+/addwidget https://ara4n.github.io/worldsync/?widgetId=$matrix_widget_id&userId=$matrix_user_id&deviceId=$org.matrix.msc3819.matrix_device_id&baseUrl=$org.matrix.msc4039.matrix_base_url&roomId=$matrix_room_id
 ```
 
 (Element Web substitutes the `$`-templates and appends `parentUrl`
@@ -205,12 +219,13 @@ capability grant (the widget logs the approved/denied sets, since a
 quietly-denied capability presents as a silent hang), OpenID -> SFU JWT
 exchange, LiveKit connect, scene upload/download and play. Voice rides
 the same LiveKit room: the mic starts muted and is never captured or
-published until the first unmute (M toggles, so joining never prompts
-for permission by itself), while remote peers' audio always plays -
-hearing others needs no mic of your own (the mock host and the ws demo
-have no media path, so M just logs there). LiveKit text
-streams are not yet end-to-end encrypted - wiring the MatrixRTC key
-events into payload encryption is the natural next step. Ghost
+published until the first unmute (M or the on-canvas mic button toggles,
+so joining never prompts for permission by itself), while remote peers'
+audio always plays - hearing others needs no mic of your own (the mock
+host and the ws demo have no media path, so the toggle just logs there).
+The LiveKit payloads (data channel and voice) are not yet end-to-end
+encrypted - wiring the MatrixRTC key events into payload encryption is
+the natural next step. Ghost
 `m.call.member`s from killed sessions no longer stall calibration: a
 joiner gives seniors 3s to become reachable on the transport, then
 writes them off and roots the tick grid itself (a senior that shows up
