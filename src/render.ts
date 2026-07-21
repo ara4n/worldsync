@@ -281,6 +281,72 @@ export class View {
     }
   }
 
+  // -- video screens: flat planes a world script places, textured with a
+  // peer's camera track when one is live and a dark placeholder otherwise.
+  // Cosmetic like lines: never part of sim state, never picked. --
+  private screens = new Map<string, { obj: THREE.Mesh; peer: string }>()
+  private video = new Map<string, { el: HTMLVideoElement; tex: THREE.VideoTexture; mat: THREE.MeshBasicMaterial }>()
+  private screenBlank = new THREE.MeshBasicMaterial({ color: 0x10141a, side: THREE.DoubleSide })
+  private screenMat(peer: string) { return this.video.get(peer)?.mat ?? this.screenBlank }
+
+  setScreen(key: string, peer: string, pos: { x: number; y: number; z: number },
+    yaw: number, w: number, h: number) {
+    let s = this.screens.get(key)
+    if (!s) {
+      s = { obj: new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.screenMat(peer)), peer }
+      this.scene.add(s.obj)
+      this.screens.set(key, s)
+    } else if (s.peer !== peer) {
+      s.peer = peer
+      s.obj.material = this.screenMat(peer)
+    }
+    s.obj.position.set(pos.x, pos.y, pos.z)
+    s.obj.rotation.set(0, yaw, 0)
+    s.obj.scale.set(w, h, 1)
+  }
+
+  removeScreen(key: string) {
+    const s = this.screens.get(key)
+    if (!s) return
+    this.scene.remove(s.obj)
+    s.obj.geometry.dispose() // materials are shared per peer; disposed with the track
+    this.screens.delete(key)
+  }
+
+  /** Remove every screen whose key starts with prefix (an author's "id/"). */
+  removeScreens(prefix: string) {
+    for (const key of [...this.screens.keys()]) {
+      if (key.startsWith(prefix)) this.removeScreen(key)
+    }
+  }
+
+  /** A peer's camera track came (or, with null, went): retexture every
+   * screen bound to that peer. The <video> element never joins the DOM;
+   * VideoTexture reads it directly. */
+  setVideoTrack(peer: string, track: MediaStreamTrack | null) {
+    const cur = this.video.get(peer)
+    if (cur) {
+      cur.mat.dispose()
+      cur.tex.dispose()
+      cur.el.srcObject = null
+      this.video.delete(peer)
+    }
+    if (track) {
+      const el = document.createElement('video')
+      el.muted = true // audio arrives separately; a muted element autoplays
+      el.playsInline = true
+      el.autoplay = true
+      el.srcObject = new MediaStream([track])
+      void el.play().catch(() => {})
+      const tex = new THREE.VideoTexture(el)
+      tex.colorSpace = THREE.SRGBColorSpace
+      this.video.set(peer, { el, tex, mat: new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }) })
+    }
+    for (const s of this.screens.values()) {
+      if (s.peer === peer) s.obj.material = this.screenMat(peer)
+    }
+  }
+
   private matFor(color: number) {
     let m = this.mats.get(color)
     if (!m) {
