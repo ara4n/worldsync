@@ -259,11 +259,15 @@ export class View {
       m.opacity = opacity
       m.linewidth = width
       if (m.worldUnits !== worldUnits) { m.worldUnits = worldUnits; m.needsUpdate = true }
+      // fully transparent still writes depth, which carves invisible
+      // notches out of lines it coincides with - skip rendering instead
+      existing.obj.visible = opacity > 0
       return
     }
     const mat = new LineMaterial({ color, transparent: true, opacity, linewidth: width, worldUnits })
     mat.resolution.set(innerWidth, innerHeight)
     const obj = new Line2(lineGeo(), mat)
+    obj.visible = opacity > 0
     obj.computeLineDistances()
     obj.renderOrder = 999 // never buried by the props it threads through
     this.scene.add(obj)
