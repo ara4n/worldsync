@@ -6,7 +6,7 @@
 // out and you respawn parked somewhere new.
 //
 // Sync model: your snake is YOURS. Its body order lives only in your
-// script; what everyone shares is the props table - one sphere per
+// script; what everyone shares is the props table - one box per
 // segment in your accent color, advanced by spawn-head/despawn-tail ops
 // each step (2 ops/step, however long the snake). Ownership rides on
 // CLAIMS, not color (accent hues can collide): each segment is claimed
@@ -25,7 +25,7 @@
 // divergence - snake is a foreground game.)
 
 const N = 32, CELL = 0.45, Y = 0.3
-const SEG = 0.21 // segment radius; also the tag that says "snake, not food"
+const SEG = 0.21 // segment half-size (boxes render 2*size wide); also the tag that says "snake, not food"
 const FOODC = 0xffffff
 const foodR = (v) => 0.14 + 0.02 * v // 1..9 -> 0.16..0.32, all distinct
 const foodV = (s) => Math.round((s - 0.14) / 0.02)
@@ -68,8 +68,7 @@ const cellOf = (p) => key(Math.round(p.x / CELL + (N - 1) / 2), Math.round(p.z /
 const scan = () => {
   const segs = [], foods = []
   for (const p of world.props()) {
-    if (p.kind !== 'sphere') continue
-    if (p.size === SEG) segs.push(p)
+    if (p.kind === 'box' && p.size === SEG) segs.push(p)
     else if (isFood(p)) foods.push(p)
   }
   return { segs, foods }
@@ -84,7 +83,7 @@ const randFree = (occ) => {
 }
 
 const spawnSeg = (c, r) => {
-  const id = world.createSphere({ position: { x: cx(c), y: Y, z: cz(r) }, color: myColor, radius: SEG })
+  const id = world.createBox({ position: { x: cx(c), y: Y, z: cz(r) }, color: myColor, size: SEG })
   pendingClaims.push({ id, t: now })
   return id
 }
