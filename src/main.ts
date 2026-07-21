@@ -510,7 +510,7 @@ async function main() {
     audioNet.setMicEnabled!(!micLive)
       .then(on => { micLive = on; log(on ? 'mic live (M mutes)' : 'mic muted (M unmutes)') })
       .catch(e => logErr('mic toggle failed', e))
-      .finally(() => { micBusy = false })
+      .finally(() => { micBusy = false; micUi() })
   }
   addEventListener('keydown', e => {
     if ((e.key !== 'm' && e.key !== 'M') || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return
@@ -526,18 +526,21 @@ async function main() {
     + 'font:13px system-ui,sans-serif;color:#fff;background:rgba(20,24,32,0.75)'
   micBtn.onclick = () => toggleMic()
   document.body.appendChild(micBtn)
+  // Redrawn on the events that can change it: a mic toggle settling, and
+  // the transport coming up mid-connect (hasAudio flips exactly once).
   const micUi = () => {
     if (!audioNet.hasAudio?.()) { micBtn.style.display = 'none'; return }
     micBtn.style.display = 'block'
     micBtn.textContent = micLive ? '\u{1F399} mic live · click to mute (M)' : '\u{1F507} muted · click to talk (M)'
     micBtn.style.background = micLive ? 'rgba(46,125,50,0.9)' : 'rgba(20,24,32,0.75)'
   }
-  setInterval(micUi, 500)
+  micUi()
 
   if (net instanceof Net) net.connect(room)
   else {
     (net as import('./matrix/net').MatrixNet)
       .connect(wp!, params.get('lkService'), widgetBoot!)
+      .then(() => micUi())
       .catch(e => { log(`matrix connect failed: ${e}`); console.error('[worldsync]', e) })
   }
 
