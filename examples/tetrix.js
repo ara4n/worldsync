@@ -26,7 +26,7 @@
 
 const H = 24, LANE = 5
 const CELL = 0.6, CB = 0.29 // cell prop half-size: the "tetrix cell" tag
-const X0 = -9, Y0 = 0.4     // world pos of column 0, bottom row
+const X0 = -9, Y0 = 0.3     // world pos of column 0, bottom row (resting on the ground)
 const GRAVITY_S = 0.9
 const COLORS = [0, 0xd94f4f, 0x5a79e8, 0xe89a4f, 0xe3d84f, 0x58d977, 0xb45ae8, 0x4fc9d9]
 // tetroji types 1..7 = Z J L O S T I; [0,0] is top left of the bounding box
@@ -85,7 +85,9 @@ const orphanSince = {}
 let borderLines = [], borderFor = -1
 
 world.onload = () => {
-  world.env({ background: 0x1a212c, ground: false })
+  // lit cells + the default ground: the CSM sun gives the stacks their
+  // self-shadowing and drops the well's shadow on the floor
+  world.env({ background: 0x1a212c })
 }
 
 world.onenter = () => { me = world.me }
@@ -194,7 +196,9 @@ const spawnPiece = () => {
     return
   }
   const ids = blocks.map(([c, r]) => {
-    const id = world.createBox({ position: { x: wx(c), y: wy(r), z: 0 }, color: COLORS[type], size: CB, unlit: true })
+    // lit (so the sun shades and shadows them) and bounce-free (pieces
+    // slide on the grid; the dots drop-bounce reads wrong here)
+    const id = world.createBox({ position: { x: wx(c), y: wy(r), z: 0 }, color: COLORS[type], size: CB, bounce: false })
     pendingClaims.push({ id, t: now })
     return id
   })

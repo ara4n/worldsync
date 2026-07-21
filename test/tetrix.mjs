@@ -86,10 +86,10 @@ else console.log('two players, lane assignment: ok')
 // cell above it (r=9); the primary must flash-clear the row and drop
 // the straggler into it. Random pieces cannot be steered into a full
 // row deterministically; the session API can.
-const wy = (r) => 0.4 + (23 - r) * 0.6
+const wy = (r) => 0.3 + (23 - r) * 0.6
 await b.frame.evaluate(([X0, CELL]) => {
   const { session } = window.__jig
-  const wyIn = (r) => 0.4 + (23 - r) * 0.6
+  const wyIn = (r) => 0.3 + (23 - r) * 0.6
   for (let c = 0; c < 15; c++) {
     session.emit('prop', session.nextNetId(),
       { pos: { x: X0 + c * CELL, y: wyIn(10), z: 0 }, color: 0x888888, shape: 'box', size: 0.29, unlit: true })
