@@ -27,6 +27,10 @@ export class View {
     this.renderer.setPixelRatio(Math.min(devicePixelRatio, 2))
     this.renderer.shadowMap.enabled = true
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap
+    // Filmic rolloff: glTF scenes with glossy floors turn the analytic sun
+    // into a blown white glare puddle under linear output; ACES compresses
+    // the highlight so it reads as sheen instead of a searchlight.
+    this.renderer.toneMapping = THREE.ACESFilmicToneMapping
     parent.appendChild(this.renderer.domElement)
     this.scene.background = new THREE.Color(0x0e1116)
     this.camera.position.set(9, 9, 13)
