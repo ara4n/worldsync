@@ -90,9 +90,10 @@ export interface ScriptHost {
   prop(id: string): PropView | null
   /** bounce:false = subdued board-game prop (moves ease, claims don't
    * swell); pop:false = no spawn fade-in or despawn pop, the prop
-   * appears and vanishes instantly (snake segments) */
+   * appears and vanishes instantly (snake segments); opacity < 1 =
+   * rendered translucent (tetrix next-piece ghosts) */
   spawnProp(kind: string, x: number, y: number, z: number, color: number, size: number, unlit: boolean,
-    bounce: boolean, pop: boolean): string
+    bounce: boolean, pop: boolean, opacity: number): string
   /** an invisible fixed cuboid collider in the physics world (folded sim
    * state like any prop: boxes bounce off it identically on every peer).
    * yaw rotates about Y; w/h/d are full extents. Despawn/move as a prop. */
@@ -279,7 +280,8 @@ const PRELUDE = `
       return H.spawnProp('sphere', t.x, t.y, t.z,
         typeof props.color === 'number' ? props.color : 0xffffff,
         typeof props.radius === 'number' ? props.radius : 0.5,
-        !!props.unlit, props.bounce !== false, props.pop !== false)
+        !!props.unlit, props.bounce !== false, props.pop !== false,
+        typeof props.opacity === 'number' ? props.opacity : 1)
     },
     // any prop kind by name: 'sphere', 'box', or a modelled kind the
     // client renders as built-in geometry - the low-poly chess set
@@ -291,7 +293,8 @@ const PRELUDE = `
       return H.spawnProp(String(props.kind ?? 'sphere'), t.x, t.y, t.z,
         typeof props.color === 'number' ? props.color : 0xffffff,
         typeof props.size === 'number' ? props.size : 0.5,
-        !!props.unlit, props.bounce !== false, props.pop !== false)
+        !!props.unlit, props.bounce !== false, props.pop !== false,
+        typeof props.opacity === 'number' ? props.opacity : 1)
     },
     // a kinematic cube prop (rendered as a 2*size cube), same lifecycle as
     // spheres: move/paint/claim/despawn; no physics
@@ -300,7 +303,8 @@ const PRELUDE = `
       return H.spawnProp('box', t.x, t.y, t.z,
         typeof props.color === 'number' ? props.color : 0xffffff,
         typeof props.size === 'number' ? props.size : 0.5,
-        !!props.unlit, props.bounce !== false, props.pop !== false)
+        !!props.unlit, props.bounce !== false, props.pop !== false,
+        typeof props.opacity === 'number' ? props.opacity : 1)
     },
     despawn(id) { return H.despawn(id) },
     claim(id) { return H.claim(id) },
@@ -462,10 +466,10 @@ export class WorldScript {
     fn('me', () => json(host.me()))
     fn('props', () => json(host.props()))
     fn('prop', (id) => json(host.prop(ctx.getString(id))))
-    fn('spawnProp', (kind, x, y, z, c, size, unlit, bounce, pop) =>
+    fn('spawnProp', (kind, x, y, z, c, size, unlit, bounce, pop, opacity) =>
       ctx.newString(host.spawnProp(ctx.getString(kind), ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z),
         ctx.getNumber(c), ctx.getNumber(size), ctx.dump(unlit) === true, ctx.dump(bounce) !== false,
-        ctx.dump(pop) !== false)))
+        ctx.dump(pop) !== false, ctx.getNumber(opacity))))
     fn('spawnSolid', (x, y, z, yaw, w, h, d) =>
       ctx.newString(host.spawnSolid(ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z),
         ctx.getNumber(yaw), ctx.getNumber(w), ctx.getNumber(h), ctx.getNumber(d))))

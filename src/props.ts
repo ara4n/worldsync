@@ -15,7 +15,7 @@ import type { Prop } from './sim'
  */
 
 interface Anim { t0: number; frames: { until: number; y0: number; y1: number; easeIn: boolean }[]; x: number; z: number; x0: number; z0: number }
-interface Dying { mesh: THREE.Mesh; t0: number }
+interface Dying { mesh: THREE.Mesh; t0: number; alpha: number }
 
 // Low-poly chess piece kinds: lathe-turned from hand-authored [radius,
 // height] profiles in piece-local units (total height 1, base resting at
@@ -67,7 +67,7 @@ export class PropLayer {
   group = new THREE.Group()
   private meshes = new Map<string, THREE.Mesh>()
   private state = new Map<string, { pos: THREE.Vector3; color: number; claim: string | null; born: number
-    swell: boolean; pop: boolean }>()
+    swell: boolean; pop: boolean; alpha: number }>()
   private anims = new Map<string, Anim>()
   private dying: Dying[] = []
   private geos = new Map<string, THREE.BufferGeometry>()
@@ -103,10 +103,15 @@ export class PropLayer {
           })
         this.patchMaterial(mat)
         // pop:false skips the spawn fade-in (and the death pop below):
-        // snake segments read as one body, not per-cell twinkles
+        // snake segments read as one body, not per-cell twinkles. A prop
+        // opacity < 1 is the fade target instead of 1 (ghost previews)
+        const alpha = p.opacity ?? 1
         if (p.pop !== false) {
           mat.transparent = true
           mat.opacity = 0
+        } else if (alpha < 1) {
+          mat.transparent = true
+          mat.opacity = alpha
         }
         mesh = new THREE.Mesh(this.geoFor(p.kind, p.size), mat)
         mesh.name = id // the prop's net id, for the inspector
@@ -123,6 +128,7 @@ export class PropLayer {
           // seamless blob until unclaimed
           swell: p.bounce !== false,
           pop: p.pop !== false,
+          alpha,
         })
         continue
       }
@@ -140,11 +146,12 @@ export class PropLayer {
     for (const [id, mesh] of this.meshes) {
       if (props.has(id)) continue
       const pop = this.state.get(id)?.pop ?? true
+      const alpha = this.state.get(id)?.alpha ?? 1
       this.meshes.delete(id)
       this.state.delete(id)
       this.anims.delete(id)
       if (pop) {
-        this.dying.push({ mesh, t0: now })
+        this.dying.push({ mesh, t0: now, alpha })
       } else {
         this.group.remove(mesh)
         ;(mesh.material as THREE.Material).dispose()
@@ -186,8 +193,8 @@ export class PropLayer {
       const st = this.state.get(id)!
       const mat = mesh.material as THREE.MeshBasicMaterial
       const age = now - st.born
-      if (mat.opacity < 1) {
-        mat.opacity = Math.min(1, age / FADE_MS)
+      if (mat.opacity < st.alpha) {
+        mat.opacity = Math.min(st.alpha, age / FADE_MS)
         if (mat.opacity >= 1) mat.transparent = false
       }
       const anim = this.anims.get(id)
@@ -225,7 +232,7 @@ export class PropLayer {
         const u = (t - POP_SWELL_MS) / POP_SHRINK_MS
         d.mesh.scale.setScalar(1.3 * (1 - u))
         mat.transparent = true
-        mat.opacity = 1 - u
+        mat.opacity = (1 - u) * d.alpha
       } else {
         this.group.remove(d.mesh)
         mat.dispose()

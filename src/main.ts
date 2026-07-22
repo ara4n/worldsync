@@ -560,12 +560,14 @@ async function main() {
       const p = sim.props.get(id)
       return p ? propView(id, p) : null
     },
-    spawnProp: (kind, x, y, z, color, size, unlit, bounce, pop) => {
+    spawnProp: (kind, x, y, z, color, size, unlit, bounce, pop, opacity) => {
       const id = session.nextNetId()
-      // bounce/pop are only carried when disabled, keeping the common op lean
+      // bounce/pop/opacity are only carried when non-default, keeping the
+      // common op lean
       session.emit('prop', id, {
         pos: { x, y, z }, color, shape: kind, size, unlit,
         ...(bounce ? {} : { bounce: false }), ...(pop ? {} : { pop: false }),
+        ...(opacity >= 1 ? {} : { opacity: Math.max(0, opacity) }),
       })
       return id
     },

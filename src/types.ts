@@ -40,6 +40,7 @@ export interface PropInfo {
   unlit: boolean
   bounce?: boolean // false: discrete moves ease instead of bounce-dropping
   pop?: boolean    // false: no spawn fade-in or despawn pop; appears/vanishes instantly
+  opacity?: number // < 1: rendered translucent (ghost previews)
   claim: string | null
   yaw?: number    // solid only: rotation about Y
   dims?: Vec3     // solid only: cuboid extents
@@ -65,6 +66,7 @@ export interface Interaction {
   unlit?: boolean // prop only: cosmetic hint, but folded state so it boots
   bounce?: boolean // prop only: false = ease vertical falls, never bounce
   pop?: boolean   // prop only: false = no spawn fade-in / despawn pop
+  opacity?: number // prop only: < 1 renders translucent (ghost previews)
   yaw?: number    // prop only, solid: rotation about Y
   dims?: Vec3     // prop only, solid: cuboid extents
   solid?: boolean // prop only: create a fixed collider in the physics world

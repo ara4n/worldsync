@@ -159,19 +159,20 @@ declare const world: {
    * subdued board-game prop: discrete moves ease instead of
    * bounce-dropping, and claims don't swell it. pop:false suppresses the
    * spawn fade-in and despawn pop, so the prop appears and vanishes
-   * instantly (snake segments) */
+   * instantly (snake segments). opacity < 1 renders it translucent
+   * (tetrix next-piece ghosts) */
   createSphere(props?: { position?: Vec3Like; translation?: Vec3Like; color?: number; radius?: number
-    unlit?: boolean; bounce?: boolean; pop?: boolean }): string
+    unlit?: boolean; bounce?: boolean; pop?: boolean; opacity?: number }): string
   /** spawn a prop of any kind by name: 'sphere', 'box', or a modelled kind
    * the client renders as built-in geometry - the low-poly chess set
    * 'pawn'|'rook'|'knight'|'bishop'|'queen'|'king', whose size is the
    * piece's height and whose base rests at the prop position. Unknown
    * kinds render as spheres. Returns its id. */
   createProp(props?: { kind?: string; position?: Vec3Like; translation?: Vec3Like; color?: number
-    size?: number; unlit?: boolean; bounce?: boolean; pop?: boolean }): string
+    size?: number; unlit?: boolean; bounce?: boolean; pop?: boolean; opacity?: number }): string
   /** spawn a kinematic cube prop (a 2*size cube); returns its id */
   createBox(props?: { position?: Vec3Like; translation?: Vec3Like; color?: number; size?: number
-    unlit?: boolean; bounce?: boolean; pop?: boolean }): string
+    unlit?: boolean; bounce?: boolean; pop?: boolean; opacity?: number }): string
   /** an invisible fixed cuboid collider (folded sim state: boxes bounce
    * off it identically on every peer). yaw about Y, dims are full extents.
    * Despawn/move it like any prop. Returns its id. */
