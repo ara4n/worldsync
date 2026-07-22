@@ -2,7 +2,7 @@
 // lane 0 and falls under gravity; space hard-drops and locks it (cells
 // become unclaimed at the bottom); a second tab widens the well and
 // spawns in lane 1; then tab a hard-drops until the lane tops out and
-// the well wipes.
+// the well wipes, resetting every score and the level.
 // Run the dev server first: npm run dev
 import { chromium } from 'playwright'
 import { readFileSync } from 'node:fs'
@@ -190,6 +190,15 @@ else {
     null, { timeout: 10000 }).then(() => true).catch(() => false)
   if (!cleared) fail('well did not wipe after top out')
   else console.log('top out wipes the well: ok')
+  // the wipe zeroes every score and the shared lines counter: all the
+  // hidden props (parked below the floor) must read color 0 - the score
+  // props are painted down and the lines prop despawns/respawns at 0
+  const reset = await a.frame.waitForFunction(() => {
+    const hidden = window.__jig.props().filter((p) => p.y < -3)
+    return hidden.some((p) => p.claim) && hidden.every((p) => p.color === 0)
+  }, null, { timeout: 10000 }).then(() => true).catch(() => false)
+  if (!reset) fail('scores/lines did not reset to zero after the wipe')
+  else console.log('wipe resets scores and level: ok')
 }
 
 if (process.exitCode !== 1) console.log('TETRIX TEST PASSED')

@@ -17,7 +17,8 @@
 // refereed); the primary sweeps duplicate cells after the fact. Line
 // clears are PRIMARY-ONLY, so two simultaneous completions cannot race
 // the row shifts: full rows flash white, then vanish and the stack
-// above drops. A blocked spawn tops the board out and wipes the well.
+// above drops. A blocked spawn tops the board out and wipes the well,
+// zeroing every score and the shared level with it.
 //
 // Upload with "load world script (.js)". Click the world once so keys
 // focus, then: left/right move, up rotates, down soft-drops, space
@@ -83,7 +84,7 @@ const wy = (r) => Y0 + (H - 1 - r) * CELL
 let me, W = 10
 let cells = [] // this frame's cell props: {id, c, r, claimedBy, color}
 let scoreProps = [], linesProp = null
-let scoreId = null, scoreWait = -10, linesWait = -10, myScore = 0
+let scoreId = null, scoreWait = -10, linesWait = -10, myScore = 0, hadLines = false
 let softDrops = 0, hardCells = 0 // this piece's drop points
 let hudLast = ''
 let piece = null // { type, x, y, rot, ids: [4] }
@@ -254,6 +255,11 @@ const spawnPiece = () => {
   if (blocks.some(([c, r]) => landedAt(c, r))) {
     console.log('TOP OUT - clearing the well')
     for (const cell of cells) if (cell.claimedBy === '') world.despawn(cell.id)
+    // game over for everyone: zero every score prop (paint has no claim
+    // gate) and despawn the lines counter. Its disappearance is the
+    // reset signal each peer watches for - nothing else ever removes it
+    for (const p of scoreProps) world.paint(p.id, 0)
+    if (linesProp) world.despawn(linesProp.id)
     respawnAt = now + 2
     return
   }
@@ -329,6 +335,17 @@ world.onupdate = (dt, time) => {
   scan()
   W = 5 + 5 * world.peers().length
   drawBorder()
+
+  // a vanished lines prop means someone topped out: forget the local
+  // tally too, or our next lock would repaint the old score right over
+  // the zero the wiper painted. Pushing linesWait holds the primary's
+  // recreate for 2s, so even a throttled tab sees the gap
+  if (hadLines && !linesProp) {
+    myScore = 0; softDrops = 0; hardCells = 0
+    if (scoreId) world.paint(scoreId, 0)
+    linesWait = now
+  }
+  hadLines = !!linesProp
 
   // claims trail spawns by a fold (a same-dispatch claim is refused);
   // looked up directly, since we claim cells AND our score prop
