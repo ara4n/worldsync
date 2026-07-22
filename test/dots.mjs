@@ -41,11 +41,13 @@ await a.frame.setInputFiles('#scriptfile', {
 })
 console.log('a uploaded dots.js; waiting for the board...')
 
+// board dots only: the script also parks hidden score/timer props far
+// below the board, so count props above the floor, not sim.props.size
 for (const [name, t] of [['a', a], ['b', b]]) {
   const ok = await t.frame.waitForFunction(
-    () => window.__jig.sim.props.size === 27,
+    () => window.__jig.props().filter(p => p.y > -1).length === 27,
     null, { timeout: 30000 }).then(() => true).catch(() => false)
-  if (!ok) fail(`${name} never saw the 27-dot board (has ${await t.frame.evaluate(() => window.__jig.sim.props.size)})`)
+  if (!ok) fail(`${name} never saw the 27-dot board (has ${await t.frame.evaluate(() => window.__jig.props().filter(p => p.y > -1).length)})`)
 }
 console.log('board seeded and replicated (27 dots on both tabs)')
 await a.page.waitForTimeout(500) // camera repose + fade-ins
@@ -53,7 +55,7 @@ await a.page.waitForTimeout(500) // camera repose + fade-ins
 // find an adjacent same-coloured pair, preferring pairs whose straight
 // screen path does not graze a third dot
 const pair = await a.frame.evaluate(() => {
-  const props = window.__jig.props()
+  const props = window.__jig.props().filter(p => p.y > -1) // dots, not HUD props
   const dist = (p, q) => Math.hypot(p.x - q.x, p.y - q.y, p.z - q.z)
   const pairs = []
   for (const p of props) {
@@ -111,12 +113,12 @@ await a.page.mouse.up()
 for (const [name, t] of [['a', a], ['b', b]]) {
   const ok = await t.frame.waitForFunction(
     ([p, q]) => {
-      const props = window.__jig.props()
+      const props = window.__jig.props().filter(x => x.y > -1)
       return props.length === 27 && !props.some(x => x.id === p || x.id === q)
     }, [pair.p, pair.q], { timeout: 15000 }).then(() => true).catch(() => false)
   if (!ok) {
     const state = await t.frame.evaluate(([p, q]) => {
-      const props = window.__jig.props()
+      const props = window.__jig.props().filter(x => x.y > -1)
       return { n: props.length, hasP: props.some(x => x.id === p), hasQ: props.some(x => x.id === q) }
     }, [pair.p, pair.q])
     fail(`${name}: chain did not clear cleanly (${JSON.stringify(state)})`)

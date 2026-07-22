@@ -14,11 +14,23 @@
 // chain may revisit its own dots (that is how loops close), but each
 // SEGMENT is unique: a link already in the chain can never be re-added,
 // in either direction.
+//
+// Scoreboard, tetrix-style: shared state rides in hidden props parked far
+// below the fog, identified by radius. Each player's SCORE sphere (claimed
+// by them, color = score, 1 point per dot cleared, so loops pay big)
+// survives reloads via its claim and feeds every peer's HUD. The TIMER
+// sphere (unclaimed, primary-counted, color = seconds left, IDLE = armed)
+// runs a 60s round: the countdown starts when someone starts the game by
+// chaining the first dot; at 0 play freezes and final scores hold for a
+// beat, then the primary repaints a fresh board and rearms the timer.
 
 const W = 3, H = 3, D = 3
 const COLORS = [0xda664f, 0x9060b0, 0xe3db50, 0x94baf9, 0xa0e699]
 const R = 0.16
 const ORG = { x: -(W - 1) / 2, y: 1.4, z: -(D - 1) / 2 }
+const SCORE = 0.11, TIMER = 0.13 // hidden HUD props: the radius is the tag
+const HIDE_Y = -30               // parked past the fog's far plane
+const GAME_S = 60, IDLE = 999, OVER_HOLD = 5
 
 const at = (x, y, z) => ({ x: ORG.x + x, y: ORG.y + y, z: ORG.z + z })
 const gridOf = (p) => ({ x: Math.round(p.x - ORG.x), y: Math.round(p.y - ORG.y), z: Math.round(p.z - ORG.z) })
@@ -38,6 +50,15 @@ let latticeLines = [] // local line entities, one per grid edge: { edge, line }
 let latticeTarget = 0.25
 let pendingDrops = [] // refills spawned above the board, dropped a beat later
 let dropWait = 0
+let dotProps = []     // this frame's board dots (size R), from scan()
+let scoreProps = [], timerProp = null
+let scoreId = null, scoreWait = -10, timerWait = -10, myScore = 0
+let prevScore = null  // last round's score; local, so just our own HUD row
+let pendingClaims = [] // {id, t}: claims trail spawns by a fold
+let hudLast = ''
+let now = 0
+let deadline = null, lastPainted = -1, overAt = null // primary countdown state
+const orphanSince = {}
 
 world.onload = () => {
   world.env({ background: 0xffffff, fog: { color: 0xffffff, near: 4.5, far: 11 }, ground: false })
@@ -91,6 +112,16 @@ function fadeLattice() {
   }
 }
 
+/** split this frame's props by radius tag: board dots, scores, the timer */
+function scan() {
+  dotProps = []; scoreProps = []; timerProp = null
+  for (const p of world.props()) {
+    if (p.size === R) dotProps.push(p)
+    else if (p.size === SCORE) scoreProps.push(p)
+    else if (p.size === TIMER) timerProp = p
+  }
+}
+
 /** does any adjacent same-colour pair exist in a full board colour map? */
 function solvable(cols) {
   for (let x = 0; x < W; x++) for (let y = 0; y < H; y++) for (let z = 0; z < D; z++) {
@@ -102,11 +133,13 @@ function solvable(cols) {
   return false
 }
 
-world.onupdate = () => {
+world.onupdate = (dt, time) => {
+  now = time
+  scan()
   // Board init is single-runner logic: only the primary seeds, and only
   // into an empty world. The colours are the primary's dice, shipped in
   // the spawn ops; solvability is checked before anything is spawned.
-  if (!seeded && world.props().length > 0) seeded = true
+  if (!seeded && dotProps.length > 0) seeded = true
   if (!seeded && world.me.primary) {
     seeded = true
     let cols
@@ -121,6 +154,19 @@ world.onupdate = () => {
     }
     console.log('board seeded')
   }
+  const t = timerProp ? timerProp.color : IDLE
+  // time up: drop any live chain where it stands, uncleared
+  if (t === 0 && (drawing || sel.length)) {
+    drawing = false
+    latticeTarget = 0.25
+    for (const id of new Set(sel)) world.unclaim(id)
+    sel = []; cycleColor = null; preview = null
+    chain.points = []
+  }
+  // a rearmed timer means the primary reset the round: forget the local
+  // tally too, or our next clear would repaint the old score right over
+  // the zero the reset painted
+  if (t === IDLE && myScore > 0) { prevScore = myScore; myScore = 0 }
   if (drawing) {
     revalidate()
     updateLine()
@@ -134,13 +180,107 @@ world.onupdate = () => {
     dropWait = 0
   }
   fadeLattice()
+
+  // claims trail spawns by a fold (a same-dispatch claim is refused)
+  pendingClaims = pendingClaims.filter((pc) => {
+    const p = world.prop(pc.id)
+    if (!p) return now - pc.t < 3
+    if (p.claimedBy === '') world.claim(pc.id)
+    return false
+  })
+  // our score prop: adopt a survivor from a previous session (the claim
+  // is ours across reloads, keeping the score), else spawn one; if ours
+  // vanished (an orphan sweep race), let it respawn
+  if (scoreId && now > scoreWait + 4 && !scoreProps.some((p) => p.id === scoreId)) scoreId = null
+  if (!scoreId) {
+    const existing = scoreProps.find((p) => p.claimedBy === world.me.id)
+    if (existing) {
+      scoreId = existing.id
+      scoreWait = now
+      myScore = Math.max(myScore, existing.color)
+    } else if (now > scoreWait + 2) {
+      scoreWait = now
+      scoreId = world.createSphere({ position: { x: 0, y: HIDE_Y, z: 0 }, color: 0, radius: SCORE, unlit: true, bounce: false })
+      pendingClaims.push({ id: scoreId, t: now })
+    }
+  }
+
+  // the scoreboard HUD, rebuilt from the shared props so every peer (and
+  // any late joiner) shows the same table
+  const esc = (s) => String(s).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]))
+  const board = scoreProps
+    .filter((p) => p.claimedBy !== '')
+    .map((p) => ({ who: p.claimedBy.split(':')[0], mine: p.mine, score: p.color }))
+    .sort((a, b) => b.score - a.score)
+  const clock =
+    t === IDLE ? `${GAME_S}s · chain a dot to start`
+    : t === 0 ? '<span style="color:#e08080">time up</span>'
+    : t <= 10 ? `<span style="color:#e08080">${t}s</span>`
+    : `${t}s`
+  let html = `<b>dots</b> · ${clock}<table>`
+  for (const r of board) {
+    const cell = (s) => (r.mine ? `<span style="color:#7fe0a0">${s}</span>` : s)
+    const score = r.mine && prevScore !== null ? `${r.score} (prev ${prevScore})` : r.score
+    html += `<tr><td>${cell(esc(r.who))}</td><td>${cell(score)}</td></tr>`
+  }
+  html += '</table>'
+  if (html !== hudLast) { hudLast = html; world.hud(html) }
+
+  // -- primary duties: the timer prop, the countdown, round resets --
+  if (!world.me.primary) { deadline = null; lastPainted = -1; overAt = null; return }
+  if (!timerProp && now > timerWait + 2) {
+    timerWait = now
+    world.createSphere({ position: { x: 1, y: HIDE_Y, z: 0 }, color: IDLE, radius: TIMER, unlit: true, bounce: false })
+  }
+  if (timerProp) {
+    if (t !== IDLE && t > 0) {
+      // count against a local deadline, repainting only when the shown
+      // second falls behind it: never a double-decrement off a stale fold,
+      // and a mid-round primary handoff just resumes from the painted value
+      if (deadline === null) deadline = now + t
+      const rem = Math.max(0, Math.ceil(deadline - now))
+      if (rem < t && rem !== lastPainted) { world.paint(timerProp.id, rem); lastPainted = rem }
+    } else { deadline = null; lastPainted = -1 }
+    if (t === 0) {
+      if (overAt === null) overAt = now
+      // hold the final scores a beat, then start a fresh round (once the
+      // last refills have settled and the board is whole again)
+      else if (now - overAt > OVER_HOLD && dotProps.length === W * H * D) {
+        console.log('new round')
+        let fresh
+        do {
+          fresh = {}
+          for (const p of dotProps) { const g = gridOf(p); fresh[key(g.x, g.y, g.z)] = COLORS[rnd(COLORS.length)] }
+        } while (!solvable(fresh))
+        for (const p of dotProps) {
+          const g = gridOf(p)
+          if (fresh[key(g.x, g.y, g.z)] !== p.color) world.paint(p.id, fresh[key(g.x, g.y, g.z)])
+        }
+        for (const p of scoreProps) world.paint(p.id, 0) // paint has no claim gate
+        world.paint(timerProp.id, IDLE)
+        overAt = null
+      }
+    } else overAt = null
+  }
+  // sweep score props whose owner is gone: departure force-unclaims, so
+  // ownerless ones are dead weight; the grace covers a spawn's claim window
+  const live = new Set(world.peers().map((p) => p.id))
+  for (const p of scoreProps) {
+    if (live.has(p.claimedBy)) { delete orphanSince[p.id]; continue }
+    if (orphanSince[p.id] === undefined) orphanSince[p.id] = now
+    else if (now - orphanSince[p.id] > 5) { world.despawn(p.id); delete orphanSince[p.id] }
+  }
 }
 
 world.onpointerdown = (ev) => {
   if (!ev.entity) return
+  if (timerProp && timerProp.color === 0) return // time up: wait for the reset
   const p = world.prop(ev.entity)
-  if (!p || p.claimedBy) return
+  if (!p || p.size !== R || p.claimedBy) return
   if (!world.claim(p.id)) return
+  // chaining the first dot of an armed round starts the game: any peer may
+  // fire the starting gun (paint has no claim gate), the primary counts
+  if (timerProp && timerProp.color === IDLE) world.paint(timerProp.id, GAME_S)
   sel = [p.id]
   drawing = true
   cycleColor = null
@@ -203,8 +343,9 @@ world.onpointerup = () => {
   drawing = false
   latticeTarget = 0.25
   revalidate()
-  if (sel.length > 1 || (cycleColor !== null && sel.length > 0)) clearChain()
-  else for (const id of sel) world.unclaim(id)
+  const over = timerProp && timerProp.color === 0
+  if (!over && (sel.length > 1 || (cycleColor !== null && sel.length > 0))) clearChain()
+  else for (const id of new Set(sel)) world.unclaim(id)
   sel = []
   cycleColor = null
   preview = null
@@ -262,9 +403,13 @@ function clearChain() {
   if (cycleColor !== null) {
     // a closed loop clears every dot of its colour not held by a rival
     for (const p of world.props()) {
+      if (p.size !== R) continue // never sweep up a hidden score/timer prop
       if (p.color === cycleColor && (!p.claimedBy || p.claimedBy === me) && ids.indexOf(p.id) === -1) ids.push(p.id)
     }
   }
+  // the score: a point per dot this clear removes, loop sweeps included
+  myScore += ids.length
+  if (scoreId) world.paint(scoreId, myScore)
   const remove = {}
   for (const id of ids) remove[id] = true
   const columns = {} // "x,z" -> surviving dots, sorted low-to-high
