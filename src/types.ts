@@ -88,9 +88,12 @@ export type DcMessage =
   // calibrates its own tick clock against.
   | { kind: 'pong'; t0: number; t1: number; tt: number }
   // Transport-level introduction: maps the sender's opaque SFU identity
-  // (LiveKit's modern token flow mints hashes) to its membership id.
-  // Consumed by MatrixNet; the Session never sees it.
-  | { kind: 'hello'; peer: string; ack?: boolean }
+  // (LiveKit's modern token flow mints hashes) to its membership id, and
+  // carries its join order once known - so peers can mesh on transport
+  // presence alone, without waiting for membership state to crawl
+  // through a throttled host tab's sync. Consumed by MatrixNet; the
+  // Session never sees it.
+  | { kind: 'hello'; peer: string; order?: number; ack?: boolean }
   | { kind: 'i'; i: Interaction }
   // The pose plane: latest-wins continuous motion for a held entity.
   // Never rolls anyone back; recorded per author and read by replays.

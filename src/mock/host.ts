@@ -24,6 +24,10 @@ const dropOwnEcho = qs.get('dropOwnEcho') === '1'
 // its created_ts and rejoin born-expired forever without the widget's
 // pre-join cleanup).
 const staleOwnMembership = qs.get('staleOwnMembership') === '1'
+// Test hook: withhold OTHER peers' m.call.member feeds, reproducing a
+// throttled host tab whose sync crawls (the widget never learns a
+// joiner's membership; peers must mesh via the transport hello order).
+const dropPeerEcho = qs.get('dropPeerEcho') === '1'
 const roomId = `!${room}:mock.localhost`
 const userId = `@u${Math.random().toString(36).slice(2, 8)}:mock.localhost`
 const deviceId = `MOCK${Math.random().toString(36).slice(2, 6).toUpperCase()}`
@@ -90,6 +94,7 @@ class MockDriver extends WidgetDriver {
     }
     if (gossip) this.ch.postMessage({ t: 'state', ev } satisfies HostSync)
     if (dropOwnEcho && ev.sender === userId && ev.type === 'org.matrix.msc3401.call.member') return
+    if (dropPeerEcho && ev.sender !== userId && ev.type === 'org.matrix.msc3401.call.member') return
     if (this.api) {
       // Deferred: when the widget itself sent this event, its send request
       // must resolve before the echo arrives (like a real /sync round trip),

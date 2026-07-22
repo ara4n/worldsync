@@ -106,5 +106,38 @@ if (ok) {
   await page.close()
 }
 
+// --- scenario 4: the SENIOR's host never surfaces the joiner's
+// membership (a throttled hidden tab syncing once a minute); the joiner
+// must still calibrate and boot via the transport hello order, instead
+// of its pings being silently dropped until the tab is focused ---
+{
+  const room4 = 'lb' + Math.random().toString(36).slice(2, 8)
+  const ctx4 = await browser.newContext()
+  const open = async (params) => {
+    const p = await ctx4.newPage()
+    await p.goto(`${base}/mock.html?room=${room4}${params}`)
+    await p.waitForFunction(() => {
+      const w = document.getElementById('widget')?.contentWindow
+      return !!(w && w.__jig && w.__jig.session)
+    }, null, { timeout: 30000 })
+    return { page: p, frame: p.frames().find((f) => f !== p.mainFrame()) }
+  }
+  const senior = await open('&dropPeerEcho=1')
+  await senior.frame.waitForFunction(() => window.__jig.session.ready(), null, { timeout: 15000 })
+  const joiner = await open('')
+  const ready = await joiner.frame.waitForFunction(() =>
+    window.__jig.session.ready() && window.__jig.session.calibrated, null, { timeout: 20000 })
+    .then(() => true).catch(() => false)
+  if (!ready) fail('hello-order: joiner never calibrated against a membership-blind senior')
+  // the senior must have meshed with the joiner from the hello alone
+  const meshed = await senior.frame.waitForFunction(() =>
+    [...window.__jig.net.peers.values()].some((p) => p.connected), null, { timeout: 10000 })
+    .then(() => true).catch(() => false)
+  if (!meshed) fail('hello-order: senior never accepted the joiner via hello')
+  else console.log('mesh via hello order despite a membership-blind host: ok')
+  await senior.page.close()
+  await joiner.page.close()
+}
+
 if (process.exitCode !== 1) console.log('LONEBOOT TEST PASSED')
 await browser.close()

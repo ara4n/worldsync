@@ -97,11 +97,21 @@ export class MatrixNet {
   /** Introduce our membership id to everyone on the transport; with ackTo,
    * answer one peer's hello instead (targeted at its SFU identity). Acks
    * carry the same mapping but are never answered, so introductions
-   * cannot ping-pong. */
+   * cannot ping-pong. Once joined, hellos also carry our join order, so
+   * receivers can mesh with us without waiting for our membership state
+   * to surface through their (possibly throttled) host. */
   private sayHello(ackTo?: string) {
     this.transport?.send(ackTo ?? null,
-      JSON.stringify({ kind: 'hello', peer: this.id, ...(ackTo ? { ack: true } : {}) }))
+      JSON.stringify({
+        kind: 'hello', peer: this.id,
+        ...(this.joined ? { order: this.order } : {}),
+        ...(ackTo ? { ack: true } : {}),
+      }))
   }
+
+  /** join orders learned from hellos: lets reconcile() treat a reachable,
+   * joined peer as a member before its state crawls through the host */
+  private helloOrder = new Map<string, number>()
 
   private memberIdFor(sfuId: string): string | null {
     for (const [mid, sid] of this.sfuIdFor) if (sid === sfuId) return mid
@@ -173,11 +183,13 @@ export class MatrixNet {
       let msg: DcMessage
       try { msg = JSON.parse(data) } catch { return /* not ours */ }
       if (msg.kind === 'hello') {
+        const orderNews = msg.order !== undefined && this.helloOrder.get(msg.peer) !== msg.order
+        if (orderNews) this.helloOrder.set(msg.peer, msg.order!)
         if (this.sfuIdFor.get(msg.peer) !== from) {
           this.sfuIdFor.set(msg.peer, from)
           this.onLog(`hello${msg.ack ? '-ack' : ''}: ${msg.peer} is sfu identity ${from}`)
           this.reconcile()
-        }
+        } else if (orderNews) this.reconcile()
         // Answer EVERY hello, not just mapping-changing ones: a reloaded
         // peer keeps its membership id AND its SFU identity, so its fresh
         // hello changes nothing on our side - but it still needs our
@@ -330,6 +342,7 @@ export class MatrixNet {
           this.joined = true
           this.order = Date.now()
           this.onJoined(this.id, this.order, true)
+          this.sayHello() // late arrivals mesh with us via the hello order
         }
         return // the ghost scan below is meaningless without an identity
       }
@@ -497,8 +510,19 @@ export class MatrixNet {
       this.order = mine
       this.onJoined(this.id, this.order, members.size === 1)
       this.onLog(`rtc membership up (${members.size} member${members.size === 1 ? '' : 's'})`)
+      // Announce our order: a host whose sync is throttled (hidden tab)
+      // can take a MINUTE to surface our membership to its widget, and
+      // until then that peer would silently drop our pings and boot-reqs.
+      // The hello order lets it mesh with us on transport presence alone.
+      this.sayHello()
     }
     if (!this.joined) return
+    // Reachable peers that introduced themselves (hello + order) count as
+    // members even before their state surfaces; membership, once seen,
+    // wins (same value in practice - the order IS the membership ts).
+    for (const [id, ord] of this.helloOrder) {
+      if (!members.has(id) && this.matchParticipant(id) !== null) members.set(id, ord)
+    }
     for (const [id, ts] of members) {
       if (id === this.id) continue
       let peer = this.peers.get(id)
@@ -521,6 +545,7 @@ export class MatrixNet {
       if (!members.has(id)) {
         this.peers.delete(id)
         this.announced.delete(id)
+        this.helloOrder.delete(id) // no resurrection from a stale hello
         this.onLog(`${id.split(':')[0]} left`)
         this.onPeerLeft(id)
       }
