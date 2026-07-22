@@ -404,13 +404,36 @@ async function main() {
   // scripts behave; it dies with the tab.
   const scriptUser = () => wp ? wp.userId : session.id
   let stateCaps: Promise<void> | null = null
+  // Events that PREDATE the grant need an explicit fetch: only hosts on a
+  // recent widget-api re-push current room state after an MSC2974
+  // renegotiation, so without this a room's standing high scores never
+  // load. Kept as a fallback layer under the live-pushed room state.
+  const stateBackfill = new Map<string, Map<string, { sender: string; ts: number; content: unknown }>>()
   const ensureStateCaps = (): Promise<void> => {
     if (!wp) return Promise.resolve()
     const m = net as import('./matrix/net').MatrixNet
-    return stateCaps ??= requestScriptStateCapabilities(m.api, wp.userId).catch(e => {
-      stateCaps = null // a transport hiccup should not wedge state access for good
-      throw e
-    })
+    return stateCaps ??= requestScriptStateCapabilities(m.api, wp.userId)
+      .then(async () => {
+        for (const type of SCRIPT_STATE_TYPES) {
+          try {
+            const forType = stateBackfill.get(type) ?? new Map<string, { sender: string; ts: number; content: unknown }>()
+            for (const ev of await m.api.readStateEvents(type, undefined, undefined, [wp.roomId])) {
+              if ((ev.room_id && ev.room_id !== wp.roomId) || typeof ev.state_key !== 'string') continue
+              const prev = forType.get(ev.state_key)
+              if (!prev || prev.ts <= ev.origin_server_ts) {
+                forType.set(ev.state_key, { sender: ev.sender, ts: ev.origin_server_ts, content: ev.content })
+              }
+            }
+            stateBackfill.set(type, forType)
+          } catch (e) {
+            logErr(`room-state backfill failed for ${type}`, e)
+          }
+        }
+      })
+      .catch(e => {
+        stateCaps = null // a transport hiccup should not wedge state access for good
+        throw e
+      })
   }
   const memState = new Map<string, Map<string, unknown>>() // type -> stateKey -> content
   const scriptGetStateEvents = (type: string) => {
@@ -422,14 +445,20 @@ async function main() {
       return [...(memState.get(type) ?? [])].map(([stateKey, content]) =>
         ({ type, stateKey, sender: scriptUser(), ts: 0, content }))
     }
-    // first touch kicks off the capability grab; until the grant's
-    // state push lands, reads just come back empty
+    // first touch kicks off the capability grab; until the grant (and its
+    // backfill) lands, reads just come back empty. Live-pushed room state
+    // shadows the backfill per state key
     void ensureStateCaps().catch(e => logErr('room-state capability request failed', e))
     const m = net as import('./matrix/net').MatrixNet
-    return (m.client.getRoom(wp.roomId)?.currentState.getStateEvents(type) ?? []).map(ev => ({
-      type, stateKey: ev.getStateKey() ?? '', sender: ev.getSender() ?? '', ts: ev.getTs(),
-      content: ev.getContent() as unknown,
-    }))
+    const out = new Map<string, { type: string; stateKey: string; sender: string; ts: number; content: unknown }>()
+    for (const [stateKey, e] of stateBackfill.get(type) ?? []) {
+      out.set(stateKey, { type, stateKey, sender: e.sender, ts: e.ts, content: e.content })
+    }
+    for (const ev of m.client.getRoom(wp.roomId)?.currentState.getStateEvents(type) ?? []) {
+      const stateKey = ev.getStateKey() ?? ''
+      out.set(stateKey, { type, stateKey, sender: ev.getSender() ?? '', ts: ev.getTs(), content: ev.getContent() as unknown })
+    }
+    return [...out.values()]
   }
   let lastStateWrite = -Infinity
   const scriptSetStateEvent = (type: string, json: string, stateKey: string) => {
