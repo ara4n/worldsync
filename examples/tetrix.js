@@ -37,7 +37,16 @@ const X0 = -9, Y0 = 0.3     // world pos of column 0, bottom row (resting on the
 // all-time top-5 board on the HUD, kept as per-user top-10 lists in
 // io.element.highscores room state events (self-reported: nothing
 // witnesses them yet).
+//
+// Each player flies a half-opaque ghost of their NEXT piece a few
+// squares above their lane - real props (size-tagged PREV, opacity 0.5),
+// so every peer sees every ghost and can watch a rival's plans - swapped
+// for a fresh roll the moment it enters play. A name plane (local
+// canvas-text labels, one per peer) floats above each lane's ghost so
+// you can see who is playing where.
 const SCORE = 0.27, LINES = 0.24
+const PREV = 0.26 // next-piece ghost cells: half-opaque boxes tagged by this size
+const GAP = 3     // the ghost hovers this many cells above the well top
 const HIDE_Y = -4
 const COLORS = [0, 0xd94f4f, 0x5a79e8, 0xe89a4f, 0xe3d84f, 0x58d977, 0xb45ae8, 0x4fc9d9]
 // tetroji types 1..7 = Z J L O S T I; [0,0] is top left of the bounding box
@@ -96,6 +105,9 @@ let hudLast = ''
 let piece = null // { type, x, y, rot, ids: [4] }
 let pendingClaims = [] // {id, t}
 let lockQueue = []     // {id, cancelled, t}
+let nextType = 0       // the piece after the current one; 0 = not rolled yet
+let previewIds = [], previewKey = '', previews = []
+const laneLabels = new Map() // peer id -> { key, label }
 let respawnAt = 0, gravAcc = 0, now = 0
 let pendingClear = null // primary: { rows, t } mid-flash
 const orphanSince = {}
@@ -112,9 +124,11 @@ world.onenter = () => { me = world.me }
 // -- derived state --
 
 const scan = () => {
-  cells = []; scoreProps = []; linesProp = null
+  cells = []; scoreProps = []; linesProp = null; previews = []
   for (const p of world.props()) {
-    if (p.kind === 'box' && p.size === CB) {
+    if (p.kind === 'box' && p.size === PREV) {
+      previews.push({ id: p.id, claimedBy: p.claimedBy })
+    } else if (p.kind === 'box' && p.size === CB) {
       cells.push({
         id: p.id,
         c: Math.round((p.x - X0) / CELL),
@@ -252,7 +266,8 @@ const myLane = () => {
 }
 
 const spawnPiece = () => {
-  const type = Math.floor(Math.random() * 7) + 1
+  // the roll shown as the ghost enters play; the fresh roll replaces it
+  const type = nextType || Math.floor(Math.random() * 7) + 1
   const x = LANE * myLane() + (type === 7 ? 0 : 1)
   const blocks = blocksFor(type, x, 0, 0)
   // blocked by the LANDED stack = topped out, wipe the well for everyone;
@@ -281,6 +296,7 @@ const spawnPiece = () => {
     return id
   })
   piece = { type, x, y: 0, rot: 0, ids }
+  nextType = Math.floor(Math.random() * 7) + 1
   gravAcc = 0
   softDrops = 0
   hardCells = 0
@@ -382,8 +398,9 @@ const drawBorder = () => {
     const x = wx(c) - CELL / 2
     line([{ x, y: yT, z: 0 }, { x, y: yB, z: 0 }], 0x39424f, 0.03)
   }
-  const cx = (xL + xR) / 2, cy = (yT + yB) / 2
-  world.camera({ x: cx, y: cy, z: Math.max(15, (xR - xL) * 1.15) }, { x: cx, y: cy, z: 0 })
+  // the frame includes the ghosts and name planes floating above the top
+  const cx = (xL + xR) / 2, cy = (yB + yT + (GAP + 3.7) * CELL) / 2
+  world.camera({ x: cx, y: cy, z: Math.max(19, (xR - xL) * 1.15) }, { x: cx, y: cy, z: 0 })
 }
 
 // -- per-frame --
@@ -428,6 +445,46 @@ world.onupdate = (dt, time) => {
   })
 
   if (!piece && now >= respawnAt) spawnPiece()
+  // the next-piece ghost: half-opaque cells hovering GAP squares above
+  // our lane so we can prepare for the roll; rebuilt whenever the roll
+  // (or our lane, as players come and go) changes. Reload leftovers -
+  // our claim survives the session - are swept first.
+  for (const pv of previews) {
+    if (pv.claimedBy === me.id && !previewIds.includes(pv.id)) world.despawn(pv.id)
+  }
+  const pk = nextType + ':' + myLane() + ':' + W
+  if (nextType && pk !== previewKey) {
+    previewKey = pk
+    for (const id of previewIds) world.despawn(id)
+    const x0 = LANE * myLane() + (nextType === 7 ? 0 : 1)
+    const blocks = blocksFor(nextType, x0, 0, 0)
+    const maxR = Math.max(...blocks.map((b) => b[1]))
+    previewIds = blocks.map(([c, r]) => {
+      const id = world.createBox({
+        position: { x: wx(c), y: wy(r - maxR) + GAP * CELL, z: 0 },
+        color: COLORS[nextType], size: PREV, unlit: true, bounce: false, pop: false, opacity: 0.5,
+      })
+      pendingClaims.push({ id, t: now })
+      return id
+    })
+  }
+  // name planes above each lane's ghost: local labels, every peer bakes
+  // its own set, re-placed as lanes shift with joins and leaves
+  const ps = world.peers()
+  for (let i = 0; i < ps.length; i++) {
+    const pos = { x: wx(LANE * i + 2), y: wy(0) + (GAP + 3) * CELL, z: 0 }
+    const key = i + ':' + W
+    const l = laneLabels.get(ps[i].id)
+    if (!l) {
+      laneLabels.set(ps[i].id, {
+        key,
+        label: world.createLabel({ text: ps[i].id.split(':')[0], position: pos, height: 0.5, color: ps[i].color }),
+      })
+    } else if (l.key !== key) { l.key = key; l.label.position = pos }
+  }
+  for (const [id, l] of [...laneLabels]) {
+    if (!ps.some((q) => q.id === id)) { l.label.despawn(); laneLabels.delete(id) }
+  }
   if (piece) {
     gravAcc += dt
     if (gravAcc >= gravityS()) {
@@ -529,4 +586,7 @@ world.onupdate = (dt, time) => {
   }
   for (const cell of cells) doomed(cell.id, cell.claimedBy !== '' && !live.has(cell.claimedBy))
   for (const p of scoreProps) doomed(p.id, !live.has(p.claimedBy))
+  // ghosts too: a leaver's preview is force-unclaimed on departure, so
+  // ownerless ones (grace covers the spawn-to-claim window) are litter
+  for (const pv of previews) doomed(pv.id, !live.has(pv.claimedBy))
 }

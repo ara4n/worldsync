@@ -48,7 +48,7 @@ await a.frame.waitForFunction(
 
 // a claimed 4-cell piece appears in lane 0 and falls (y > 0 skips the
 // hidden score prop, which is claimed too)
-await a.frame.waitForFunction(() => window.__jig.props().filter((p) => p.claim && p.y > 0).length === 4,
+await a.frame.waitForFunction(() => window.__jig.props().filter((p) => p.claim && p.y > 0 && p.y < 15).length === 4,
   null, { timeout: 15000 }).catch(() => fail('no claimed 4-cell piece appeared'))
 // the bounce:false request must survive all the way into the folded sim
 // state (it once died silently at the session.emit whitelist)
@@ -62,6 +62,18 @@ await a.page.waitForTimeout(2200)
 ps = cellsOf(await props(a.frame)).filter((p) => p.claim)
 if (!ps.length || Math.max(...ps.map((p) => p.y)) >= y0) fail('piece did not fall under gravity')
 else console.log('spawn + gravity: ok')
+
+// the next-piece ghost: four half-opaque preview cells (size PREV=0.26,
+// opacity 0.5) hover above the well top, and a name plane labels the lane
+const ghost = await a.frame.waitForFunction(() => {
+  const meshes = [...window.__jig.view.props.meshes.values()].filter((m) => m.userData.size === 0.26)
+  return meshes.length === 4 && meshes.every((m) => m.material.opacity === 0.5 && m.position.y > 15)
+}, null, { timeout: 10000 }).then(() => true).catch(() => false)
+if (!ghost) fail('no half-opaque next-piece ghost above the well')
+const labeled = await a.frame.waitForFunction(() => window.__jig.view.labels.size >= 1,
+  null, { timeout: 10000 }).then(() => true).catch(() => false)
+if (!labeled) fail('no lane name label plane')
+if (ghost && labeled) console.log('next-piece ghost + name label: ok')
 
 // hard drop: the four cells land unclaimed at the bottom
 await a.frame.click('canvas', { position: { x: 40, y: 40 } })
@@ -91,7 +103,7 @@ await b.frame.waitForFunction(
   null, { timeout: 20000 })
 const laned = await b.frame.waitForFunction(() => {
   // p.y > 0 skips the hidden score prop, which is also claimed by us
-  const mine = window.__jig.props().filter((p) => p.claim === window.__jig.session.id && p.y > 0)
+  const mine = window.__jig.props().filter((p) => p.claim === window.__jig.session.id && p.y > 0 && p.y < 15)
   return mine.length === 4 && mine.every((p) => {
     const c = Math.round((p.x - -9) / 0.6)
     return c >= 5 && c <= 9
@@ -105,15 +117,18 @@ else console.log('two players, lane assignment: ok')
 // mid-well below, steer a over b's columns, and hard-drop
 {
   const cellsFor = (ps, mineId, wantMine) => ps
-    .filter((p) => p.claim && (p.claim === mineId) === wantMine && Math.abs(p.z) < 0.01 && p.y > 0)
+    .filter((p) => p.claim && (p.claim === mineId) === wantMine && Math.abs(p.z) < 0.01 && p.y > 0 && p.y < 15)
     .map((p) => ({ c: Math.round((p.x - X0) / 0.6), r: 24 - 1 - Math.round((p.y - 0.3) / 0.6) }))
   const aligned = await a.frame.waitForFunction(() => {
     const me = window.__jig.session.id
-    const mine = window.__jig.props().filter((p) => p.claim === me && p.y > 0)
-    const theirs = window.__jig.props().filter((p) => p.claim && p.claim !== me && p.y > 0)
+    const mine = window.__jig.props().filter((p) => p.claim === me && p.y > 0 && p.y < 15)
+    const theirs = window.__jig.props().filter((p) => p.claim && p.claim !== me && p.y > 0 && p.y < 15)
     if (mine.length !== 4 || theirs.length !== 4) return false
     const row = (p) => 24 - 1 - Math.round((p.y - 0.3) / 0.6)
-    return Math.max(...mine.map(row)) <= 3 && Math.min(...theirs.map(row)) >= 6
+    // b's piece must be mid-well but NOT near the floor: deep pieces can
+    // lock during a's steer-and-drop window and fail the recheck below
+    return Math.max(...mine.map(row)) <= 3
+      && Math.min(...theirs.map(row)) >= 6 && Math.max(...theirs.map(row)) <= 14
   }, null, { timeout: 60000 }).then(() => true).catch(() => false)
   if (!aligned) fail('inflight: never saw a-fresh-above/b-mid-well phase')
   await a.page.bringToFront()
