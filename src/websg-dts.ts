@@ -83,6 +83,18 @@ interface WorldScreen {
   despawn(): void
 }
 
+/** Cosmetic text label: canvas-rendered text on a plane, h world-units
+ * tall (width follows the text). Local-only; every peer's script bakes
+ * its own. A changed text or color rebakes the texture. */
+interface WorldLabel {
+  text: string
+  position: WebSG.Vector3
+  yaw: number
+  height: number
+  color: number
+  despawn(): void
+}
+
 /** Pointer events arrive pre-raycast against the prop layer: 'entity' and
  * 'point' when a prop was hit, plus the raw ray for your own plane math. */
 interface WorldPointerEvent {
@@ -190,6 +202,9 @@ declare const world: {
     worldUnits?: boolean; shared?: boolean }): WorldLine
   createScreen(props?: { peer?: string; position?: Vec3Like; yaw?: number; width?: number
     height?: number }): WorldScreen
+  /** create a cosmetic text label (local-only; see WorldLabel) */
+  createLabel(props?: { text?: string; position?: Vec3Like; yaw?: number; height?: number
+    color?: number }): WorldLabel
   /** background/fog colors and whether the default ground shows */
   env(opts?: { background?: number; fog?: { color: number; near: number; far: number } | null
     ground?: boolean }): void

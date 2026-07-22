@@ -361,6 +361,61 @@ export class View {
     }
   }
 
+  // -- text labels: flat planes textured with canvas-rendered text, so
+  // scripts can caption the world (tetrix names each player's lane above
+  // their next-piece ghost). Cosmetic like lines: never sim state, never
+  // picked. --
+  private labels = new Map<string, { obj: THREE.Mesh; text: string; color: number; aspect: number }>()
+
+  private labelTexture(text: string, color: number) {
+    const pad = 14, fontPx = 64
+    const font = `600 ${fontPx}px ui-monospace, SFMono-Regular, Menlo, monospace`
+    const canvas = document.createElement('canvas')
+    let ctx = canvas.getContext('2d')!
+    ctx.font = font
+    canvas.width = Math.max(2, Math.ceil(ctx.measureText(text).width) + pad * 2)
+    canvas.height = fontPx + pad * 2
+    ctx = canvas.getContext('2d')! // resizing resets the context state
+    ctx.font = font
+    ctx.textBaseline = 'middle'
+    ctx.fillStyle = '#' + color.toString(16).padStart(6, '0')
+    ctx.fillText(text, pad, canvas.height / 2)
+    const tex = new THREE.CanvasTexture(canvas)
+    tex.colorSpace = THREE.SRGBColorSpace
+    tex.anisotropy = 4
+    return { tex, aspect: canvas.width / canvas.height }
+  }
+
+  /** Place (or move) a text label: a plane h world-units tall, width from
+   * the text's aspect, yawed about Y. A changed text or color rebakes. */
+  setLabel(key: string, text: string, pos: { x: number; y: number; z: number },
+    yaw: number, h: number, color: number) {
+    let l = this.labels.get(key)
+    if (l && (l.text !== text || l.color !== color)) { this.removeLabel(key); l = undefined }
+    if (!l) {
+      const { tex, aspect } = this.labelTexture(text, color)
+      const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide, depthWrite: false })
+      l = { obj: new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat), text, color, aspect }
+      l.obj.name = key
+      this.scene.add(l.obj)
+      this.labels.set(key, l)
+    }
+    l.obj.position.set(pos.x, pos.y, pos.z)
+    l.obj.rotation.set(0, yaw, 0)
+    l.obj.scale.set(h * l.aspect, h, 1)
+  }
+
+  removeLabel(key: string) {
+    const l = this.labels.get(key)
+    if (!l) return
+    this.scene.remove(l.obj)
+    l.obj.geometry.dispose()
+    const mat = l.obj.material as THREE.MeshBasicMaterial
+    mat.map?.dispose()
+    mat.dispose()
+    this.labels.delete(key)
+  }
+
   /** A peer's camera track came (or, with null, went): retexture every
    * screen bound to that peer. The <video> element never joins the DOM;
    * VideoTexture reads it directly. */

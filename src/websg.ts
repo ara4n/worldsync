@@ -119,6 +119,12 @@ export interface ScriptHost {
    * camera toggle. */
   screen(id: string, peer: string, x: number, y: number, z: number, yaw: number, w: number, h: number): void
   removeScreen(id: string): void
+  /** create/move a text label: canvas-rendered text on a plane at
+   * (x,y,z), yawed about Y, h world-units tall (width follows the text).
+   * Local-only cosmetic: every peer's script bakes its own labels. */
+  label(id: string, text: string, x: number, y: number, z: number, yaw: number, h: number,
+    color: number): void
+  removeLabel(id: string): void
   setEnv(json: string): void
   setCamera(x: number, y: number, z: number, tx: number, ty: number, tz: number): void
 }
@@ -218,6 +224,37 @@ const PRELUDE = `
   // placeholder until they unmute). Local-only: every peer's script
   // instance lays out its own view. Creating one asks the host for video,
   // which reveals the on-canvas camera toggle.
+  // Cosmetic text label: canvas-rendered text on a plane, local-only
+  // (every peer's script bakes its own; tetrix captions each lane).
+  let labelSeq = 0
+  class Label {
+    constructor(opts = {}) {
+      this._id = 't' + (++labelSeq)
+      this._text = String(opts.text ?? '')
+      const p = vec(opts.position)
+      this._pos = { x: p.x, y: p.y, z: p.z }
+      this._yaw = typeof opts.yaw === 'number' ? opts.yaw : 0
+      this._h = typeof opts.height === 'number' ? opts.height : 0.4
+      this._color = typeof opts.color === 'number' ? opts.color : 0xffffff
+      this._dead = false
+      this._sync()
+    }
+    _sync() {
+      if (this._dead) return
+      H.label(this._id, this._text, this._pos.x, this._pos.y, this._pos.z, this._yaw, this._h, this._color)
+    }
+    get text() { return this._text }
+    set text(t) { this._text = String(t); this._sync() }
+    get position() { return new Vector3(this._pos.x, this._pos.y, this._pos.z) }
+    set position(p) { const v = vec(p); this._pos = { x: v.x, y: v.y, z: v.z }; this._sync() }
+    get yaw() { return this._yaw }
+    set yaw(y) { this._yaw = y; this._sync() }
+    get height() { return this._h }
+    set height(h) { this._h = h; this._sync() }
+    get color() { return this._color }
+    set color(c) { this._color = c; this._sync() }
+    despawn() { if (!this._dead) { this._dead = true; H.removeLabel(this._id) } }
+  }
   let screenSeq = 0
   class Screen {
     constructor(opts = {}) {
@@ -316,6 +353,7 @@ const PRELUDE = `
     paint(id, color) { return H.paint(id, color) },
     createLine(props) { return new Line(props) },
     createScreen(props) { return new Screen(props) },
+    createLabel(props) { return new Label(props) },
     // a solid invisible cuboid collider: sim state, so despawn/move it via
     // world.despawn(id) / world.move(id, pos) like any prop
     createSolid(props = {}) {
@@ -497,6 +535,12 @@ export class WorldScript {
       return ctx.undefined
     })
     fn('removeScreen', (id) => { host.removeScreen(ctx.getString(id)); return ctx.undefined })
+    fn('label', (id, text, x, y, z, yaw, h, c) => {
+      host.label(ctx.getString(id), ctx.getString(text), ctx.getNumber(x), ctx.getNumber(y),
+        ctx.getNumber(z), ctx.getNumber(yaw), ctx.getNumber(h), ctx.getNumber(c))
+      return ctx.undefined
+    })
+    fn('removeLabel', (id) => { host.removeLabel(ctx.getString(id)); return ctx.undefined })
     fn('setEnv', (j) => { host.setEnv(ctx.getString(j)); return ctx.undefined })
     fn('setCamera', (x, y, z, tx, ty, tz) => {
       host.setCamera(ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z),

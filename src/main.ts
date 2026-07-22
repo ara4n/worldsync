@@ -321,6 +321,7 @@ async function main() {
   // (when shared) broadcast as full latest-wins state per (author, id).
   const scriptLines = new Map<string, boolean>() // id -> shared
   const scriptScreens = new Set<string>()
+  const scriptLabels = new Set<string>()
   // Flipped by the first screen a script places; gates the camera toggle,
   // so worlds that never ask for video never show it.
   let videoWanted = false
@@ -631,6 +632,14 @@ async function main() {
       scriptScreens.delete(id)
       view.removeScreen(`${session.id}/${id}`)
     },
+    label: (id, text, x, y, z, yaw, h, color) => {
+      scriptLabels.add(id)
+      view.setLabel(`${session.id}/${id}`, text.slice(0, 64), { x, y, z }, yaw, h, color)
+    },
+    removeLabel: id => {
+      scriptLabels.delete(id)
+      view.removeLabel(`${session.id}/${id}`)
+    },
     setEnv: json => view.setEnvironment(JSON.parse(json)),
     setCamera: (x, y, z, tx, ty, tz) => view.setCameraPose({ x, y, z }, { x: tx, y: ty, z: tz }),
   }
@@ -672,6 +681,7 @@ async function main() {
     scriptKeysOn = false
     for (const id of [...scriptLines.keys()]) scriptHost.removeLine(id) // its lines go with it
     for (const id of [...scriptScreens]) scriptHost.removeScreen(id) // and its screens
+    for (const id of [...scriptLabels]) scriptHost.removeLabel(id) // and its labels
     if (videoWanted) {
       videoWanted = false
       stopCam() // no world is asking for video anymore: stop publishing
