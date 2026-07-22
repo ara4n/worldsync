@@ -150,15 +150,21 @@ function bestTable(game) {
   for (const ev of world.getStateEvents(HIGHSCORES_TYPE)) {
     const scores = ev.content && ev.content.scores ? ev.content.scores : {}
     const list = Array.isArray(scores[game]) ? scores[game] : []
-    let best = 0
-    for (const e of list) if (e && typeof e.score === 'number' && e.score > best) best = e.score
-    if (best > 0) rows.push({ who: ev.stateKey.split(':')[0], score: best })
+    let best = null
+    for (const e of list) {
+      if (e && typeof e.score === 'number' && (!best || e.score > best.score)) best = e
+    }
+    if (best) rows.push({ who: ev.stateKey.split(':')[0], score: best.score, ts: best.ts })
   }
   const top = rows.sort((a, b) => b.score - a.score).slice(0, 5)
   if (!top.length) return ''
   const esc = (x) => String(x).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]))
+  const day = (ts) => (typeof ts === 'number' ? new Date(ts).toISOString().slice(0, 10) : '')
   let html = '<span style="color:#8b98a8">all-time</span><table>'
-  for (const r of top) html += `<tr><td>${esc(r.who)}</td><td>${r.score}</td></tr>`
+  for (const r of top) {
+    html += `<tr><td>${esc(r.who)}</td><td>${r.score}</td>`
+      + `<td><span style="color:#8b98a8">${day(r.ts)}</span></td></tr>`
+  }
   return html + '</table>'
 }
 
