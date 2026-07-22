@@ -167,5 +167,25 @@ const respawned = await a.frame.waitForFunction((color) => {
 if (!respawned) fail('snake did not respawn parked after the crash')
 else console.log('wall crash and respawn: ok')
 
+// the crash filed the run into per-user highscore room state (the test
+// snake ate before crashing, so its score beats the spawn length)
+const hsEntry = await a.page.evaluate(() => {
+  for (const [k, ev] of window.__mockhost.driver.state) {
+    if (k.startsWith('io.element.highscores|')) return ev.content?.scores?.snake?.[0] ?? null
+  }
+  return null
+})
+if (!hsEntry || !(hsEntry.score > 3) || typeof hsEntry.ts !== 'number') {
+  fail(`no snake highscore in room state after the crash (got ${JSON.stringify(hsEntry)})`)
+} else console.log(`crash filed a highscore of ${hsEntry.score}: ok`)
+const hudBoard = await a.frame.waitForFunction(
+  () => {
+    const txt = document.getElementById('hud')?.textContent ?? ''
+    return txt.includes('all-time') && /\(prev \d+\)/.test(txt)
+  },
+  null, { timeout: 10000 }).then(() => true).catch(() => false)
+if (!hudBoard) fail('HUD never showed the all-time board and prev score')
+else console.log('HUD all-time board + prev score: ok')
+
 if (process.exitCode !== 1) console.log('SNAKE TEST PASSED')
 await browser.close()

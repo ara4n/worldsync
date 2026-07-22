@@ -4,7 +4,12 @@
 // until your first key; from then on your snake never stops until it
 // crashes (wall or any snake, yours included), at which point it flashes
 // out and you respawn parked somewhere new. The pace starts leisurely
-// and tightens a little with every segment your snake grows.
+// and tightens a little with every segment your snake grows. A crash
+// files the length you reached into your per-user top-10 in
+// io.element.highscores room state; the HUD scores every racer live
+// (lengths counted from the claims in the shared props table), shows
+// your previous run, and lists the room's all-time top-5 runs
+// (self-reported: nothing witnesses them yet).
 //
 // Sync model: your snake is YOURS. Its body order lives only in your
 // script; what everyone shares is the props table - one box per
@@ -54,6 +59,8 @@ let dirQueue = []
 let dir = null, lastMoved = null, pendingGrowth = 0
 let acc = 0, state = 'boot', stateT = 0, now = 0
 let seedWait = -10
+let hudLast = ''
+let prevScore = null // last run's length; local, so just our own HUD row
 const orphanSince = {} // prop id -> when it first looked ownerless
 const digits = new Map() // food id -> its local digit/pip lines
 let border = null
@@ -119,6 +126,12 @@ const crash = () => {
   state = 'dead'
   stateT = now
   dir = null
+  // the run's score is the length reached, growth still in the pipe
+  // included; a bite-less run (exactly the spawn length 3) stays off the
+  // board
+  const score = myCells.length + pendingGrowth
+  prevScore = score
+  if (score > 3) submitScore('snake', score)
   console.log(`crashed at length ${myCells.length}`)
 }
 
@@ -154,6 +167,59 @@ const step = (segs, foods) => {
     pendingGrowth += foodV(bite.size)
     console.log(`ate a ${foodV(bite.size)} - length ${myCells.length + pendingGrowth}`)
   }
+}
+
+// -- shared highscores helper (identical in every example that keeps
+// scores; world scripts have no imports, so keep the copies in sync).
+// One io.element.highscores state event per user, state_key = their
+// MXID (Matrix auth rules make it writable only by them): { scores:
+// { [game]: [{ score, ts }, ...] } }, each list capped script-side to
+// the user's 10 best to bound the event size. Self-reported: nothing
+// witnesses these yet. --
+
+const HIGHSCORES_TYPE = 'io.element.highscores'
+
+/** merge a finished game's score into our own room-state top-10 (the
+ * host drops the write when we lack permission to send room state) */
+function submitScore(game, score) {
+  const mine = world.getStateEvents(HIGHSCORES_TYPE, world.me.user)
+  const content = mine && mine.content && typeof mine.content === 'object' ? mine.content : {}
+  const scores = content.scores && typeof content.scores === 'object' ? content.scores : {}
+  const list = Array.isArray(scores[game]) ? scores[game].filter((e) => e && typeof e.score === 'number') : []
+  const entry = { score, ts: Date.now() }
+  list.push(entry)
+  list.sort((a, b) => b.score - a.score) // stable: standing entries win ties
+  const top = list.slice(0, 10)
+  if (top.indexOf(entry) === -1) return // didn't make our own top 10
+  scores[game] = top
+  content.scores = scores
+  world.setStateEvent(HIGHSCORES_TYPE, content)
+}
+
+/** the all-time top 5 GAMES as a HUD table (a hot streak can fill it
+ * with one user's rows), distilled from every user's top-10 list in
+ * room state */
+function bestTable(game) {
+  const rows = []
+  for (const ev of world.getStateEvents(HIGHSCORES_TYPE)) {
+    const scores = ev.content && ev.content.scores ? ev.content.scores : {}
+    const list = Array.isArray(scores[game]) ? scores[game] : []
+    for (const e of list) {
+      if (e && typeof e.score === 'number') {
+        rows.push({ who: ev.stateKey.split(':')[0], score: e.score, ts: e.ts })
+      }
+    }
+  }
+  const top = rows.sort((a, b) => b.score - a.score).slice(0, 5)
+  if (!top.length) return ''
+  const esc = (x) => String(x).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]))
+  const day = (ts) => (typeof ts === 'number' ? new Date(ts).toISOString().slice(0, 10) : '')
+  let html = '<span style="color:#8b98a8">all-time</span><table>'
+  for (const r of top) {
+    html += `<tr><td>${esc(r.who)}</td><td>${r.score}</td>`
+      + `<td><span style="color:#8b98a8">${day(r.ts)}</span></td></tr>`
+  }
+  return html + '</table>'
 }
 
 // 7-segment digit above each food, drawn locally (t,tl,tr,m,bl,br,b)
@@ -231,6 +297,24 @@ world.onupdate = (dt, time) => {
       state = 'alive'
     }
   }
+  // the HUD, tetrix-style: every racer's live length, counted from the
+  // shared props table (segments carry their owner's claim, so any peer
+  // can score anyone); our own row adds the previous run, and the
+  // all-time board from room state follows
+  const lens = {}
+  for (const s of segs) if (s.claimedBy !== '') lens[s.claimedBy] = (lens[s.claimedBy] ?? 0) + 1
+  const board = Object.keys(lens)
+    .map((id) => ({ who: id.split(':')[0], mine: id === me.id, len: lens[id] }))
+    .sort((a, b) => b.len - a.len)
+  const esc = (x) => String(x).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]))
+  let html = '<b>snake</b><table>'
+  for (const r of board) {
+    const cell = (s) => (r.mine ? `<span style="color:#7fe0a0">${s}</span>` : s)
+    const len = r.mine && prevScore !== null ? `${r.len} (prev ${prevScore})` : r.len
+    html += `<tr><td>${cell(esc(r.who))}</td><td>${cell(len)}</td></tr>`
+  }
+  html += '</table>' + bestTable('snake')
+  if (html !== hudLast) { hudLast = html; world.hud(html) }
   // the primary keeps the grid stocked with numbers and sweeps up snakes
   // whose player left (their script alone drove them; nobody else will).
   // world.me is read live: primacy hands over when the senior peer goes.
