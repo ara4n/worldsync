@@ -143,18 +143,19 @@ function submitScore(game, score) {
   world.setStateEvent(HIGHSCORES_TYPE, content)
 }
 
-/** the all-time top 5 as a HUD table: one row per user (their best),
- * distilled from every user's top-10 list in room state */
+/** the all-time top 5 GAMES as a HUD table (a hot streak can fill it
+ * with one user's rows), distilled from every user's top-10 list in
+ * room state */
 function bestTable(game) {
   const rows = []
   for (const ev of world.getStateEvents(HIGHSCORES_TYPE)) {
     const scores = ev.content && ev.content.scores ? ev.content.scores : {}
     const list = Array.isArray(scores[game]) ? scores[game] : []
-    let best = null
     for (const e of list) {
-      if (e && typeof e.score === 'number' && (!best || e.score > best.score)) best = e
+      if (e && typeof e.score === 'number') {
+        rows.push({ who: ev.stateKey.split(':')[0], score: e.score, ts: e.ts })
+      }
     }
-    if (best) rows.push({ who: ev.stateKey.split(':')[0], score: best.score, ts: best.ts })
   }
   const top = rows.sort((a, b) => b.score - a.score).slice(0, 5)
   if (!top.length) return ''

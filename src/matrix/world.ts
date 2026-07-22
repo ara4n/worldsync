@@ -13,10 +13,12 @@ export const WORLD_EVENT_TYPE = 'org.matrix.msc3815.world'
 
 /**
  * State event types world scripts may touch through world.getStateEvents
- * / world.setStateEvent. Widget capabilities are granted per event type
- * up front, so the list is fixed here (grow it as worlds need more;
- * Element re-prompts for approval): reads for every state key, writes
- * only with OUR OWN MXID as the state key. Core auth rules restrict
+ * / world.setStateEvent. Widget capabilities are granted per event type,
+ * so the list is fixed here (grow it as worlds need more) - but they are
+ * requested LAZILY (MSC2974 renegotiation, on a script's first state API
+ * call), so worlds that never use room state never prompt the user for
+ * it: reads for every state key, writes only with OUR OWN MXID as the
+ * state key. Core auth rules restrict
  * @-prefixed state keys to that exact sender, so per-user events cannot
  * be clobbered by rivals - though nothing stops a user lying in their
  * own (no witnessing yet). Content is entirely the script's business:

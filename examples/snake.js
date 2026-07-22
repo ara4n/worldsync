@@ -3,7 +3,8 @@
 // Arrow keys steer. You start parked at a random cell and nothing moves
 // until your first key; from then on your snake never stops until it
 // crashes (wall or any snake, yours included), at which point it flashes
-// out and you respawn parked somewhere new.
+// out and you respawn parked somewhere new. The pace starts leisurely
+// and tightens a little with every segment your snake grows.
 //
 // Sync model: your snake is YOURS. Its body order lives only in your
 // script; what everyone shares is the props table - one box per
@@ -31,7 +32,10 @@ const foodR = (v) => 0.14 + 0.02 * v // 1..9 -> 0.16..0.32, all distinct
 const foodV = (s) => Math.round((s - 0.14) / 0.02)
 const isFood = (p) => p.kind === 'sphere' && p.color === FOODC && foodV(p.size) >= 1 && foodV(p.size) <= 9
 const FOODS = 4
-const STEP = 0.14
+// pace: leisurely at spawn length, tightening a little with every
+// segment eaten, floored well before it outruns netcode (or thumbs)
+const STEP0 = 0.24, STEP_MIN = 0.09
+const stepS = (len) => Math.max(STEP_MIN, STEP0 * Math.pow(0.985, len - 3))
 const cx = (c) => (c - (N - 1) / 2) * CELL
 const cz = (r) => (r - (N - 1) / 2) * CELL
 const key = (c, r) => c + ',' + r
@@ -91,7 +95,9 @@ const randFree = (occ) => {
 }
 
 const spawnSeg = (c, r) => {
-  const id = world.createBox({ position: { x: cx(c), y: Y, z: cz(r) }, color: myColor, size: SEG })
+  // pop:false: head and tail cells appear/vanish instantly - the body
+  // reads as one sliding shape, so per-cell fade/pop twinkle is noise
+  const id = world.createBox({ position: { x: cx(c), y: Y, z: cz(r) }, color: myColor, size: SEG, pop: false })
   pendingClaims.push({ id, t: now })
   return id
 }
@@ -209,7 +215,12 @@ world.onupdate = (dt, time) => {
   } else if (state === 'alive') {
     if (dir || dirQueue.length) {
       acc += dt
-      while (acc >= STEP && state === 'alive') { acc -= STEP; step(segs, foods) }
+      // the interval is re-read every step: eating mid-burst quickens
+      // the very next step
+      while (state === 'alive' && acc >= stepS(myCells.length)) {
+        acc -= stepS(myCells.length)
+        step(segs, foods)
+      }
     } else acc = 0
   } else if (state === 'dead') {
     if (now - stateT > 0.4 && myIds.length) { for (const id of myIds) world.despawn(id); myIds = []; myCells = [] }

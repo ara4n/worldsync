@@ -39,6 +39,7 @@ export interface PropInfo {
   size: number
   unlit: boolean
   bounce?: boolean // false: discrete moves ease instead of bounce-dropping
+  pop?: boolean    // false: no spawn fade-in or despawn pop; appears/vanishes instantly
   claim: string | null
   yaw?: number    // solid only: rotation about Y
   dims?: Vec3     // solid only: cuboid extents
@@ -63,6 +64,7 @@ export interface Interaction {
   size?: number   // prop only: radius / half-extent
   unlit?: boolean // prop only: cosmetic hint, but folded state so it boots
   bounce?: boolean // prop only: false = ease vertical falls, never bounce
+  pop?: boolean   // prop only: false = no spawn fade-in / despawn pop
   yaw?: number    // prop only, solid: rotation about Y
   dims?: Vec3     // prop only, solid: cuboid extents
   solid?: boolean // prop only: create a fixed collider in the physics world

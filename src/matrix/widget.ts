@@ -1,5 +1,5 @@
 import {
-  WidgetApi, MatrixCapabilities, WidgetApiToWidgetAction,
+  WidgetApi, MatrixCapabilities, WidgetApiToWidgetAction, WidgetEventCapability, EventDirection,
   type INotifyCapabilitiesActionRequest, type IWidgetApiRequest,
 } from 'matrix-widget-api'
 import { createRoomWidgetClient, EventType, type MatrixClient, type ICapabilities } from 'matrix-js-sdk'
@@ -49,14 +49,10 @@ export async function initWidgetClient(p: WidgetParams): Promise<{ api: WidgetAp
     sendState: [
       { eventType: EventType.GroupCallMemberPrefix },
       { eventType: WORLD_EVENT_TYPE, stateKey: '' },
-      // world.setStateEvent: script-writable state types, always with our
-      // own MXID as the state key (auth rules bar anyone else's)
-      ...SCRIPT_STATE_TYPES.map(eventType => ({ eventType, stateKey: p.userId })),
     ],
     receiveState: [
       { eventType: EventType.GroupCallMemberPrefix },
       { eventType: WORLD_EVENT_TYPE },
-      ...SCRIPT_STATE_TYPES.map(eventType => ({ eventType })),
       { eventType: EventType.RoomCreate },
       { eventType: EventType.RoomMember },
       { eventType: EventType.RoomEncryption },
@@ -69,6 +65,11 @@ export async function initWidgetClient(p: WidgetParams): Promise<{ api: WidgetAp
     updateDelayedEvents: true,
   }
 
+  // The SCRIPT_STATE_TYPES capabilities for world.getStateEvents /
+  // world.setStateEvent are deliberately absent above: they are
+  // renegotiated lazily (requestScriptStateCapabilities below) the first
+  // time a world script actually calls those APIs, so worlds that never
+  // touch room state never ask the user for them.
   const client = createRoomWidgetClient(
     api, capabilities, p.roomId,
     {
@@ -86,4 +87,23 @@ export async function initWidgetClient(p: WidgetParams): Promise<{ api: WidgetAp
   )
   await client.startClient()
   return { api, client }
+}
+
+/**
+ * MSC2974 capability renegotiation for the script state APIs: request
+ * send (our own MXID as state_key only) + receive for every type in
+ * SCRIPT_STATE_TYPES. Called on a world script's FIRST
+ * getStateEvents/setStateEvent call - Element prompts the user for
+ * approval right then. On grant the host re-pushes the room's current
+ * state for the newly readable types (update_state), so pre-existing
+ * events land in the client without any extra backfill here. A DENIAL
+ * still resolves (MSC2974 has no rejection path); it just leaves later
+ * sends failing with a logged permission error and reads empty.
+ */
+export async function requestScriptStateCapabilities(api: WidgetApi, userId: string): Promise<void> {
+  api.requestCapabilities(SCRIPT_STATE_TYPES.flatMap(t => [
+    WidgetEventCapability.forStateEvent(EventDirection.Send, t, userId).raw,
+    WidgetEventCapability.forStateEvent(EventDirection.Receive, t).raw,
+  ]))
+  await api.updateRequestedCapabilities()
 }

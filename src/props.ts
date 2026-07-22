@@ -67,7 +67,7 @@ export class PropLayer {
   group = new THREE.Group()
   private meshes = new Map<string, THREE.Mesh>()
   private state = new Map<string, { pos: THREE.Vector3; color: number; claim: string | null; born: number
-    swell: boolean }>()
+    swell: boolean; pop: boolean }>()
   private anims = new Map<string, Anim>()
   private dying: Dying[] = []
   private geos = new Map<string, THREE.BufferGeometry>()
@@ -102,8 +102,12 @@ export class PropLayer {
             color: p.color, roughness: 0.5, metalness: 0.05, flatShading: p.kind in PIECE_GEOS,
           })
         this.patchMaterial(mat)
-        mat.transparent = true
-        mat.opacity = 0
+        // pop:false skips the spawn fade-in (and the death pop below):
+        // snake segments read as one body, not per-cell twinkles
+        if (p.pop !== false) {
+          mat.transparent = true
+          mat.opacity = 0
+        }
         mesh = new THREE.Mesh(this.geoFor(p.kind, p.size), mat)
         mesh.name = id // the prop's net id, for the inspector
         mesh.position.set(p.pos.x, p.pos.y, p.pos.z)
@@ -118,6 +122,7 @@ export class PropLayer {
           // swell, which would weld adjacent cells (tetrix pieces) into a
           // seamless blob until unclaimed
           swell: p.bounce !== false,
+          pop: p.pop !== false,
         })
         continue
       }
@@ -134,10 +139,16 @@ export class PropLayer {
     }
     for (const [id, mesh] of this.meshes) {
       if (props.has(id)) continue
+      const pop = this.state.get(id)?.pop ?? true
       this.meshes.delete(id)
       this.state.delete(id)
       this.anims.delete(id)
-      this.dying.push({ mesh, t0: now })
+      if (pop) {
+        this.dying.push({ mesh, t0: now })
+      } else {
+        this.group.remove(mesh)
+        ;(mesh.material as THREE.Material).dispose()
+      }
     }
   }
 

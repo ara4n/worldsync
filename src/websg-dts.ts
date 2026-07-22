@@ -127,10 +127,12 @@ declare const world: {
   /** every connected participant (self included), in join order */
   peers(): { id: string; order: number; color: number; me: boolean }[]
   /** current Matrix room state events of a type, for persistent data
-   * like high-score tables. Types are host-allowlisted (worldsync
-   * negotiates widget capabilities per type up front; others log and
-   * return []). With stateKey: that one event, or null. Self-reported
-   * data, only as honest as its authors. */
+   * like high-score tables. Types are host-allowlisted (others log and
+   * return []); the widget capabilities for them are requested lazily
+   * on the first call, so the user is only prompted by worlds that use
+   * room state - until they approve, reads come back empty. With
+   * stateKey: that one event, or null. Self-reported data, only as
+   * honest as its authors. */
   getStateEvents(type: string): { type: string; stateKey: string; sender: string; ts: number
     content: any }[]
   getStateEvents(type: string, stateKey: string): { type: string; stateKey: string; sender: string
@@ -155,19 +157,21 @@ declare const world: {
   prop(id: string): WorldProp | null
   /** spawn a kinematic sphere prop; returns its id. bounce:false marks a
    * subdued board-game prop: discrete moves ease instead of
-   * bounce-dropping, and claims don't swell it */
+   * bounce-dropping, and claims don't swell it. pop:false suppresses the
+   * spawn fade-in and despawn pop, so the prop appears and vanishes
+   * instantly (snake segments) */
   createSphere(props?: { position?: Vec3Like; translation?: Vec3Like; color?: number; radius?: number
-    unlit?: boolean; bounce?: boolean }): string
+    unlit?: boolean; bounce?: boolean; pop?: boolean }): string
   /** spawn a prop of any kind by name: 'sphere', 'box', or a modelled kind
    * the client renders as built-in geometry - the low-poly chess set
    * 'pawn'|'rook'|'knight'|'bishop'|'queen'|'king', whose size is the
    * piece's height and whose base rests at the prop position. Unknown
    * kinds render as spheres. Returns its id. */
   createProp(props?: { kind?: string; position?: Vec3Like; translation?: Vec3Like; color?: number
-    size?: number; unlit?: boolean; bounce?: boolean }): string
+    size?: number; unlit?: boolean; bounce?: boolean; pop?: boolean }): string
   /** spawn a kinematic cube prop (a 2*size cube); returns its id */
   createBox(props?: { position?: Vec3Like; translation?: Vec3Like; color?: number; size?: number
-    unlit?: boolean; bounce?: boolean }): string
+    unlit?: boolean; bounce?: boolean; pop?: boolean }): string
   /** an invisible fixed cuboid collider (folded sim state: boxes bounce
    * off it identically on every peer). yaw about Y, dims are full extents.
    * Despawn/move it like any prop. Returns its id. */

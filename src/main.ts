@@ -11,7 +11,7 @@ import { Input, type Emitter } from './input'
 import { UI } from './ui'
 import { wallNow, type DcMessage } from './types'
 import { widgetParams } from './matrix/params'
-import { initWidgetClient } from './matrix/widget'
+import { initWidgetClient, requestScriptStateCapabilities } from './matrix/widget'
 
 /** What main needs from a transport; Net (ws demo) and MatrixNet both fit. */
 interface NetLike {
@@ -390,17 +390,28 @@ async function main() {
   }
 
   // world.getStateEvents / world.setStateEvent: real Matrix room state,
-  // scoped to the SCRIPT_STATE_TYPES allowlist (widget capabilities are
-  // negotiated per type up front) and, for writes, to OUR OWN MXID as
-  // the state key (core auth rules bar writing anyone else's @-prefixed
-  // key, so per-user events cannot clobber each other; nothing stops
-  // lying in your own - no witnessing yet). Content is entirely the
-  // script's business - the example games keep top-10 highscore lists in
-  // io.element.highscores - the host only stores, capping size and
-  // rate. Reads are local cosmetics for HUDs and never touch the sim.
-  // Outside widget mode an in-memory map stands in so scripts behave;
-  // it dies with the tab.
+  // scoped to the SCRIPT_STATE_TYPES allowlist and, for writes, to OUR
+  // OWN MXID as the state key (core auth rules bar writing anyone else's
+  // @-prefixed key, so per-user events cannot clobber each other;
+  // nothing stops lying in your own - no witnessing yet). The widget
+  // capabilities for these are NOT part of the boot handshake: they are
+  // renegotiated (MSC2974) on the first state API call, so worlds that
+  // never touch room state never prompt the user for it. Content is
+  // entirely the script's business - the example games keep top-10
+  // highscore lists in io.element.highscores - the host only stores,
+  // capping size and rate. Reads are local cosmetics for HUDs and never
+  // touch the sim. Outside widget mode an in-memory map stands in so
+  // scripts behave; it dies with the tab.
   const scriptUser = () => wp ? wp.userId : session.id
+  let stateCaps: Promise<void> | null = null
+  const ensureStateCaps = (): Promise<void> => {
+    if (!wp) return Promise.resolve()
+    const m = net as import('./matrix/net').MatrixNet
+    return stateCaps ??= requestScriptStateCapabilities(m.api, wp.userId).catch(e => {
+      stateCaps = null // a transport hiccup should not wedge state access for good
+      throw e
+    })
+  }
   const memState = new Map<string, Map<string, unknown>>() // type -> stateKey -> content
   const scriptGetStateEvents = (type: string) => {
     if (!SCRIPT_STATE_TYPES.includes(type)) {
@@ -411,6 +422,9 @@ async function main() {
       return [...(memState.get(type) ?? [])].map(([stateKey, content]) =>
         ({ type, stateKey, sender: scriptUser(), ts: 0, content }))
     }
+    // first touch kicks off the capability grab; until the grant's
+    // state push lands, reads just come back empty
+    void ensureStateCaps().catch(e => logErr('room-state capability request failed', e))
     const m = net as import('./matrix/net').MatrixNet
     return (m.client.getRoom(wp.roomId)?.currentState.getStateEvents(type) ?? []).map(ev => ({
       type, stateKey: ev.getStateKey() ?? '', sender: ev.getSender() ?? '', ts: ev.getTs(),
@@ -441,7 +455,8 @@ async function main() {
     const m = net as import('./matrix/net').MatrixNet
     const sendState = m.client.sendStateEvent.bind(m.client) as
       (roomId: string, type: string, content: unknown, stateKey: string) => Promise<unknown>
-    void sendState(wp.roomId, type, content, stateKey)
+    void ensureStateCaps()
+      .then(() => sendState(wp.roomId, type, content, stateKey))
       .catch(e => logErr('setStateEvent failed (no permission to send room state?)', e))
   }
 
@@ -516,10 +531,13 @@ async function main() {
       const p = sim.props.get(id)
       return p ? propView(id, p) : null
     },
-    spawnProp: (kind, x, y, z, color, size, unlit, bounce) => {
+    spawnProp: (kind, x, y, z, color, size, unlit, bounce, pop) => {
       const id = session.nextNetId()
-      // bounce is only carried when disabled, keeping the common op lean
-      session.emit('prop', id, { pos: { x, y, z }, color, shape: kind, size, unlit, ...(bounce ? {} : { bounce: false }) })
+      // bounce/pop are only carried when disabled, keeping the common op lean
+      session.emit('prop', id, {
+        pos: { x, y, z }, color, shape: kind, size, unlit,
+        ...(bounce ? {} : { bounce: false }), ...(pop ? {} : { pop: false }),
+      })
       return id
     },
     spawnSolid: (x, y, z, yaw, w, h, d) => {

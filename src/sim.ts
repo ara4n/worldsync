@@ -42,6 +42,10 @@ export interface Prop {
    * moves instead of the dots bounce-drop, and claims don't swell it
    * (tetrix pieces slide and keep their seams; connect-4 discs bounce) */
   bounce?: boolean
+  /** false: no spawn fade-in or despawn pop - the prop appears and
+   * vanishes instantly (snake segments: the body reads as one shape, so
+   * per-cell twinkling at both ends is just noise) */
+  pop?: boolean
   yaw?: number; dims?: Vec3; solid?: boolean
   /** solid only: the fixed body's handle. Valid across snapshot restores
    * (rapier serialization preserves handles); cleared with the world. */
@@ -109,6 +113,7 @@ function hashCtx(ctx: Ctx): number {
     h = Math.imul(h ^ p.color, 0x01000193)
     h = Math.imul(h ^ (p.unlit ? 1 : 0), 0x01000193)
     h = Math.imul(h ^ (p.bounce === false ? 1 : 0), 0x01000193)
+    h = Math.imul(h ^ (p.pop === false ? 1 : 0), 0x01000193)
     if (p.solid && p.dims) {
       // a solid's collider geometry shapes box physics: hash it too
       hashF64[0] = p.yaw ?? 0; hashF64[1] = p.dims.x; hashF64[2] = p.dims.y; hashF64[3] = p.dims.z
@@ -880,7 +885,7 @@ export class Sim {
         const p: Prop = {
           kind: i.shape ?? 'sphere', pos: { ...i.pos },
           color: i.color ?? 0xffffff, size: i.size ?? 0.5, unlit: !!i.unlit, claim: null,
-          bounce: i.bounce, yaw: i.yaw, dims: i.dims && { ...i.dims }, solid: !!i.solid,
+          bounce: i.bounce, pop: i.pop, yaw: i.yaw, dims: i.dims && { ...i.dims }, solid: !!i.solid,
         }
         if (p.solid && p.dims) this.addSolidBody(ctx, p)
         ctx.props.set(i.netId, p)
@@ -950,7 +955,8 @@ export class Sim {
           const p: Prop = {
             kind: i.prop.kind, pos: { ...i.pos },
             color: i.prop.color, size: i.prop.size, unlit: i.prop.unlit, claim: i.prop.claim,
-            bounce: i.prop.bounce, yaw: i.prop.yaw, dims: i.prop.dims && { ...i.prop.dims }, solid: !!i.prop.solid,
+            bounce: i.prop.bounce, pop: i.prop.pop, yaw: i.prop.yaw, dims: i.prop.dims && { ...i.prop.dims },
+            solid: !!i.prop.solid,
           }
           // the seam rebuilt the world from empty: the fixed body must be
           // recreated with the prop, in dump order like everything else
@@ -1056,7 +1062,7 @@ export class Sim {
           rot: { x: 0, y: 0, z: 0, w: 1 }, linvel: { ...ZERO }, angvel: { ...ZERO },
           prop: {
             kind: p.kind, color: p.color, size: p.size, unlit: p.unlit, claim: p.claim,
-            bounce: p.bounce, yaw: p.yaw, dims: p.dims && { ...p.dims }, solid: p.solid,
+            bounce: p.bounce, pop: p.pop, yaw: p.yaw, dims: p.dims && { ...p.dims }, solid: p.solid,
           },
         })
       }
