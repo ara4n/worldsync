@@ -63,12 +63,26 @@ export interface ScriptHost {
   grab(id: string): boolean
   moveTo(id: string, x: number, y: number, z: number): boolean
   release(id: string, vx: number, vy: number, vz: number): boolean
-  /** who am I: peer id, whether this peer is the current primary (senior
-   * most reachable: single-runner logic like board init keys off it), and
-   * this peer's deterministic accent color */
-  me(): { id: string; primary: boolean; color: number }
+  /** who am I: peer id, bare Matrix user id (the peer id minus device;
+   * = id outside widget mode), whether this peer is the current primary
+   * (senior most reachable: single-runner logic like board init keys off
+   * it), and this peer's deterministic accent color */
+  me(): { id: string; user: string; primary: boolean; color: number }
   /** every connected participant (self included), in join order */
   peers(): { id: string; order: number; color: number; me: boolean }[]
+  // -- Matrix room state, for persistent data like high-score tables.
+  // Types are host-allowlisted (widget capabilities are granted per type
+  // up front); content shape and any logic over it belong to the script.
+  // Local cosmetic reads: nothing here folds into the sim --
+  /** all current state events of an allowlisted type (others log and
+   * return []). Self-reported data: no witnessing keeps anyone honest. */
+  getStateEvents(type: string): { type: string; stateKey: string; sender: string; ts: number
+    content: unknown }[]
+  /** send a state event as this user: allowlisted types only, and the
+   * state key must be our own Matrix user id (core auth rules bar
+   * anyone else's anyway). JSON-encoded content, rate/size-limited, and
+   * dropped with a log when we lack permission to write room state */
+  setStateEvent(type: string, json: string, stateKey: string): void
   // -- props: kinematic physics-free entities, claims as coordination --
   props(): PropView[]
   prop(id: string): PropView | null
@@ -302,6 +316,18 @@ const PRELUDE = `
         d.x ?? 1, d.y ?? 1, d.z ?? 0.1)
     },
     peers() { return parse(H.peers()) },
+    // Matrix room state (host-allowlisted event types): read any state
+    // key, write only under our own user id; the content shape (and any
+    // logic over it, like top-10 capping) is the script's business
+    getStateEvents(type, stateKey) {
+      const evs = parse(H.getStateEvents(String(type)))
+      if (stateKey === undefined) return evs
+      return evs.find((e) => e.stateKey === String(stateKey)) ?? null
+    },
+    setStateEvent(type, content, stateKey) {
+      H.setStateEvent(String(type), JSON.stringify(content ?? {}),
+        stateKey === undefined ? globalThis.world.me.user : String(stateKey))
+    },
     env(opts) { H.setEnv(JSON.stringify(opts ?? {})) },
     camera(pos, target) {
       const p = vec(pos), t = vec(target)
@@ -450,6 +476,11 @@ export class WorldScript {
     })
     fn('removeLine', (id) => { host.removeLine(ctx.getString(id)); return ctx.undefined })
     fn('peers', () => json(host.peers()))
+    fn('getStateEvents', (t) => json(host.getStateEvents(ctx.getString(t))))
+    fn('setStateEvent', (t, j, k) => {
+      host.setStateEvent(ctx.getString(t), ctx.getString(j), ctx.getString(k))
+      return ctx.undefined
+    })
     fn('screen', (id, peer, x, y, z, yaw, w, h) => {
       host.screen(ctx.getString(id), ctx.getString(peer), ctx.getNumber(x), ctx.getNumber(y),
         ctx.getNumber(z), ctx.getNumber(yaw), ctx.getNumber(w), ctx.getNumber(h))

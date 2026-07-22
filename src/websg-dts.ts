@@ -109,10 +109,11 @@ declare const world: {
    * is defined */
   onkeydown: ((ev: { key: string }) => void) | null
 
-  /** who am I: peer id, whether this peer is the current primary (senior
-   * most reachable: single-runner logic like board init keys off it), and
-   * this peer's deterministic accent color */
-  readonly me: { id: string; primary: boolean; color: number }
+  /** who am I: peer id, bare Matrix user id (the peer id minus the
+   * device; = id outside widget mode), whether this peer is the current
+   * primary (senior most reachable: single-runner logic like board init
+   * keys off it), and this peer's deterministic accent color */
+  readonly me: { id: string; user: string; primary: boolean; color: number }
   /** post a chat message into the Matrix room AS THIS USER (rate-limited
    * to ~1/s by the host; logs locally outside widget mode). Narrate your
    * own player's actions - e.g. chess announces each move. */
@@ -125,6 +126,22 @@ declare const world: {
   hud(html: string): void
   /** every connected participant (self included), in join order */
   peers(): { id: string; order: number; color: number; me: boolean }[]
+  /** current Matrix room state events of a type, for persistent data
+   * like high-score tables. Types are host-allowlisted (worldsync
+   * negotiates widget capabilities per type up front; others log and
+   * return []). With stateKey: that one event, or null. Self-reported
+   * data, only as honest as its authors. */
+  getStateEvents(type: string): { type: string; stateKey: string; sender: string; ts: number
+    content: any }[]
+  getStateEvents(type: string, stateKey: string): { type: string; stateKey: string; sender: string
+    ts: number; content: any } | null
+  /** send a room state event as this user. Allowlisted types only, and
+   * the state key must be (or defaults to) our own Matrix user id:
+   * @-prefixed state keys are writable only by that exact sender, which
+   * is what keeps users from clobbering each other's per-user events.
+   * Rate/size-limited; dropped with a log when room state cannot be
+   * written (missing permission). */
+  setStateEvent(type: string, content: any, stateKey?: string): void
 
   /** spawn a dynamic physics box; returns its node */
   createNode(props?: { translation?: Vec3Like; color?: number }): WorldNode

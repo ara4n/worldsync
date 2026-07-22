@@ -4,7 +4,7 @@ import {
 } from 'matrix-widget-api'
 import { createRoomWidgetClient, EventType, type MatrixClient, type ICapabilities } from 'matrix-js-sdk'
 import type { WidgetParams } from './params'
-import { WORLD_EVENT_TYPE } from './world'
+import { SCRIPT_STATE_TYPES, WORLD_EVENT_TYPE } from './world'
 
 /**
  * Matryoshka bootstrap, after element-call's src/widget.ts: the WidgetApi
@@ -49,10 +49,14 @@ export async function initWidgetClient(p: WidgetParams): Promise<{ api: WidgetAp
     sendState: [
       { eventType: EventType.GroupCallMemberPrefix },
       { eventType: WORLD_EVENT_TYPE, stateKey: '' },
+      // world.setStateEvent: script-writable state types, always with our
+      // own MXID as the state key (auth rules bar anyone else's)
+      ...SCRIPT_STATE_TYPES.map(eventType => ({ eventType, stateKey: p.userId })),
     ],
     receiveState: [
       { eventType: EventType.GroupCallMemberPrefix },
       { eventType: WORLD_EVENT_TYPE },
+      ...SCRIPT_STATE_TYPES.map(eventType => ({ eventType })),
       { eventType: EventType.RoomCreate },
       { eventType: EventType.RoomMember },
       { eventType: EventType.RoomEncryption },

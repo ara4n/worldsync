@@ -23,6 +23,9 @@
 // runs a 60s round: the countdown starts when someone starts the game by
 // chaining the first dot; at 0 play freezes and final scores hold for a
 // beat, then the primary repaints a fresh board and rearms the timer.
+// Each round's final score also lands in an all-time top-5 board on the
+// HUD, kept as per-user top-10 lists in io.element.highscores room
+// state events (self-reported: nothing witnesses them yet).
 
 const W = 3, H = 3, D = 3
 const COLORS = [0xda664f, 0x9060b0, 0xe3db50, 0x94baf9, 0xa0e699]
@@ -54,6 +57,7 @@ let dotProps = []     // this frame's board dots (size R), from scan()
 let scoreProps = [], timerProp = null
 let scoreId = null, scoreWait = -10, timerWait = -10, myScore = 0
 let prevScore = null  // last round's score; local, so just our own HUD row
+let submitted = false // this round's score already sent to room state?
 let pendingClaims = [] // {id, t}: claims trail spawns by a fold
 let hudLast = ''
 let now = 0
@@ -112,6 +116,52 @@ function fadeLattice() {
   }
 }
 
+// -- shared highscores helper (identical in every example that keeps
+// scores; world scripts have no imports, so keep the copies in sync).
+// One io.element.highscores state event per user, state_key = their
+// MXID (Matrix auth rules make it writable only by them): { scores:
+// { [game]: [{ score, ts }, ...] } }, each list capped script-side to
+// the user's 10 best to bound the event size. Self-reported: nothing
+// witnesses these yet. --
+
+const HIGHSCORES_TYPE = 'io.element.highscores'
+
+/** merge a finished game's score into our own room-state top-10 (the
+ * host drops the write when we lack permission to send room state) */
+function submitScore(game, score) {
+  const mine = world.getStateEvents(HIGHSCORES_TYPE, world.me.user)
+  const content = mine && mine.content && typeof mine.content === 'object' ? mine.content : {}
+  const scores = content.scores && typeof content.scores === 'object' ? content.scores : {}
+  const list = Array.isArray(scores[game]) ? scores[game].filter((e) => e && typeof e.score === 'number') : []
+  const entry = { score, ts: Date.now() }
+  list.push(entry)
+  list.sort((a, b) => b.score - a.score) // stable: standing entries win ties
+  const top = list.slice(0, 10)
+  if (top.indexOf(entry) === -1) return // didn't make our own top 10
+  scores[game] = top
+  content.scores = scores
+  world.setStateEvent(HIGHSCORES_TYPE, content)
+}
+
+/** the all-time top 5 as a HUD table: one row per user (their best),
+ * distilled from every user's top-10 list in room state */
+function bestTable(game) {
+  const rows = []
+  for (const ev of world.getStateEvents(HIGHSCORES_TYPE)) {
+    const scores = ev.content && ev.content.scores ? ev.content.scores : {}
+    const list = Array.isArray(scores[game]) ? scores[game] : []
+    let best = 0
+    for (const e of list) if (e && typeof e.score === 'number' && e.score > best) best = e.score
+    if (best > 0) rows.push({ who: ev.stateKey.split(':')[0], score: best })
+  }
+  const top = rows.sort((a, b) => b.score - a.score).slice(0, 5)
+  if (!top.length) return ''
+  const esc = (x) => String(x).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]))
+  let html = '<span style="color:#8b98a8">all-time</span><table>'
+  for (const r of top) html += `<tr><td>${esc(r.who)}</td><td>${r.score}</td></tr>`
+  return html + '</table>'
+}
+
 /** split this frame's props by radius tag: board dots, scores, the timer */
 function scan() {
   dotProps = []; scoreProps = []; timerProp = null
@@ -163,10 +213,20 @@ world.onupdate = (dt, time) => {
     sel = []; cycleColor = null; preview = null
     chain.points = []
   }
+  // the round just ended: file our own final score into the per-user
+  // room-state top-10 (self-reported; the host drops it if it doesn't
+  // make our cut or we lack permission)
+  if (t === 0 && !submitted) {
+    submitted = true
+    if (myScore > 0) submitScore('dots', myScore)
+  }
   // a rearmed timer means the primary reset the round: forget the local
   // tally too, or our next clear would repaint the old score right over
   // the zero the reset painted
-  if (t === IDLE && myScore > 0) { prevScore = myScore; myScore = 0 }
+  if (t === IDLE) {
+    submitted = false
+    if (myScore > 0) { prevScore = myScore; myScore = 0 }
+  }
   if (drawing) {
     revalidate()
     updateLine()
@@ -224,6 +284,7 @@ world.onupdate = (dt, time) => {
     html += `<tr><td>${cell(esc(r.who))}</td><td>${cell(score)}</td></tr>`
   }
   html += '</table>'
+  html += bestTable('dots')
   if (html !== hudLast) { hudLast = html; world.hud(html) }
 
   // -- primary duties: the timer prop, the countdown, round resets --

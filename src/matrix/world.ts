@@ -11,6 +11,20 @@ import type { WidgetApi } from 'matrix-widget-api'
  */
 export const WORLD_EVENT_TYPE = 'org.matrix.msc3815.world'
 
+/**
+ * State event types world scripts may touch through world.getStateEvents
+ * / world.setStateEvent. Widget capabilities are granted per event type
+ * up front, so the list is fixed here (grow it as worlds need more;
+ * Element re-prompts for approval): reads for every state key, writes
+ * only with OUR OWN MXID as the state key. Core auth rules restrict
+ * @-prefixed state keys to that exact sender, so per-user events cannot
+ * be clobbered by rivals - though nothing stops a user lying in their
+ * own (no witnessing yet). Content is entirely the script's business:
+ * the example games keep { scores: { [game]: [{ score, ts }, ...] } }
+ * top-10 lists in io.element.highscores.
+ */
+export const SCRIPT_STATE_TYPES = ['io.element.highscores']
+
 function worldContent(client: MatrixClient, roomId: string): Record<string, unknown> {
   const ev = client.getRoom(roomId)?.currentState.getStateEvents(WORLD_EVENT_TYPE, '')
   return (ev?.getContent() as Record<string, unknown> | undefined) ?? {}

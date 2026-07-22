@@ -3,7 +3,7 @@ import sanitizeHtml from 'sanitize-html'
 import { BOOT_LEAD_TICKS, Sim } from './sim'
 import { peerColor } from './color'
 import { cachedScene, cacheScene, configureGlbLoader, parseGlb } from './scene'
-import { fetchWorldAsset, mediaUploadLimit, uploadWorldAsset } from './matrix/world'
+import { fetchWorldAsset, mediaUploadLimit, SCRIPT_STATE_TYPES, uploadWorldAsset } from './matrix/world'
 import { Net } from './net'
 import { Session } from './session'
 import { View } from './render'
@@ -389,6 +389,62 @@ async function main() {
     hudEl.style.display = html.trim() ? 'block' : 'none'
   }
 
+  // world.getStateEvents / world.setStateEvent: real Matrix room state,
+  // scoped to the SCRIPT_STATE_TYPES allowlist (widget capabilities are
+  // negotiated per type up front) and, for writes, to OUR OWN MXID as
+  // the state key (core auth rules bar writing anyone else's @-prefixed
+  // key, so per-user events cannot clobber each other; nothing stops
+  // lying in your own - no witnessing yet). Content is entirely the
+  // script's business - the example games keep top-10 highscore lists in
+  // io.element.highscores - the host only stores, capping size and
+  // rate. Reads are local cosmetics for HUDs and never touch the sim.
+  // Outside widget mode an in-memory map stands in so scripts behave;
+  // it dies with the tab.
+  const scriptUser = () => wp ? wp.userId : session.id
+  const memState = new Map<string, Map<string, unknown>>() // type -> stateKey -> content
+  const scriptGetStateEvents = (type: string) => {
+    if (!SCRIPT_STATE_TYPES.includes(type)) {
+      log(`getStateEvents: event type not allowlisted: ${type}`)
+      return []
+    }
+    if (!wp) {
+      return [...(memState.get(type) ?? [])].map(([stateKey, content]) =>
+        ({ type, stateKey, sender: scriptUser(), ts: 0, content }))
+    }
+    const m = net as import('./matrix/net').MatrixNet
+    return (m.client.getRoom(wp.roomId)?.currentState.getStateEvents(type) ?? []).map(ev => ({
+      type, stateKey: ev.getStateKey() ?? '', sender: ev.getSender() ?? '', ts: ev.getTs(),
+      content: ev.getContent() as unknown,
+    }))
+  }
+  let lastStateWrite = -Infinity
+  const scriptSetStateEvent = (type: string, json: string, stateKey: string) => {
+    if (!SCRIPT_STATE_TYPES.includes(type)) {
+      log(`setStateEvent: event type not allowlisted: ${type}`)
+      return
+    }
+    if (stateKey !== scriptUser()) {
+      log(`setStateEvent: scripts may only write their own state key (${scriptUser()})`)
+      return
+    }
+    if (json.length > 16384) { log('setStateEvent dropped: content over 16KB'); return }
+    let content: unknown
+    try { content = JSON.parse(json) } catch { return }
+    if (performance.now() - lastStateWrite < 2000) { log('setStateEvent dropped (rate limit)'); return }
+    lastStateWrite = performance.now()
+    if (!wp) {
+      const forType = memState.get(type) ?? new Map<string, unknown>()
+      forType.set(stateKey, content)
+      memState.set(type, forType)
+      return
+    }
+    const m = net as import('./matrix/net').MatrixNet
+    const sendState = m.client.sendStateEvent.bind(m.client) as
+      (roomId: string, type: string, content: unknown, stateKey: string) => Promise<unknown>
+    void sendState(wp.roomId, type, content, stateKey)
+      .catch(e => logErr('setStateEvent failed (no permission to send room state?)', e))
+  }
+
   const scriptHost: import('./websg').ScriptHost = {
     log: l => log(`[script] ${l}`),
     say: scriptSay,
@@ -445,7 +501,7 @@ async function main() {
       session.emit('release', id, { pos: { x: p.x, y: p.y, z: p.z }, vel: { x: vx, y: vy, z: vz } })
       return true
     },
-    me: () => ({ id: session.id, primary: isRoot(), color: peerColor(session.id) }),
+    me: () => ({ id: session.id, user: scriptUser(), primary: isRoot(), color: peerColor(session.id) }),
     peers: () => {
       const out = [{ id: session.id, order: session.order, color: peerColor(session.id), me: true }]
       for (const p of session.peers.values()) {
@@ -453,6 +509,8 @@ async function main() {
       }
       return out.sort((a, b) => a.order - b.order)
     },
+    getStateEvents: scriptGetStateEvents,
+    setStateEvent: scriptSetStateEvent,
     props: () => [...sim.props].map(([id, p]) => propView(id, p)),
     prop: id => {
       const p = sim.props.get(id)

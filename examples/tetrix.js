@@ -33,6 +33,10 @@ const X0 = -9, Y0 = 0.3     // world pos of column 0, bottom row (resting on the
 // color = total lines cleared) drives the level for everyone; each
 // player's SCORE prop (claimed by them, color = score) survives reloads
 // via its claim and feeds every peer's HUD.
+// At game over (top out) each player's final score also lands in an
+// all-time top-5 board on the HUD, kept as per-user top-10 lists in
+// io.element.highscores room state events (self-reported: nothing
+// witnesses them yet).
 const SCORE = 0.27, LINES = 0.24
 const HIDE_Y = -4
 const COLORS = [0, 0xd94f4f, 0x5a79e8, 0xe89a4f, 0xe3d84f, 0x58d977, 0xb45ae8, 0x4fc9d9]
@@ -308,6 +312,52 @@ world.onkeydown = (ev) => {
   }
 }
 
+// -- shared highscores helper (identical in every example that keeps
+// scores; world scripts have no imports, so keep the copies in sync).
+// One io.element.highscores state event per user, state_key = their
+// MXID (Matrix auth rules make it writable only by them): { scores:
+// { [game]: [{ score, ts }, ...] } }, each list capped script-side to
+// the user's 10 best to bound the event size. Self-reported: nothing
+// witnesses these yet. --
+
+const HIGHSCORES_TYPE = 'io.element.highscores'
+
+/** merge a finished game's score into our own room-state top-10 (the
+ * host drops the write when we lack permission to send room state) */
+function submitScore(game, score) {
+  const mine = world.getStateEvents(HIGHSCORES_TYPE, world.me.user)
+  const content = mine && mine.content && typeof mine.content === 'object' ? mine.content : {}
+  const scores = content.scores && typeof content.scores === 'object' ? content.scores : {}
+  const list = Array.isArray(scores[game]) ? scores[game].filter((e) => e && typeof e.score === 'number') : []
+  const entry = { score, ts: Date.now() }
+  list.push(entry)
+  list.sort((a, b) => b.score - a.score) // stable: standing entries win ties
+  const top = list.slice(0, 10)
+  if (top.indexOf(entry) === -1) return // didn't make our own top 10
+  scores[game] = top
+  content.scores = scores
+  world.setStateEvent(HIGHSCORES_TYPE, content)
+}
+
+/** the all-time top 5 as a HUD table: one row per user (their best),
+ * distilled from every user's top-10 list in room state */
+function bestTable(game) {
+  const rows = []
+  for (const ev of world.getStateEvents(HIGHSCORES_TYPE)) {
+    const scores = ev.content && ev.content.scores ? ev.content.scores : {}
+    const list = Array.isArray(scores[game]) ? scores[game] : []
+    let best = 0
+    for (const e of list) if (e && typeof e.score === 'number' && e.score > best) best = e.score
+    if (best > 0) rows.push({ who: ev.stateKey.split(':')[0], score: best })
+  }
+  const top = rows.sort((a, b) => b.score - a.score).slice(0, 5)
+  if (!top.length) return ''
+  const esc = (x) => String(x).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]))
+  let html = '<span style="color:#8b98a8">all-time</span><table>'
+  for (const r of top) html += `<tr><td>${esc(r.who)}</td><td>${r.score}</td></tr>`
+  return html + '</table>'
+}
+
 // -- cosmetics: the well outline and lane separators, local lines --
 
 const drawBorder = () => {
@@ -344,6 +394,9 @@ world.onupdate = (dt, time) => {
   // recreate for 2s, so even a throttled tab sees the gap
   if (hadLines && !linesProp) {
     prevScore = myScore
+    // game over for us too: file the final score into our per-user
+    // room-state top-10 (self-reported; no witnessing yet)
+    if (myScore > 0) submitScore('tetrix', myScore)
     myScore = 0; softDrops = 0; hardCells = 0
     if (scoreId) world.paint(scoreId, 0)
     linesWait = now
@@ -411,6 +464,7 @@ world.onupdate = (dt, time) => {
     html += `<tr><td>${cell(esc(r.who))}</td><td>${cell(score)}</td></tr>`
   }
   html += '</table>'
+  html += bestTable('tetrix')
   if (html !== hudLast) { hudLast = html; world.hud(html) }
 
   // -- primary duties: the lines counter, line clears, duplicates, orphans --
