@@ -74,6 +74,17 @@
   }
   #inspector .props .hint { margin-top: 6px; }
   #inspector .hint { color: #8b949e; }
+  /* script HUD: world.hud(html) renders here; pointer-transparent so it
+     never eats clicks meant for the world */
+  #hud {
+    position: fixed; top: 10px; left: 10px; z-index: 15; pointer-events: none;
+    max-width: 40vw; max-height: 60vh; overflow: hidden; display: none;
+    background: rgba(13, 17, 23, 0.82); border: 1px solid #30363d; border-radius: 8px;
+    color: #e6edf3; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+    padding: 8px 12px;
+  }
+  #hud table { border-collapse: collapse; }
+  #hud td, #hud th { padding: 0 10px 0 0; text-align: left; }
   #help {
     position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); white-space: nowrap;
     color: #8b949e; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;

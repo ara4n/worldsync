@@ -1,4 +1,5 @@
 import { Raycaster, Vector2, Vector3 } from 'three'
+import sanitizeHtml from 'sanitize-html'
 import { BOOT_LEAD_TICKS, Sim } from './sim'
 import { peerColor } from './color'
 import { cachedScene, cacheScene, configureGlbLoader, parseGlb } from './scene'
@@ -336,9 +337,62 @@ async function main() {
     void m.client.sendTextMessage(wp.roomId, t).catch(e => logErr('script chat failed', e))
   }
 
+  // world.hud: an HTML overlay the script fully owns. The sandbox exists
+  // so scripts CANNOT touch the page, so the HTML goes through
+  // sanitize-html with an ALLOWLIST - element-web's Matrix-message
+  // subset (its Linkify.ts sanitizeHtmlParams) - rather than any
+  // blacklist. Styles are restricted to a cosmetic property set instead
+  // of element-web's data-mx-* transformation dance, and only https
+  // image sources survive. Identical updates are deduped so scripts may
+  // call it every frame.
+  const HUD_STYLE_VALUE = [/^[#\w(),.%/ -]{1,200}$/]
+  const HUD_SANITIZE: sanitizeHtml.IOptions = {
+    allowedTags: [
+      'font', 'del', 's', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'p', 'a', 'ul', 'ol',
+      'sup', 'sub', 'nl', 'li', 'b', 'i', 'u', 'strong', 'em', 'strike', 'code', 'hr', 'br', 'div',
+      'table', 'thead', 'caption', 'tbody', 'tr', 'th', 'td', 'pre', 'span', 'img', 'details', 'summary',
+    ],
+    allowedAttributes: {
+      font: ['color', 'style'],
+      span: ['style'],
+      a: ['href', 'name', 'target', 'rel'],
+      img: ['src', 'alt', 'title', 'width', 'height'],
+      ol: ['start'],
+      code: ['class'],
+    },
+    allowedStyles: {
+      '*': {
+        'color': HUD_STYLE_VALUE, 'background-color': HUD_STYLE_VALUE,
+        'font-weight': HUD_STYLE_VALUE, 'font-style': HUD_STYLE_VALUE, 'font-size': HUD_STYLE_VALUE,
+        'text-decoration': HUD_STYLE_VALUE, 'text-align': HUD_STYLE_VALUE,
+        'padding': HUD_STYLE_VALUE, 'margin': HUD_STYLE_VALUE, 'opacity': HUD_STYLE_VALUE,
+      },
+    },
+    allowedSchemes: ['https', 'http', 'mailto', 'matrix'],
+    allowedSchemesByTag: { img: ['https'] },
+    allowProtocolRelative: false,
+    nestingLimit: 50,
+    // an img whose src the scheme filter ate is a husk; drop it whole
+    exclusiveFilter: (frame) => frame.tag === 'img' && !frame.attribs.src,
+  }
+  let hudEl: HTMLElement | null = null
+  let hudLast = ''
+  const scriptHud = (html: string) => {
+    if (html === hudLast) return
+    hudLast = html
+    if (!hudEl) {
+      hudEl = document.createElement('div')
+      hudEl.id = 'hud'
+      document.body.appendChild(hudEl)
+    }
+    hudEl.innerHTML = sanitizeHtml(html, HUD_SANITIZE)
+    hudEl.style.display = html.trim() ? 'block' : 'none'
+  }
+
   const scriptHost: import('./websg').ScriptHost = {
     log: l => log(`[script] ${l}`),
     say: scriptSay,
+    hud: scriptHud,
     boxes: () => {
       const out = []
       for (const netId of sim.bodies.keys()) {
@@ -516,6 +570,7 @@ async function main() {
       stopCam() // no world is asking for video anymore: stop publishing
     }
     view.setEnvironment({}) // back to the default look
+    scriptHud('') // its HUD goes with it
     log(why)
   }
   const syncScript = () => {

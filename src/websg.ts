@@ -49,6 +49,11 @@ export interface ScriptHost {
    * by the host; a no-op log outside widget mode). Scripts narrate their
    * own player's actions with it - chess announces each move. */
   say(text: string): void
+  /** replace the HTML HUD overlay (top-left, over the 3D view). The host
+   * sanitizes it (scripts, event handlers, frames stripped) and dedupes
+   * identical updates; '' hides it. Local-only cosmetics: each peer's
+   * script renders its own HUD from shared state. */
+  hud(html: string): void
   /** dynamic boxes: id, translation, grab state ('mine' = held by us) */
   boxes(): { id: string; x: number; y: number; z: number; grabbed: boolean; mine: boolean }[]
   box(id: string): { x: number; y: number; z: number; grabbed: boolean; mine: boolean } | null
@@ -246,6 +251,8 @@ const PRELUDE = `
     get me() { return parse(H.me()) },
     // chat into the Matrix room as this user (host rate-limits it)
     say(text) { H.say(typeof text === 'string' ? text : JSON.stringify(text)) },
+    // HTML HUD overlay (sanitized by the host; '' hides it)
+    hud(html) { H.hud(String(html ?? '')) },
     props() { return parse(H.props()) },
     prop(id) { return parse(H.prop(id)) },
     createSphere(props = {}) {
@@ -407,6 +414,7 @@ export class WorldScript {
     const bool = (v: boolean) => (v ? ctx.true : ctx.false)
     fn('log', (s) => { host.log(ctx.getString(s)); return ctx.undefined })
     fn('say', (s) => { host.say(ctx.getString(s)); return ctx.undefined })
+    fn('hud', (s) => { host.hud(ctx.getString(s)); return ctx.undefined })
     fn('boxes', () => json(host.boxes()))
     fn('box', (id) => json(host.box(ctx.getString(id))))
     fn('sceneNode', (n) => json(host.sceneNode(ctx.getString(n))))

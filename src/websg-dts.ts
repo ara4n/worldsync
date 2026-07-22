@@ -117,6 +117,12 @@ declare const world: {
    * to ~1/s by the host; logs locally outside widget mode). Narrate your
    * own player's actions - e.g. chess announces each move. */
   say(text: string): void
+  /** replace the HTML HUD overlay in the top-left, over the 3D view.
+   * Sanitized by the host (scripts, event handlers and frames are
+   * stripped; inline styles survive) and deduped, so calling it every
+   * update with unchanged HTML is free. '' hides it. Local-only: each
+   * peer's script renders its own HUD from shared state. */
+  hud(html: string): void
   /** every connected participant (self included), in join order */
   peers(): { id: string; order: number; color: number; me: boolean }[]
 
