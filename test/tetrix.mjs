@@ -64,14 +64,15 @@ if (!ps.length || Math.max(...ps.map((p) => p.y)) >= y0) fail('piece did not fal
 else console.log('spawn + gravity: ok')
 
 // the next-piece ghost: four preview cells (size PREV=0.26), opaque but
-// dimmed to half the piece colour's RGB, hover above the well top, and a
-// name plane labels the lane
+// dimmed to 70% of the piece colour's RGB, hover above the well top, and
+// a name plane labels the lane
 const ghost = await a.frame.waitForFunction(() => {
-  const HALF = [0xd94f4f, 0x5a79e8, 0xe89a4f, 0xe3d84f, 0x58d977, 0xb45ae8, 0x4fc9d9]
-    .map((c) => (c >> 1) & 0x7f7f7f)
+  const dim = (c) => (Math.floor(((c >> 16) & 0xff) * 0.7) << 16)
+    | (Math.floor(((c >> 8) & 0xff) * 0.7) << 8) | Math.floor((c & 0xff) * 0.7)
+  const DIMMED = [0xd94f4f, 0x5a79e8, 0xe89a4f, 0xe3d84f, 0x58d977, 0xb45ae8, 0x4fc9d9].map(dim)
   const meshes = [...window.__jig.view.props.meshes.values()].filter((m) => m.userData.size === 0.26)
   return meshes.length === 4 && meshes.every((m) =>
-    m.material.opacity === 1 && m.position.y > 15 && HALF.includes(m.material.color.getHex()))
+    m.material.opacity === 1 && m.position.y > 15 && DIMMED.includes(m.material.color.getHex()))
 }, null, { timeout: 10000 }).then(() => true).catch(() => false)
 if (!ghost) fail('no dimmed next-piece ghost above the well')
 const labeled = await a.frame.waitForFunction(() => window.__jig.view.labels.size >= 1,
