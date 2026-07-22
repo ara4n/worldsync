@@ -38,14 +38,14 @@ const X0 = -9, Y0 = 0.3     // world pos of column 0, bottom row (resting on the
 // io.element.highscores room state events (self-reported: nothing
 // witnesses them yet).
 //
-// Each player flies a half-opaque ghost of their NEXT piece a few
-// squares above their lane - real props (size-tagged PREV, opacity 0.5),
-// so every peer sees every ghost and can watch a rival's plans - swapped
-// for a fresh roll the moment it enters play. A name plane (local
-// canvas-text labels, one per peer) floats above each lane's ghost so
-// you can see who is playing where.
+// Each player flies a dimmed ghost of their NEXT piece (opaque, at half
+// its colour's RGB) a few squares above their lane - real props
+// (size-tagged PREV), so every peer sees every ghost and can watch a
+// rival's plans - swapped for a fresh roll the moment it enters play. A
+// name plane (local canvas-text labels, one per peer) floats above each
+// lane's ghost so you can see who is playing where.
 const SCORE = 0.27, LINES = 0.24
-const PREV = 0.26 // next-piece ghost cells: half-opaque boxes tagged by this size
+const PREV = 0.26 // next-piece ghost cells: dimmed boxes tagged by this size
 const GAP = 3     // the ghost hovers this many cells above the well top
 const HIDE_Y = -4
 const COLORS = [0, 0xd94f4f, 0x5a79e8, 0xe89a4f, 0xe3d84f, 0x58d977, 0xb45ae8, 0x4fc9d9]
@@ -445,7 +445,7 @@ world.onupdate = (dt, time) => {
   })
 
   if (!piece && now >= respawnAt) spawnPiece()
-  // the next-piece ghost: half-opaque cells hovering GAP squares above
+  // the next-piece ghost: dimmed cells hovering GAP squares above
   // our lane so we can prepare for the roll; rebuilt whenever the roll
   // (or our lane, as players come and go) changes. Reload leftovers -
   // our claim survives the session - are swept first.
@@ -462,7 +462,10 @@ world.onupdate = (dt, time) => {
     previewIds = blocks.map(([c, r]) => {
       const id = world.createBox({
         position: { x: wx(c), y: wy(r - maxR) + GAP * CELL, z: 0 },
-        color: COLORS[nextType], size: PREV, unlit: true, bounce: false, pop: false, opacity: 0.5,
+        // opaque but at half the piece colour's RGB, so it reads as
+        // pending rather than in play; lit like the real cells - an
+        // unlit ghost renders flat and reads as translucent
+        color: (COLORS[nextType] >> 1) & 0x7f7f7f, size: PREV, bounce: false, pop: false,
       })
       pendingClaims.push({ id, t: now })
       return id
@@ -478,7 +481,7 @@ world.onupdate = (dt, time) => {
     if (!l) {
       laneLabels.set(ps[i].id, {
         key,
-        label: world.createLabel({ text: ps[i].id.split(':')[0], position: pos, height: 0.5, color: ps[i].color }),
+        label: world.createLabel({ text: ps[i].id.split(':')[0], position: pos, height: 0.35, color: ps[i].color }),
       })
     } else if (l.key !== key) { l.key = key; l.label.position = pos }
   }

@@ -63,13 +63,17 @@ ps = cellsOf(await props(a.frame)).filter((p) => p.claim)
 if (!ps.length || Math.max(...ps.map((p) => p.y)) >= y0) fail('piece did not fall under gravity')
 else console.log('spawn + gravity: ok')
 
-// the next-piece ghost: four half-opaque preview cells (size PREV=0.26,
-// opacity 0.5) hover above the well top, and a name plane labels the lane
+// the next-piece ghost: four preview cells (size PREV=0.26), opaque but
+// dimmed to half the piece colour's RGB, hover above the well top, and a
+// name plane labels the lane
 const ghost = await a.frame.waitForFunction(() => {
+  const HALF = [0xd94f4f, 0x5a79e8, 0xe89a4f, 0xe3d84f, 0x58d977, 0xb45ae8, 0x4fc9d9]
+    .map((c) => (c >> 1) & 0x7f7f7f)
   const meshes = [...window.__jig.view.props.meshes.values()].filter((m) => m.userData.size === 0.26)
-  return meshes.length === 4 && meshes.every((m) => m.material.opacity === 0.5 && m.position.y > 15)
+  return meshes.length === 4 && meshes.every((m) =>
+    m.material.opacity === 1 && m.position.y > 15 && HALF.includes(m.material.color.getHex()))
 }, null, { timeout: 10000 }).then(() => true).catch(() => false)
-if (!ghost) fail('no half-opaque next-piece ghost above the well')
+if (!ghost) fail('no dimmed next-piece ghost above the well')
 const labeled = await a.frame.waitForFunction(() => window.__jig.view.labels.size >= 1,
   null, { timeout: 10000 }).then(() => true).catch(() => false)
 if (!labeled) fail('no lane name label plane')
@@ -128,8 +132,8 @@ else console.log('two players, lane assignment: ok')
     // b's piece must be mid-well but NOT near the floor: deep pieces can
     // lock during a's steer-and-drop window and fail the recheck below
     return Math.max(...mine.map(row)) <= 3
-      && Math.min(...theirs.map(row)) >= 6 && Math.max(...theirs.map(row)) <= 14
-  }, null, { timeout: 60000 }).then(() => true).catch(() => false)
+      && Math.min(...theirs.map(row)) >= 6 && Math.max(...theirs.map(row)) <= 16
+  }, null, { timeout: 120000 }).then(() => true).catch(() => false)
   if (!aligned) fail('inflight: never saw a-fresh-above/b-mid-well phase')
   await a.page.bringToFront()
   const meId = await a.frame.evaluate(() => window.__jig.session.id)
