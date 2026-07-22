@@ -27,7 +27,13 @@
 const H = 24, LANE = 5
 const CELL = 0.6, CB = 0.29 // cell prop half-size: the "tetrix cell" tag
 const X0 = -9, Y0 = 0.3     // world pos of column 0, bottom row (resting on the ground)
-const GRAVITY_S = 0.75
+// Shared score/level state rides in hidden props (parked below the
+// floor), identified by size: the LINES prop (unclaimed, primary-painted
+// color = total lines cleared) drives the level for everyone; each
+// player's SCORE prop (claimed by them, color = score) survives reloads
+// via its claim and feeds every peer's HUD.
+const SCORE = 0.27, LINES = 0.24
+const HIDE_Y = -4
 const COLORS = [0, 0xd94f4f, 0x5a79e8, 0xe89a4f, 0xe3d84f, 0x58d977, 0xb45ae8, 0x4fc9d9]
 // tetroji types 1..7 = Z J L O S T I; [0,0] is top left of the bounding box
 const SHAPES = [
@@ -76,6 +82,10 @@ const wy = (r) => Y0 + (H - 1 - r) * CELL
 
 let me, W = 10
 let cells = [] // this frame's cell props: {id, c, r, claimedBy, color}
+let scoreProps = [], linesProp = null
+let scoreId = null, scoreWait = -10, linesWait = -10, myScore = 0
+let softDrops = 0, hardCells = 0 // this piece's drop points
+let hudLast = ''
 let piece = null // { type, x, y, rot, ids: [4] }
 let pendingClaims = [] // {id, t}
 let lockQueue = []     // {id, cancelled, t}
@@ -95,17 +105,32 @@ world.onenter = () => { me = world.me }
 // -- derived state --
 
 const scan = () => {
-  cells = []
+  cells = []; scoreProps = []; linesProp = null
   for (const p of world.props()) {
-    if (p.kind !== 'box' || p.size !== CB) continue
-    cells.push({
-      id: p.id,
-      c: Math.round((p.x - X0) / CELL),
-      r: H - 1 - Math.round((p.y - Y0) / CELL),
-      claimedBy: p.claimedBy,
-      color: p.color,
-    })
+    if (p.kind === 'box' && p.size === CB) {
+      cells.push({
+        id: p.id,
+        c: Math.round((p.x - X0) / CELL),
+        r: H - 1 - Math.round((p.y - Y0) / CELL),
+        claimedBy: p.claimedBy,
+        color: p.color,
+      })
+    } else if (p.kind === 'sphere' && p.size === SCORE) {
+      scoreProps.push(p)
+    } else if (p.kind === 'sphere' && p.size === LINES) {
+      linesProp = p
+    }
   }
+}
+
+// Real-game pacing: the marathon guideline curve, one level per 10
+// cleared lines, shared by everyone via the lines prop. Capped at level
+// 10 (~15 rows/s) - each gravity step is 4 move ops per player, and the
+// guideline's deeper levels would be all netcode and no game.
+const level = () => Math.floor((linesProp ? linesProp.color : 0) / 10) + 1
+const gravityS = () => {
+  const l = Math.min(level(), 10)
+  return Math.pow(0.8 - (l - 1) * 0.007, l - 1)
 }
 
 const myIds = () => new Set(piece ? piece.ids : [])
@@ -172,7 +197,33 @@ const tryMove = (x, y, rot) => {
   return true
 }
 
+/** guideline scoring at lock: whoever places the completing piece gets
+ * the clear (100/300/500/800 x level), plus 1/cell soft and 2/cell hard
+ * drop points banked while steering this piece */
+const lockScore = () => {
+  const blocks = blocksFor(piece.type, piece.x, piece.y, piece.rot)
+  const occ = new Set()
+  for (const cell of cells) {
+    if (cell.claimedBy === '' && cell.c >= 0 && cell.c < W && cell.r >= 0 && cell.r < H) {
+      occ.add(cell.c + ',' + cell.r)
+    }
+  }
+  for (const [c, r] of blocks) occ.add(c + ',' + r)
+  let full = 0
+  for (const r of new Set(blocks.map((b) => b[1]))) {
+    if (r < 0 || r >= H) continue
+    let ok = true
+    for (let c = 0; c < W && ok; c++) if (!occ.has(c + ',' + r)) ok = false
+    if (ok) full++
+  }
+  return [0, 100, 300, 500, 800][full] * level()
+}
+
 const lock = () => {
+  myScore += softDrops + 2 * hardCells + lockScore()
+  softDrops = 0
+  hardCells = 0
+  if (scoreId) world.paint(scoreId, myScore)
   for (const id of piece.ids) {
     const pc = pendingClaims.find((p) => p.id === id)
     if (pc) {
@@ -219,6 +270,8 @@ const spawnPiece = () => {
   })
   piece = { type, x, y: 0, rot: 0, ids }
   gravAcc = 0
+  softDrops = 0
+  hardCells = 0
 }
 
 world.onkeydown = (ev) => {
@@ -228,7 +281,8 @@ world.onkeydown = (ev) => {
     case 'ArrowLeft': tryMove(piece.x - 1, piece.y, piece.rot); break
     case 'ArrowRight': tryMove(piece.x + 1, piece.y, piece.rot); break
     case 'ArrowDown':
-      if (!tryMove(piece.x, piece.y + 1, piece.rot) && !restingOnFlight(piece.x, piece.y, piece.rot)) lock()
+      if (tryMove(piece.x, piece.y + 1, piece.rot)) softDrops++
+      else if (!restingOnFlight(piece.x, piece.y, piece.rot)) lock()
       break
     case ' ': {
       let y = piece.y
@@ -237,6 +291,7 @@ world.onkeydown = (ev) => {
         console.log('cannot drop onto a piece still in flight - wait for it to pass')
         break
       }
+      hardCells = y - piece.y
       piece.y = y
       emitPos()
       lock()
@@ -275,11 +330,12 @@ world.onupdate = (dt, time) => {
   W = 5 + 5 * world.peers().length
   drawBorder()
 
-  // claims trail spawns by a fold (a same-dispatch claim is refused)
+  // claims trail spawns by a fold (a same-dispatch claim is refused);
+  // looked up directly, since we claim cells AND our score prop
   pendingClaims = pendingClaims.filter((pc) => {
-    const cell = cells.find((x) => x.id === pc.id)
-    if (!cell) return now - pc.t < 3
-    if (cell.claimedBy === '') world.claim(pc.id)
+    const p = world.prop(pc.id)
+    if (!p) return now - pc.t < 3
+    if (p.claimedBy === '') world.claim(pc.id)
     return false
   })
   // unclaims for locked pieces likewise wait until the claim has landed
@@ -294,7 +350,7 @@ world.onupdate = (dt, time) => {
   if (!piece && now >= respawnAt) spawnPiece()
   if (piece) {
     gravAcc += dt
-    if (gravAcc >= GRAVITY_S) {
+    if (gravAcc >= gravityS()) {
       gravAcc = 0
       // blocked by a piece still in flight: hover and retry, never lock
       // onto a support that is about to move away
@@ -302,8 +358,46 @@ world.onupdate = (dt, time) => {
     }
   }
 
-  // -- primary duties: line clears, duplicate cells, orphans --
+  // our score prop: adopt a survivor from a previous session (the claim
+  // is ours across reloads, keeping the score), else spawn one; if ours
+  // vanished (a sweep race), let it respawn
+  if (scoreId && now > scoreWait + 4 && !scoreProps.some((p) => p.id === scoreId)) scoreId = null
+  if (!scoreId) {
+    const existing = scoreProps.find((p) => p.claimedBy === me.id)
+    if (existing) {
+      scoreId = existing.id
+      scoreWait = now
+      myScore = Math.max(myScore, existing.color)
+    } else if (now > scoreWait + 2) {
+      scoreWait = now
+      scoreId = world.createSphere({ position: { x: 0, y: HIDE_Y, z: 0 }, color: 0, radius: SCORE, unlit: true, bounce: false })
+      pendingClaims.push({ id: scoreId, t: now })
+    }
+  }
+
+  // the scoreboard HUD, rebuilt from the shared props so every peer
+  // (and any late joiner) shows the same table
+  const esc = (s) => String(s).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]))
+  const board = scoreProps
+    .filter((p) => p.claimedBy !== '')
+    .map((p) => ({ who: p.claimedBy.split(':')[0], mine: p.mine, score: p.color }))
+    .sort((a, b) => b.score - a.score)
+  // markup stays inside the HUD's Matrix-subset allowlist: styles only
+  // ride on span/font, so the highlight wraps the cells
+  let html = `<b>tetrix</b> · level ${level()} · ${linesProp ? linesProp.color : 0} lines<table>`
+  for (const r of board) {
+    const cell = (s) => (r.mine ? `<span style="color:#7fe0a0">${s}</span>` : s)
+    html += `<tr><td>${cell(esc(r.who))}</td><td>${cell(r.score)}</td></tr>`
+  }
+  html += '</table>'
+  if (html !== hudLast) { hudLast = html; world.hud(html) }
+
+  // -- primary duties: the lines counter, line clears, duplicates, orphans --
   if (!world.me.primary) { pendingClear = null; return }
+  if (!linesProp && now > linesWait + 2) {
+    linesWait = now
+    world.createSphere({ position: { x: 1, y: HIDE_Y, z: 0 }, color: 0, radius: LINES, unlit: true, bounce: false })
+  }
   const landed = cells.filter((c) => c.claimedBy === '')
   if (pendingClear) {
     if (now - pendingClear.t < 0.35) return
@@ -316,6 +410,7 @@ world.onupdate = (dt, time) => {
         if (drop > 0) world.move(cell.id, { x: wx(cell.c), y: wy(cell.r + drop), z: 0 })
       }
     }
+    if (linesProp) world.paint(linesProp.id, linesProp.color + rows.length) // levels for everyone
     pendingClear = null
     return
   }
@@ -340,11 +435,16 @@ world.onupdate = (dt, time) => {
     else if (seen[k]) { world.despawn(seen[k]); seen[k] = cell.id }
     else seen[k] = cell.id
   }
-  // falling cells whose driver left: nobody will ever land them
+  // sweep what nobody will ever drive again. Cells: claimed by a dead
+  // peer (unclaimed cells are landed blocks, sacred). Score props: any
+  // without a LIVE owner - departure force-unclaims them, so ownerless
+  // ones are dead weight; the grace covers a fresh spawn's claim window.
   const live = new Set(world.peers().map((p) => p.id))
-  for (const cell of cells) {
-    if (cell.claimedBy === '' || live.has(cell.claimedBy)) { delete orphanSince[cell.id]; continue }
-    if (orphanSince[cell.id] === undefined) orphanSince[cell.id] = time
-    else if (time - orphanSince[cell.id] > 5) { world.despawn(cell.id); delete orphanSince[cell.id] }
+  const doomed = (id, cond) => {
+    if (!cond) { delete orphanSince[id]; return }
+    if (orphanSince[id] === undefined) orphanSince[id] = time
+    else if (time - orphanSince[id] > 5) { world.despawn(id); delete orphanSince[id] }
   }
+  for (const cell of cells) doomed(cell.id, cell.claimedBy !== '' && !live.has(cell.claimedBy))
+  for (const p of scoreProps) doomed(p.id, !live.has(p.claimedBy))
 }

@@ -46,8 +46,9 @@ await a.frame.waitForFunction(
   () => [...document.querySelectorAll('#log div')].some((d) => d.textContent.includes('world script running')),
   null, { timeout: 20000 })
 
-// a claimed 4-cell piece appears in lane 0 and falls
-await a.frame.waitForFunction(() => window.__jig.props().filter((p) => p.claim).length === 4,
+// a claimed 4-cell piece appears in lane 0 and falls (y > 0 skips the
+// hidden score prop, which is claimed too)
+await a.frame.waitForFunction(() => window.__jig.props().filter((p) => p.claim && p.y > 0).length === 4,
   null, { timeout: 15000 }).catch(() => fail('no claimed 4-cell piece appeared'))
 // the bounce:false request must survive all the way into the folded sim
 // state (it once died silently at the session.emit whitelist)
@@ -72,13 +73,25 @@ const locked = await a.frame.waitForFunction(() => {
 if (!locked) fail('hard drop did not lock the piece')
 else console.log('hard drop + lock: ok')
 
+// scoring: the hard drop banks 2/cell into our score prop (a hidden
+// claimed sphere whose color is the score), and the HUD shows the table
+const scored = await a.frame.waitForFunction(() => {
+  const me = window.__jig.session.id
+  return window.__jig.props().some((p) => p.y < -3 && p.claim === me && p.color > 0)
+}, null, { timeout: 10000 }).then(() => true).catch(() => false)
+if (!scored) fail('hard drop score never reached the score prop')
+const hud = await a.frame.evaluate(() => document.getElementById('hud')?.innerHTML ?? '')
+if (!hud.includes('tetrix') || !hud.includes('level 1')) fail(`HUD missing scoreboard: ${hud.slice(0, 120)}`)
+else console.log('score prop + HUD: ok')
+
 // second player: spawns in lane 1 of the widened well
 const b = await open()
 await b.frame.waitForFunction(
   () => [...document.querySelectorAll('#log div')].some((d) => d.textContent.includes('world script running')),
   null, { timeout: 20000 })
 const laned = await b.frame.waitForFunction(() => {
-  const mine = window.__jig.props().filter((p) => p.claim === window.__jig.session.id)
+  // p.y > 0 skips the hidden score prop, which is also claimed by us
+  const mine = window.__jig.props().filter((p) => p.claim === window.__jig.session.id && p.y > 0)
   return mine.length === 4 && mine.every((p) => {
     const c = Math.round((p.x - -9) / 0.6)
     return c >= 5 && c <= 9
@@ -92,12 +105,12 @@ else console.log('two players, lane assignment: ok')
 // mid-well below, steer a over b's columns, and hard-drop
 {
   const cellsFor = (ps, mineId, wantMine) => ps
-    .filter((p) => p.claim && (p.claim === mineId) === wantMine && Math.abs(p.z) < 0.01)
+    .filter((p) => p.claim && (p.claim === mineId) === wantMine && Math.abs(p.z) < 0.01 && p.y > 0)
     .map((p) => ({ c: Math.round((p.x - X0) / 0.6), r: 24 - 1 - Math.round((p.y - 0.3) / 0.6) }))
   const aligned = await a.frame.waitForFunction(() => {
     const me = window.__jig.session.id
-    const mine = window.__jig.props().filter((p) => p.claim === me)
-    const theirs = window.__jig.props().filter((p) => p.claim && p.claim !== me)
+    const mine = window.__jig.props().filter((p) => p.claim === me && p.y > 0)
+    const theirs = window.__jig.props().filter((p) => p.claim && p.claim !== me && p.y > 0)
     if (mine.length !== 4 || theirs.length !== 4) return false
     const row = (p) => 24 - 1 - Math.round((p.y - 0.3) / 0.6)
     return Math.max(...mine.map(row)) <= 3 && Math.min(...theirs.map(row)) >= 6
@@ -149,6 +162,13 @@ const clearedRow = await a.frame.waitForFunction(([yRow, yAbove]) => {
 }, [wy(10), wy(9)], { timeout: 15000 }).then(() => true).catch(() => false)
 if (!clearedRow) fail('full row was not cleared (or the cell above did not drop)')
 else console.log('line clear + stack drop: ok')
+
+// the clear bumps the shared lines counter (the level source for all)
+const lines = await a.frame.waitForFunction(() =>
+  window.__jig.props().some((p) => p.y < -3 && !p.claim && p.color === 1),
+  null, { timeout: 10000 }).then(() => true).catch(() => false)
+if (!lines) fail('lines counter prop did not advance after the clear')
+else console.log('shared lines counter: ok')
 
 // stack lane 0 to the top: repeated hard drops must end in a wipe
 await a.page.bringToFront()
