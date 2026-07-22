@@ -103,8 +103,10 @@ const randFree = (occ) => {
 
 const spawnSeg = (c, r) => {
   // pop:false: head and tail cells appear/vanish instantly - the body
-  // reads as one sliding shape, so per-cell fade/pop twinkle is noise
-  const id = world.createBox({ position: { x: cx(c), y: Y, z: cz(r) }, color: myColor, size: SEG, pop: false })
+  // reads as one sliding shape, so per-cell fade/pop twinkle is noise.
+  // bounce:false: claimed props normally swell 1.25x, which read as the
+  // head growing in as its claim landed; segments stay claim-swell-free
+  const id = world.createBox({ position: { x: cx(c), y: Y, z: cz(r) }, color: myColor, size: SEG, pop: false, bounce: false })
   pendingClaims.push({ id, t: now })
   return id
 }
