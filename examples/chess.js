@@ -166,7 +166,9 @@ const updateHover = (d) => {
 // squares (e4, exd5), pieces get letters (Nf3, Bxe5), ambiguous movers
 // their departure file/rank (Rad1), promotion =Q. There is no castling
 // or en passant to notate and no check detection for +/#; a captured
-// king ends the game, notated with the standard result (Qxe8 1-0).
+// king ends the game, notated with the standard result (Qxe8 1-0). The
+// first move out of the start position additionally announces the new
+// game, so the timeline records who began it.
 const FILE = 'abcdefgh'
 const sqName = (c, r) => FILE[c] + (r + 1)
 const LETTER = { p: '', r: 'R', n: 'N', b: 'B', q: 'Q', k: 'K' }
@@ -207,7 +209,25 @@ const graveSpot = (taker) => {
   return { x: sign * GRAVE_X, y: BOARD_Y, z: (taker === W ? 1 : -1) * (4.2 - count * 0.55) }
 }
 
+/** is the standing position the untouched start position? Then the move
+ * being made is a new game's first. The mover's own square comes from
+ * the drag (its prop hovers mid-air at an arbitrary cell); everyone
+ * else's from the scan. */
+const freshBoard = (d) => {
+  if (pieces.length !== 32) return false
+  for (const p of pieces) {
+    const c = p.id === d.id ? d.c0 : p.c
+    const r = p.id === d.id ? d.r0 : p.r
+    if (!inb(c, r)) return false
+    const home = p.side === W ? (p.type === 'p' ? 1 : 0) : (p.type === 'p' ? 6 : 7)
+    if (r !== home) return false
+    if (p.type !== 'p' && BACK[c] !== p.type) return false
+  }
+  return true
+}
+
 const doMove = (d, c, r) => {
+  const opening = freshBoard(d)
   const victim = board[c][r] && board[c][r].id !== d.id ? board[c][r] : null
   if (victim) world.move(victim.id, graveSpot(d.side)) // targets() guarantees enemy or empty
   const promoted = d.type === 'p' && (r === 0 || r === N - 1)
@@ -220,6 +240,10 @@ const doMove = (d, c, r) => {
   if (turnProp) world.paint(turnProp.id, d.side === W ? B : W)
   let msg = san(d, c, r, victim, promoted)
   if (victim && victim.type === 'k') msg += d.side === W ? ' 1-0' : ' 0-1'
+  // a new game's first move announces the game as it opens - said by its
+  // mover, so the timeline records who began. One combined message: the
+  // host rate-limits say to ~1/s, a separate line would be dropped.
+  if (opening) msg = 'a new game begins: ' + msg
   world.say(msg)
   localLatch = now
 }

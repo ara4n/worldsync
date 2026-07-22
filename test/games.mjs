@@ -141,11 +141,13 @@ async function uploadScript(t, path, name) {
   const turn = ps.find((p) => near(p.y, 1.4) && near(p.x, 6.2))
   if (!turn || turn.color !== 0x241d16) fail('chess: turn sphere did not flip to black')
   // the mover narrates the move into the room as themselves (world.say),
-  // in standard algebraic notation: a pawn double-step is just 'e4'
+  // in standard algebraic notation; the first move out of the start
+  // position also announces the new game, so the timeline records who
+  // began it
   const said = await t.frame.evaluate(() =>
     window.__jig.net.client.getRooms().flatMap((r) => r.timeline ?? [])
-      .some((ev) => ev.getType() === 'm.room.message' && ev.getContent().body === 'e4'))
-  if (!said) fail('chess: move was not announced as SAN in the room')
+      .some((ev) => ev.getType() === 'm.room.message' && ev.getContent().body === 'a new game begins: e4'))
+  if (!said) fail('chess: opening move was not announced with the new-game prefix')
 
   // capture: claim black too (solo testing), reply d5, take exd5 - the
   // captured black pawn must ease off to white's graveyard on the -x
