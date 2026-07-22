@@ -199,6 +199,12 @@ else {
   }, null, { timeout: 10000 }).then(() => true).catch(() => false)
   if (!reset) fail('scores/lines did not reset to zero after the wipe')
   else console.log('wipe resets scores and level: ok')
+  // our HUD row keeps last game's score bracketed after the current one
+  const prevShown = await a.frame.waitForFunction(() =>
+    /\(prev \d+\)/.test(document.getElementById('hud')?.innerHTML ?? ''),
+    null, { timeout: 5000 }).then(() => true).catch(() => false)
+  if (!prevShown) fail('HUD did not show the previous score after the wipe')
+  else console.log('HUD previous score: ok')
 }
 
 if (process.exitCode !== 1) console.log('TETRIX TEST PASSED')

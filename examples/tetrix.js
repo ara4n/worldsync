@@ -85,6 +85,8 @@ let me, W = 10
 let cells = [] // this frame's cell props: {id, c, r, claimedBy, color}
 let scoreProps = [], linesProp = null
 let scoreId = null, scoreWait = -10, linesWait = -10, myScore = 0, hadLines = false
+let prevScore = null // last game's score, captured at the wipe; local
+                     // only, so just our own HUD row shows it
 let softDrops = 0, hardCells = 0 // this piece's drop points
 let hudLast = ''
 let piece = null // { type, x, y, rot, ids: [4] }
@@ -341,6 +343,7 @@ world.onupdate = (dt, time) => {
   // the zero the wiper painted. Pushing linesWait holds the primary's
   // recreate for 2s, so even a throttled tab sees the gap
   if (hadLines && !linesProp) {
+    prevScore = myScore
     myScore = 0; softDrops = 0; hardCells = 0
     if (scoreId) world.paint(scoreId, 0)
     linesWait = now
@@ -404,7 +407,8 @@ world.onupdate = (dt, time) => {
   let html = `<b>tetrix</b> · level ${level()} · ${linesProp ? linesProp.color : 0} lines<table>`
   for (const r of board) {
     const cell = (s) => (r.mine ? `<span style="color:#7fe0a0">${s}</span>` : s)
-    html += `<tr><td>${cell(esc(r.who))}</td><td>${cell(r.score)}</td></tr>`
+    const score = r.mine && prevScore !== null ? `${r.score} (prev ${prevScore})` : r.score
+    html += `<tr><td>${cell(esc(r.who))}</td><td>${cell(score)}</td></tr>`
   }
   html += '</table>'
   if (html !== hudLast) { hudLast = html; world.hud(html) }
