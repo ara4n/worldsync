@@ -197,6 +197,22 @@ declare const world: {
   move(id: string, x: number | Vec3Like, y?: number, z?: number): boolean
   paint(id: string, color: number): boolean
 
+  // -- the shared kv table: folded game state that no prop naturally
+  // carries (castling rights, round counters, whose turn a round is).
+  // Synced, hashed and booted like props, so every peer and late joiner
+  // reads the same table. --
+  /** read a kv entry (undefined when absent). Local and instant. */
+  getData(key: string): any
+  /** write a kv entry: any JSON-serializable value, up to 4KB encoded.
+   * Last write wins in timeline order. The write is visible to getData
+   * only once its op folds (typically by the next update); undefined
+   * deletes. Returns false when dropped (oversize). */
+  setData(key: string, value: any): boolean
+  /** delete a kv entry */
+  deleteData(key: string): boolean
+  /** every present key, sorted */
+  dataKeys(): string[]
+
   // -- cosmetics: local-only unless noted, never folded, never hashed --
   createLine(props?: { points?: Vec3Like[]; color?: number; opacity?: number; width?: number
     worldUnits?: boolean; shared?: boolean }): WorldLine

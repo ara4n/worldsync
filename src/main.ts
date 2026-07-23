@@ -604,6 +604,16 @@ async function main() {
       session.emit('paint', id, { pos: { x: 0, y: 0, z: 0 }, color })
       return true
     },
+    getData: key => sim.data.get(key) ?? null,
+    dataKeys: () => [...sim.data.keys()].sort(),
+    setData: (key, json) => {
+      if (json.length > 4096) { log(`setData('${key}') dropped: value over 4KB`); return false }
+      // a same-value write is dropped here rather than folded: it could
+      // only churn the timeline (last-write-wins makes it a no-op)
+      if ((sim.data.get(key) ?? '') === json) return true
+      session.emit('data', key, { pos: { x: 0, y: 0, z: 0 }, data: json })
+      return true
+    },
     line: (id, pointsJson, color, opacity, width, worldUnits, shared) => {
       const points = pointsJson ? JSON.parse(pointsJson) as { x: number; y: number; z: number }[] : []
       scriptLines.set(id, shared)

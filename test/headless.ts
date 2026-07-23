@@ -297,6 +297,13 @@ const hostFor = (p: HubPeer): ScriptHost => ({
     p.session.emit('paint', id, { pos: { x: 0, y: 0, z: 0 }, color })
     return true
   },
+  getData: key => p.sim.data.get(key) ?? null,
+  dataKeys: () => [...p.sim.data.keys()].sort(),
+  setData: (key, json) => {
+    if ((p.sim.data.get(key) ?? '') === json) return true
+    p.session.emit('data', key, { pos: { x: 0, y: 0, z: 0 }, data: json })
+    return true
+  },
   line: () => {},
   removeLine: () => {},
   setEnv: () => {},
@@ -440,12 +447,30 @@ async function propsAndClaimsConverge() {
     check(p.sim.props.get(ids[2])!.claim === loser.id, `${p.id}: loser's fresh claim landed`)
   }
 
-  // a late joiner boots the whole prop table, claims included
+  // the kv table: racing writers to one key resolve to one agreed value
+  // (last write in timeline order); a second key holds independent data
+  a.session.emit('data', 'game/turn', { pos: { x: 0, y: 0, z: 0 }, data: '"white"' })
+  b.session.emit('data', 'game/turn', { pos: { x: 0, y: 0, z: 0 }, data: '"black"' })
+  a.session.emit('data', 'game/round', { pos: { x: 0, y: 0, z: 0 }, data: '3' })
+  hub.run(2 * S)
+  const turnA = a.sim.data.get('game/turn')
+  check(turnA !== undefined && turnA === b.sim.data.get('game/turn'),
+    `data write race has one agreed value (${turnA})`)
+  check(a.sim.data.get('game/round') === '3' && b.sim.data.get('game/round') === '3', 'second key independent')
+
+  // a late joiner boots the whole prop table, claims included, and the kv table
   const c = await hub.join('c')
   hub.run(3 * S)
   check(c.sim.props.size === 3, `joiner booted the props (${c.sim.props.size}/3)`)
   check(c.sim.props.get(ids[2])?.claim === loser.id, 'joiner sees the claim across the seam')
   check(c.sim.props.get(ids[2])?.color === 0xabcdef, 'joiner sees the paint across the seam')
+  check(c.sim.data.get('game/turn') === turnA && c.sim.data.get('game/round') === '3',
+    'joiner booted the kv table across the seam')
+
+  // deletion folds like any write and reaches everyone
+  b.session.emit('data', 'game/round', { pos: { x: 0, y: 0, z: 0 } })
+  hub.run(2 * S)
+  for (const p of [a, b, c]) check(!p.sim.data.has('game/round'), `${p.id}: kv delete applied`)
 
   hub.run(8 * S)
   const settled = a.sim.tick - 400

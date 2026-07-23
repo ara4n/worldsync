@@ -103,6 +103,13 @@ export interface ScriptHost {
   unclaim(id: string): boolean
   setPos(id: string, x: number, y: number, z: number): boolean
   paint(id: string, color: number): boolean
+  // -- the shared kv table: folded game state that no prop naturally
+  // carries (castling rights, round counters). Values are JSON text;
+  // last write wins in timeline order; '' deletes. Replicated, hashed
+  // and booted like props, so late joiners read the same table. --
+  getData(key: string): string | null
+  dataKeys(): string[]
+  setData(key: string, json: string): boolean
   // -- cosmetics: generic line entities, animated by the script itself --
   /** create/update a cosmetic line entity's full state (fewer than 2
    * points hides it). Shared lines are additionally broadcast latest-wins
@@ -351,6 +358,20 @@ const PRELUDE = `
       return H.setPos(id, v.x, v.y, v.z)
     },
     paint(id, color) { return H.paint(id, color) },
+    // the shared kv table: synced game state that no prop naturally
+    // carries (chess castling rights, round counters). Values survive a
+    // JSON round-trip; last write wins in timeline order; deleting and
+    // late-join boot both replicate. Reads are local and instant, but a
+    // write is visible only once its op folds (typically next update).
+    getData(key) {
+      const v = H.getData(String(key))
+      return v === '' ? undefined : JSON.parse(v)
+    },
+    setData(key, value) {
+      return H.setData(String(key), value === undefined ? '' : JSON.stringify(value))
+    },
+    deleteData(key) { return H.setData(String(key), '') },
+    dataKeys() { return JSON.parse(H.dataKeys()) },
     createLine(props) { return new Line(props) },
     createScreen(props) { return new Screen(props) },
     createLabel(props) { return new Label(props) },
@@ -517,6 +538,12 @@ export class WorldScript {
     fn('setPos', (id, x, y, z) =>
       bool(host.setPos(ctx.getString(id), ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z))))
     fn('paint', (id, c) => bool(host.paint(ctx.getString(id), ctx.getNumber(c))))
+    fn('getData', (k) => {
+      const v = host.getData(ctx.getString(k))
+      return ctx.newString(v ?? '')
+    })
+    fn('dataKeys', () => ctx.newString(JSON.stringify(host.dataKeys())))
+    fn('setData', (k, j) => bool(host.setData(ctx.getString(k), ctx.getString(j))))
     fn('line', (id, pts, c, op, w, wu, shared) => {
       host.line(ctx.getString(id), ctx.getString(pts), ctx.getNumber(c), ctx.getNumber(op),
         ctx.getNumber(w), ctx.dump(wu) === true, ctx.dump(shared) === true)

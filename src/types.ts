@@ -28,9 +28,14 @@ export interface Quat { x: number; y: number; z: number; w: number }
 // sustained interaction (chaining dots) excludes rivals for its duration.
 // 'despawn' removes a prop or a box; 'move' teleports a prop (renderers
 // animate the hop cosmetically); 'paint' recolors one.
+// 'data' writes one entry of the shared key-value table (netId = key,
+// data = value; missing/empty data deletes). Plain folded state like a
+// prop: last write wins in timeline order, hashed for convergence,
+// booted across seams - the home for game state that no prop naturally
+// carries (chess castling rights, a match score, whose turn a round is).
 export type InteractionType =
   'spawn' | 'grab' | 'release' | 'boot' | 'scene'
-  | 'prop' | 'despawn' | 'claim' | 'unclaim' | 'move' | 'paint'
+  | 'prop' | 'despawn' | 'claim' | 'unclaim' | 'move' | 'paint' | 'data'
 
 /** prop state carried by boot seams (and 'prop' spawns, minus claim) */
 export interface PropInfo {
@@ -72,6 +77,8 @@ export interface Interaction {
   solid?: boolean // prop only: create a fixed collider in the physics world
   force?: boolean // unclaim only: clear someone else's claim (ghost cleanup)
   prop?: PropInfo // boot only: this entity is a prop, not a rigid body
+  data?: string   // data op: the value (JSON text; absent/empty deletes);
+                  // boot: this entity is a kv entry (netId = key)
 }
 
 export interface BootEntity {
@@ -83,6 +90,7 @@ export interface BootEntity {
   angvel: Vec3
   grab?: { holder: string; order: number; target: Vec3 }
   prop?: PropInfo
+  data?: string // this entity is a kv entry (netId = key)
 }
 
 export type DcMessage =

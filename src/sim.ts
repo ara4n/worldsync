@@ -65,6 +65,7 @@ interface HistoryRec {
   bodies: Map<string, number>
   grabs: Map<string, Grab>
   props: Map<string, Prop>
+  data: Map<string, string>
   scene: SceneRef | null
 }
 interface Entry { tick: number; order: number; seq: number; i: Interaction }
@@ -76,6 +77,7 @@ interface Ctx {
   bodies: Map<string, number>
   grabs: Map<string, Grab>
   props: Map<string, Prop>
+  data: Map<string, string>
   scene: SceneRef | null
 }
 
@@ -123,6 +125,12 @@ function hashCtx(ctx: Ctx): number {
       for (let i = 0; i < 32; i++) h = Math.imul(h ^ hashBytes[i], 0x01000193)
     }
     str(p.claim ?? '')
+  }
+  // The kv table is folded state like everything above: a peer whose
+  // table differs is a diverged peer.
+  for (const key of [...ctx.data.keys()].sort()) {
+    str(key)
+    str(ctx.data.get(key)!)
   }
   return h >>> 0
 }
@@ -221,6 +229,9 @@ export class Sim {
   grabs = new Map<string, Grab>()
   /** kinematic physics-free entities (see Prop); folded state like bodies */
   props = new Map<string, Prop>()
+  /** the shared kv table: script-owned game state, folded like props
+   * (values are JSON text; the sim never looks inside them) */
+  data = new Map<string, string>()
   /** the active glTF scene (never in `bodies`: not hashed, not dumped) */
   scene: SceneRef | null = null
   private sceneGeoms = new Map<string, SceneGeometry>()
@@ -451,6 +462,7 @@ export class Sim {
       bodies: new Map(this.bodies),
       grabs: cloneGrabs(this.grabs),
       props: cloneProps(this.props),
+      data: new Map(this.data),
       scene: this.scene && { ...this.scene },
     })
   }
@@ -530,6 +542,7 @@ export class Sim {
     this.bodies = new Map(rec.bodies)
     this.grabs = cloneGrabs(rec.grabs)
     this.props = cloneProps(rec.props)
+    this.data = new Map(rec.data)
     // handles are stable across snapshot restore, so the stored ref is valid
     this.scene = rec.scene && { ...rec.scene }
     this.tick = k
@@ -556,7 +569,7 @@ export class Sim {
   }
 
   private liveCtx(): Ctx {
-    return { world: this.world, bodies: this.bodies, grabs: this.grabs, props: this.props, scene: this.scene }
+    return { world: this.world, bodies: this.bodies, grabs: this.grabs, props: this.props, data: this.data, scene: this.scene }
   }
 
   private applyTick(ctx: Ctx, tick: number) {
@@ -629,6 +642,7 @@ export class Sim {
     ctx.bodies.clear()
     ctx.grabs.clear()
     ctx.props.clear() // boot entries recreate them (claims included)
+    ctx.data.clear()  // and the kv table
     ctx.scene = null
     if (scene) this.addScene(ctx, scene.url, scene.tick)
   }
@@ -663,6 +677,7 @@ export class Sim {
         bodies: new Map(this.bodies),
         grabs: cloneGrabs(this.grabs),
         props: cloneProps(this.props),
+        data: new Map(this.data),
         scene: this.scene && { ...this.scene },
       })
       for (const key of this.history.keys()) {
@@ -740,6 +755,7 @@ export class Sim {
       bodies: new Map(rec.bodies),
       grabs: cloneGrabs(rec.grabs),
       props: cloneProps(rec.props),
+      data: new Map(rec.data),
       scene: rec.scene && { ...rec.scene },
     }
     ctx.world.timestep = 1 / TICK_HZ
@@ -791,6 +807,7 @@ export class Sim {
       out[netId] = `prop ${p.kind} p=${p.pos.x.toFixed(6)},${p.pos.y.toFixed(6)},${p.pos.z.toFixed(6)}`
         + ` color=${p.color.toString(16)} size=${p.size}` + (p.claim ? ` claim=${p.claim}` : '')
     }
+    for (const [key, value] of rec.data) out[`data:${key}`] = value
     return out
   }
 
@@ -879,6 +896,7 @@ export class Sim {
         ctx.bodies.clear()
         ctx.grabs.clear()
         ctx.props.clear()
+        ctx.data.clear()
         ctx.scene = null
         this.addScene(ctx, i.netId, tick)
         return
@@ -948,11 +966,23 @@ export class Sim {
         p.color = i.color
         return
       }
+      case 'data': {
+        // Last write wins by timeline order: pure state x op, so racing
+        // writers resolve identically on every peer with no consensus.
+        if (i.data === undefined || i.data === '') ctx.data.delete(i.netId)
+        else ctx.data.set(i.netId, i.data)
+        return
+      }
       case 'boot': {
         // An empty netId is the seam marker for an empty dump: it exists so
         // the seam (rebuild + raced-op replay) happens even in a room with
         // no entities yet.
         if (!i.netId) return
+        // kv entries cross the seam like props: netId is the key
+        if (i.data !== undefined) {
+          ctx.data.set(i.netId, i.data)
+          return
+        }
         // Prop entities cross the seam whole (claim included): recreate in
         // dump order, exactly like bodies.
         if (i.prop) {
@@ -1069,6 +1099,13 @@ export class Sim {
             bounce: p.bounce, pop: p.pop, opacity: p.opacity,
             yaw: p.yaw, dims: p.dims && { ...p.dims }, solid: p.solid,
           },
+        })
+      }
+      for (const [key, value] of rec.data) {
+        out.push({
+          netId: key, color: 0, pos: { ...ZERO },
+          rot: { x: 0, y: 0, z: 0, w: 1 }, linvel: { ...ZERO }, angvel: { ...ZERO },
+          data: value,
         })
       }
     }

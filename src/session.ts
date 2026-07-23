@@ -242,6 +242,7 @@ export class Session {
     shape?: string; size?: number; unlit?: boolean; bounce?: boolean; pop?: boolean; opacity?: number
     force?: boolean; prop?: PropInfo
     yaw?: number; dims?: Vec3; solid?: boolean
+    data?: string
   }, tickOverride?: number, from?: number) {
     const i: Interaction = {
       // Stamped with the tick about to be simulated, so our own sim applies
@@ -257,6 +258,7 @@ export class Session {
       force: data.force, prop: data.prop,
       yaw: data.yaw !== undefined ? this.z(data.yaw) : undefined,
       dims: data.dims && this.zv(data.dims), solid: data.solid,
+      data: data.data,
     }
     this.sim.insert(i)
     this.sendRaw(null, { kind: 'i', i })
@@ -404,7 +406,8 @@ export class Session {
         }
         for (const e of entities) {
           this.emit('boot', e.netId,
-            { pos: e.pos, rot: e.rot, vel: e.linvel, angvel: e.angvel, grab: e.grab, color: e.color, prop: e.prop },
+            { pos: e.pos, rot: e.rot, vel: e.linvel, angvel: e.angvel, grab: e.grab, color: e.color, prop: e.prop,
+              data: e.data },
             seamTick, from)
         }
         break
