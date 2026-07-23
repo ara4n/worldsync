@@ -3,10 +3,10 @@
 // client renders 'pawn'..'king' as built-in low-poly models), color =
 // side, cell = its position rounded to the grid; the board is box props,
 // seats are claimed props, and a turn prop is painted with the side to
-// move (and nudged to carry the castling/en-passant meta) - so every
-// peer (and every late joiner) derives the same position from the same
-// table, and moves are constrained to legal ones by the script before
-// any op is emitted.
+// move; castling rights and the en passant file ride in the shared kv
+// table (world.setData) - so every peer (and every late joiner) derives
+// the same position from the same tables, and moves are constrained to
+// legal ones by the script before any op is emitted.
 //
 // Moving is a DRAG: press your piece and it lifts off the board and
 // follows the pointer (streamed as throttled move ops, so everyone
@@ -48,19 +48,16 @@ const RAYS = {
 RAYS.q = RAYS.r.concat(RAYS.b)
 
 // Castling rights and the en passant file are game state the piece props
-// cannot carry, so they ride in the TURN SPHERE'S POSITION as tiny
-// offsets from its home - invisible at its size, exact on the wire
-// (positions are JSON doubles), and scanned by late joiners like
-// everything else. x offsets encode LOST castle rights as a bitmask
-// (the freshly seeded sphere sits at exactly TURN_X: nothing lost yet),
-// z encodes en-passant-file-plus-one (home z: no ep window).
-const TURN_X = 6.2, TURN_Y = 1.4, META = 0.01
+// cannot carry, so they live in the shared kv table under 'chess/meta':
+// { lost, ep } - lost is a bitmask of spent castle rights, ep the
+// double-push file (-1 = no window). Folded state like the props, so
+// every peer and late joiner reads the same meta; absent (fresh board,
+// pre-upgrade world) means nothing lost, no window.
+const TURN_X = 6.2, TURN_Y = 1.4
 const CASTLE_BIT = { '7,0': 1, '0,0': 2, '7,7': 4, '0,7': 8 } // rook home square -> the right it anchors
 const meta = () => {
-  if (!turnProp) return { lost: 15, ep: -1 }
-  const lost = Math.round((turnProp.x - TURN_X) / META) & 15
-  const ep = Math.round(turnProp.z / META) - 1
-  return { lost, ep: ep >= 0 && ep < N ? ep : -1 }
+  const m = world.getData('chess/meta')
+  return { lost: m?.lost ?? 0, ep: m?.ep ?? -1 }
 }
 
 let pieces, board, tiles, seats, turnProp, gameOver, captured, now = 0
@@ -374,10 +371,8 @@ const doMove = (d, c, r) => {
   if (d.type === 'r') lost |= CASTLE_BIT[d.c0 + ',' + d.r0] ?? 0
   if (victim && victim.type === 'r') lost |= CASTLE_BIT[victim.c + ',' + victim.r] ?? 0
   const ep = d.type === 'p' && Math.abs(r - d.r0) === 2 ? c : -1
-  if (turnProp) {
-    world.paint(turnProp.id, d.side === W ? B : W)
-    world.move(turnProp.id, { x: TURN_X + lost * META, y: TURN_Y, z: (ep + 1) * META })
-  }
+  if (turnProp) world.paint(turnProp.id, d.side === W ? B : W)
+  world.setData('chess/meta', { lost, ep })
   // judge the position our ops will produce, so the mover already
   // narrates the opponent's plight (+, #, or the stalemate draw)
   const bd2 = after(board, { type: d.type, side: d.side, c: d.c0, r: d.r0 }, c, r)
@@ -415,8 +410,7 @@ world.onpointerdown = (ev) => {
     if (gameOver && seated) {
       for (const p of pieces) world.despawn(p.id)
       for (const b of world.boxes()) world.despawn(b.name) // strays too
-      // meta home: full castle rights, no en passant window
-      world.move(turnProp.id, { x: TURN_X, y: TURN_Y, z: 0 })
+      world.deleteData('chess/meta') // full castle rights, no ep window
       posSig = ''
       mateOver = null
     }
@@ -524,7 +518,8 @@ world.onupdate = (dt, time) => {
   const settled = turnProp && !drag && pieces.every((p) => p.y < LIFT / 2)
   if (settled && !pieces.length) { posSig = ''; mateOver = null; checkedKing = null } // reset wiped the board
   if (settled && pieces.length) {
-    const sig = turnProp.color + '|' + Math.round(turnProp.x * 1000) + ',' + Math.round(turnProp.z * 1000) + '|'
+    const m = meta()
+    const sig = turnProp.color + '|' + m.lost + ',' + m.ep + '|'
       + pieces.filter((p) => inb(p.c, p.r)).map((p) => p.type + (p.side === W ? 'w' : 'b') + p.c + p.r).sort().join(' ')
     if (sig !== posSig) {
       posSig = sig
