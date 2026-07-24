@@ -153,6 +153,24 @@ each peer's deterministic accent color for drawing in) - plus
 animated client-side (bounce drops, fade-in spawns, pop-out despawns):
 the sim stores logical poses, renderers add the juice.
 
+**MIDI is a cosmetic input plane.** Defining `world.onmidi` *is* the
+subscription: only then does the host request WebMIDI access (so worlds
+that never use it never prompt), and every parsed channel message
+(noteon/noteoff/control/pitchbend) from any peer's connected device is
+delivered to every peer's script instance, tagged with its player - the
+local ones directly, the rest over a `midi` broadcast that rides beside
+the protocol like shared lines: never folded, never hashed. Physics
+never reads a note, so determinism is untouched; a world that folded
+each keypress as an op would instead buy a rollback per note on every
+peer at piano rates. `world.createGrandPiano({position, yaw, size,
+color})` places a modelled concert grand - curved rim, open lid,
+strings, 88 individually pivoting keys - as a local cosmetic like
+screens and labels, and the script plays it with
+`piano.noteOn(note, velocity)` / `noteOff(note)`. `examples/piano.js`
+is the pianola: plug a MIDI keyboard into any peer's machine and
+everyone watches the same keys dip (no audio yet); its one folded op is
+the case collider the primary seeds so thrown boxes bounce off.
+
 **`examples/dots.js` is dots-3d ported whole into the sandbox** - the
 proving example for all of the above. The 3x3x3 board is props; players
 race to claim dots as they drag chains (you cannot claim a dot someone
@@ -194,7 +212,9 @@ primary's tab and asserts the survivor's instance takes over; `node
 test/dots.mjs` plays dots for real - uploads `examples/dots.js`, waits
 for the board, drags a chain with the mouse, asserts the second tab sees
 the claims and the chain line mid-drag, then the clear + refills, all
-hash-clean.
+hash-clean; `node test/piano.mjs` uploads `examples/piano.js` and
+injects MIDI via the hardware-free `__jig.midi` hook, asserting both
+tabs dip (and release) the same keys.
 
 To embed for real, serve the app (dev server works: `npm run dev --
 --host`) and add it to a room in Element Web with
