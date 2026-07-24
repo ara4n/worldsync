@@ -182,14 +182,12 @@ export class GrandPianoView {
     add(box(0.045, 0.05, 0.29, 0.6355, 0.735, 0.195), this.caseMat)
     add(box(1.31, 0.045, 0.018, 0, 0.7165, 0.353), this.caseMat)
     add(box(1.31, 0.07, 0.02, 0, 0.79, 0.135), this.caseMat)
+    // the fallboard's top: pushed back over the key backs, flush with the
+    // nameboard, closing the slot between it and the case front (without
+    // it you look straight down onto the backs of the keys)
+    add(box(1.31, 0.016, 0.145, 0, 0.817, 0.0725), this.caseMat)
     add(box(0.3, 0.014, 0.004, 0, 0.795, 0.147), goldMat, false)
     add(box(1.28, 0.007, 0.014, 0, 0.7465, 0.132), feltMat, false)
-
-    // music desk on its ledge, leaned back over the pin block
-    const desk = add(box(1.02, 0.26, 0.016, 0, 0, 0), this.caseMat)
-    desk.position.set(0, 0.919, -0.183)
-    desk.rotation.x = -0.42
-    add(box(1.02, 0.016, 0.06, 0, 0.808, -0.115), this.caseMat)
 
     // lid, hinged along the spine and propped on its stick
     const lid = extrudePlan(planShape(-0.015), 0.03, 0.006)
