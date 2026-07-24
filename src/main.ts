@@ -1,4 +1,4 @@
-import { Raycaster, Vector2, Vector3 } from 'three'
+import { Raycaster, Vector2, Vector3, type Object3D } from 'three'
 import sanitizeHtml from 'sanitize-html'
 import { BOOT_LEAD_TICKS, Sim } from './sim'
 import { peerColor } from './color'
@@ -388,6 +388,29 @@ async function main() {
   // The script's line entities: rendered locally under our author key, and
   // (when shared) broadcast as full latest-wins state per (author, id).
   const scriptLines = new Map<string, boolean>() // id -> shared
+  // glTF scene nodes a script has repositioned (world.findNodeByName +
+  // TRS writes): local cosmetics like lines - every peer's script animates
+  // its own rendered copy, and the baked trimesh collider never moves.
+  // Originals are saved on first touch and restored when the script stops,
+  // so the URL-cached scene survives a script swap unmutated.
+  const sceneNodeFor = (name: string) => {
+    const url = sim.sceneUrl
+    return { url, obj: url ? cachedScene(url)?.object.getObjectByName(name) ?? null : null }
+  }
+  const sceneTouched = new Map<string, { url: string; name: string; t: number[]; r: number[]; s: number[] }>()
+  const restoreSceneNodes = () => {
+    for (const { url, name, t, r, s } of sceneTouched.values()) {
+      const obj = cachedScene(url)?.object.getObjectByName(name)
+      if (!obj) continue
+      obj.position.fromArray(t as [number, number, number])
+      obj.quaternion.fromArray(r as [number, number, number, number])
+      obj.scale.fromArray(s as [number, number, number])
+    }
+    sceneTouched.clear()
+  }
+  // scene nodes the script marked interactable: pointer picking reports
+  // them (by name) once props miss
+  const scriptInteractables = new Set<string>()
   const scriptScreens = new Set<string>()
   const scriptLabels = new Set<string>()
   const scriptPianos = new Set<string>()
@@ -582,12 +605,44 @@ async function main() {
       return { x: p.x, y: p.y, z: p.z, grabbed: !!g, mine: g?.holder === session.id }
     },
     sceneNode: name => {
-      const url = sim.sceneUrl
-      const obj = url ? cachedScene(url)?.object.getObjectByName(name) : null
+      const { obj } = sceneNodeFor(name)
       if (!obj) return null
       const v = new Vector3()
       obj.getWorldPosition(v)
       return { x: v.x, y: v.y, z: v.z }
+    },
+    sceneNodeTransform: name => {
+      const { obj } = sceneNodeFor(name)
+      if (!obj) return null
+      return {
+        t: { x: obj.position.x, y: obj.position.y, z: obj.position.z },
+        r: { x: obj.quaternion.x, y: obj.quaternion.y, z: obj.quaternion.z, w: obj.quaternion.w },
+        s: { x: obj.scale.x, y: obj.scale.y, z: obj.scale.z },
+      }
+    },
+    setSceneNodeTransform: (name, json) => {
+      const { url, obj } = sceneNodeFor(name)
+      if (!url || !obj) return false
+      const key = `${url} ${name}`
+      if (!sceneTouched.has(key)) {
+        sceneTouched.set(key, {
+          url, name,
+          t: obj.position.toArray(), r: obj.quaternion.toArray() as number[], s: obj.scale.toArray(),
+        })
+      }
+      const { t, r, s } = JSON.parse(json) as {
+        t?: { x: number; y: number; z: number }
+        r?: { x: number; y: number; z: number; w: number }
+        s?: { x: number; y: number; z: number }
+      }
+      if (t) obj.position.set(t.x, t.y, t.z)
+      if (r) obj.quaternion.set(r.x, r.y, r.z, r.w)
+      if (s) obj.scale.set(s.x, s.y, s.z)
+      return true
+    },
+    setInteractable: (name, on) => {
+      if (on) scriptInteractables.add(name)
+      else scriptInteractables.delete(name)
     },
     spawn: (x, y, z, color) => {
       const id = session.nextNetId()
@@ -742,10 +797,26 @@ async function main() {
     scriptNdc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1)
     scriptRay.setFromCamera(scriptNdc, view.camera)
     const hit = view.props.pick(scriptRay)
+    let entity = hit?.id ?? null
+    let point = hit ? { x: hit.point.x, y: hit.point.y, z: hit.point.z } : null
+    // props missed: try the scene nodes the script marked interactable
+    // (nearest intersection whose ancestry carries a registered name)
+    if (!entity && scriptInteractables.size) {
+      const root = sim.sceneUrl ? cachedScene(sim.sceneUrl)?.object : null
+      if (root) {
+        for (const h of scriptRay.intersectObject(root, true)) {
+          let o: Object3D | null = h.object
+          while (o && !scriptInteractables.has(o.name)) o = o.parent
+          if (!o) continue
+          entity = o.name
+          point = { x: h.point.x, y: h.point.y, z: h.point.z }
+          break
+        }
+      }
+    }
     const o = scriptRay.ray.origin, d = scriptRay.ray.direction
     return {
-      entity: hit?.id ?? null,
-      point: hit ? { x: hit.point.x, y: hit.point.y, z: hit.point.z } : null,
+      entity, point,
       origin: { x: o.x, y: o.y, z: o.z },
       dir: { x: d.x, y: d.y, z: d.z },
     }
@@ -773,6 +844,8 @@ async function main() {
     for (const id of [...scriptScreens]) scriptHost.removeScreen(id) // and its screens
     for (const id of [...scriptLabels]) scriptHost.removeLabel(id) // and its labels
     for (const id of [...scriptPianos]) scriptHost.removePiano(id) // and its pianos
+    restoreSceneNodes() // scene nodes it moved go back where the glb put them
+    scriptInteractables.clear()
     if (videoWanted) {
       videoWanted = false
       stopCam() // no world is asking for video anymore: stop publishing

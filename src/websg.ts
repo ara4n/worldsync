@@ -57,8 +57,22 @@ export interface ScriptHost {
   /** dynamic boxes: id, translation, grab state ('mine' = held by us) */
   boxes(): { id: string; x: number; y: number; z: number; grabbed: boolean; mine: boolean }[]
   box(id: string): { x: number; y: number; z: number; grabbed: boolean; mine: boolean } | null
-  /** world position of a named glTF scene node (read-only, static) */
+  /** world position of a named glTF scene node */
   sceneNode(name: string): { x: number; y: number; z: number } | null
+  /** local TRS of a named glTF scene node */
+  sceneNodeTransform(name: string): {
+    t: { x: number; y: number; z: number }
+    r: { x: number; y: number; z: number; w: number }
+    s: { x: number; y: number; z: number }
+  } | null
+  /** overwrite any of a scene node's local translation/rotation/scale
+   * (JSON {t?, r?, s?}). Local-only cosmetic, like lines: every peer's
+   * script animates its own rendered copy, the baked trimesh collider
+   * never moves, and originals are restored when the script stops. */
+  setSceneNodeTransform(name: string, json: string): boolean
+  /** mark a scene node pickable: pointer events then report its name as
+   * ev.entity (and a hit captures the gesture away from box spawning) */
+  setInteractable(name: string, on: boolean): void
   spawn(x: number, y: number, z: number, color: number | undefined): string
   grab(id: string): boolean
   moveTo(id: string, x: number, y: number, z: number): boolean
@@ -178,12 +192,58 @@ const PRELUDE = `
     : Array.isArray(v) ? new Vector3(v)
     : v && typeof v === 'object' ? new Vector3(v.x ?? 0, v.y ?? 0, v.z ?? 0)
     : new Vector3()
+  class Quaternion {
+    constructor(x = 0, y = 0, z = 0, w = 1) {
+      if (Array.isArray(x)) { this.x = x[0] ?? 0; this.y = x[1] ?? 0; this.z = x[2] ?? 0; this.w = x[3] ?? 1 }
+      else { this.x = x; this.y = y; this.z = z; this.w = w }
+    }
+    set(x, y, z, w) { this.x = x; this.y = y; this.z = z; this.w = w; return this }
+  }
+  const quat = (q) => Array.isArray(q)
+    ? new Quaternion(q[0] ?? 0, q[1] ?? 0, q[2] ?? 0, q[3] ?? 1)
+    : q && typeof q === 'object' ? new Quaternion(q.x ?? 0, q.y ?? 0, q.z ?? 0, q.w ?? 1)
+    : new Quaternion()
   const nodes = new Map()
   class Node {
     constructor(id, scene) { this.name = id; this._scene = !!scene }
+    // Scene nodes are local cosmetics with a writable local TRS
+    // (thirdroom-style: assign a whole vector, or set one component and
+    // the change writes through); boxes are sim state, whose translation
+    // is the read-only world position (move them via grab/moveTo).
     get translation() {
+      if (this._scene) return this._live('t', ['x', 'y', 'z'])
+      const s = parse(H.box(this.name))
+      return s ? new Vector3(s.x, s.y, s.z) : new Vector3()
+    }
+    set translation(v) { this._push('t', vec(v)) }
+    get rotation() { return this._scene ? this._live('r', ['x', 'y', 'z', 'w']) : new Quaternion() }
+    set rotation(q) { this._push('r', quat(q)) }
+    get scale() { return this._scene ? this._live('s', ['x', 'y', 'z']) : new Vector3(1, 1, 1) }
+    set scale(v) { this._push('s', vec(v)) }
+    /** world position (boxes: same as translation) */
+    get worldTranslation() {
       const s = this._scene ? parse(H.sceneNode(this.name)) : parse(H.box(this.name))
       return s ? new Vector3(s.x, s.y, s.z) : new Vector3()
+    }
+    // a snapshot of the node's current local value whose component sets
+    // push the whole tuple back to the host
+    _live(key, fields) {
+      const cur = parse(H.sceneNodeTransform(this.name))
+      const store = {}
+      for (const f of fields) store[f] = cur ? cur[key][f] : (key === 's' || f === 'w' ? 1 : 0)
+      const out = key === 'r' ? new Quaternion() : new Vector3()
+      for (const f of fields) Object.defineProperty(out, f, {
+        get: () => store[f],
+        set: (v) => { store[f] = v; this._push(key, store) },
+        enumerable: true,
+      })
+      return out
+    }
+    _push(key, val) {
+      if (!this._scene) return
+      const o = { x: val.x, y: val.y, z: val.z }
+      if (key === 'r') o.w = val.w
+      H.setSceneNodeTransform(this.name, JSON.stringify({ [key]: o }))
     }
     get grabbed() { const s = parse(H.box(this.name)); return !!(s && s.grabbed) }
     get held() { const s = parse(H.box(this.name)); return !!(s && s.mine) }
@@ -195,8 +255,8 @@ const PRELUDE = `
     release(vel) { const v = vec(vel); return H.release(this.name, v.x, v.y, v.z) }
     addPhysicsBody() { return this }
     removePhysicsBody() { return this }
-    addInteractable() { return this }
-    removeInteractable() { return this }
+    addInteractable() { if (this._scene) H.setInteractable(this.name, true); return this }
+    removeInteractable() { if (this._scene) H.setInteractable(this.name, false); return this }
   }
   const nodeFor = (id, scene) => {
     let n = nodes.get(id)
@@ -345,6 +405,7 @@ const PRELUDE = `
   }
   globalThis.WebSG = {
     Vector3,
+    Quaternion,
     PhysicsBodyType: { Rigid: 'rigid', Static: 'static', Kinematic: 'kinematic' },
     InteractableType: { Interactable: 1, Grabbable: 2 },
     // ray/plane intersection (plane through 'point' with normal 'normal');
@@ -568,6 +629,13 @@ export class WorldScript {
     fn('boxes', () => json(host.boxes()))
     fn('box', (id) => json(host.box(ctx.getString(id))))
     fn('sceneNode', (n) => json(host.sceneNode(ctx.getString(n))))
+    fn('sceneNodeTransform', (n) => json(host.sceneNodeTransform(ctx.getString(n))))
+    fn('setSceneNodeTransform', (n, j) =>
+      bool(host.setSceneNodeTransform(ctx.getString(n), ctx.getString(j))))
+    fn('setInteractable', (n, on) => {
+      host.setInteractable(ctx.getString(n), ctx.dump(on) === true)
+      return ctx.undefined
+    })
     fn('spawn', (x, y, z, c) => {
       const color = ctx.getNumber(c)
       return ctx.newString(host.spawn(ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z),

@@ -19,6 +19,16 @@ declare namespace WebSG {
     constructor(x?: number | number[], y?: number, z?: number)
     set(x: number, y: number, z: number): this
   }
+  /** Plain mutable quaternion; rotation setters also accept an
+   * {x,y,z,w} object or an [x,y,z,w] array. */
+  class Quaternion {
+    x: number
+    y: number
+    z: number
+    w: number
+    constructor(x?: number | number[], y?: number, z?: number, w?: number)
+    set(x: number, y: number, z: number, w: number): this
+  }
   const PhysicsBodyType: { Rigid: 'rigid'; Static: 'static'; Kinematic: 'kinematic' }
   const InteractableType: { Interactable: 1; Grabbable: 2 }
   /** Ray/plane intersection (plane through 'point' with normal 'normal');
@@ -27,11 +37,27 @@ declare namespace WebSG {
 }
 
 /** A dynamic box (world.createNode / world.boxes) or a named glTF scene
- * node (world.findNodeByName); scene nodes are read-only and never grab. */
+ * node (world.findNodeByName).
+ *
+ * Scene nodes are LOCAL COSMETICS with a writable local TRS: assign a
+ * whole vector/quaternion or set one component (thirdroom-style
+ * write-through) and this client's rendered scene updates. Every peer's
+ * script animates its own copy - drive the writes from shared input
+ * (world.onmidi, folded state) and all views stay in step. The baked
+ * trimesh collider never moves, and moved nodes snap back when the
+ * script stops. Boxes are folded sim state: translation is their world
+ * position, read-only - move them via grab/moveTo/release. */
 interface WorldNode {
   name: string
-  /** current world position (scene nodes: static; boxes: live sim state) */
-  readonly translation: WebSG.Vector3
+  /** boxes: current world position (read-only). Scene nodes: local
+   * translation, writable. */
+  translation: WebSG.Vector3
+  /** local rotation, writable (scene nodes; identity for boxes) */
+  rotation: WebSG.Quaternion
+  /** local scale, writable (scene nodes; 1,1,1 for boxes) */
+  scale: WebSG.Vector3
+  /** world position (boxes: same as translation) */
+  readonly worldTranslation: WebSG.Vector3
   /** held by anyone? */
   readonly grabbed: boolean
   /** held by us? */
@@ -41,6 +67,9 @@ interface WorldNode {
   release(vel?: Vec3Like): boolean
   addPhysicsBody(): this
   removePhysicsBody(): this
+  /** scene nodes: mark this node pickable, so pointer events report its
+   * name as ev.entity (a hit captures the gesture away from box
+   * spawning). No-op for boxes. */
   addInteractable(): this
   removeInteractable(): this
 }
@@ -132,8 +161,9 @@ interface WorldMidiEvent {
   value?: number
 }
 
-/** Pointer events arrive pre-raycast against the prop layer: 'entity' and
- * 'point' when a prop was hit, plus the raw ray for your own plane math. */
+/** Pointer events arrive pre-raycast: 'entity' and 'point' name the hit
+ * prop, or - when props miss - the nearest scene node marked
+ * addInteractable(); the raw ray comes along for your own plane math. */
 interface WorldPointerEvent {
   entity: string | null
   point: { x: number; y: number; z: number } | null
@@ -204,7 +234,8 @@ declare const world: {
   createNode(props?: { translation?: Vec3Like; color?: number }): WorldNode
   /** every dynamic box currently in the sim */
   boxes(): WorldNode[]
-  /** a spawned box, or a named glTF scene node (read-only), or undefined */
+  /** a spawned box, or a named glTF scene node (writable local TRS,
+   * local-only cosmetic), or undefined */
   findNodeByName(name: string): WorldNode | undefined
 
   // -- props: kinematic physics-free entities, claims as coordination --
