@@ -6,12 +6,11 @@
 // out and you respawn parked somewhere new. The pace starts leisurely
 // and tightens a little with every segment your snake grows; holding a
 // key down sprints you at a fixed fast pace while it repeats. Your score
-// is the sum of the numbers you ate; a crash files it into your per-user
-// top-10 in io.element.highscores room state. The HUD scores every racer
-// live (length minus the spawn length, counted from the claims in the
-// shared props table - growth comes only from eating, so that IS the sum
-// eaten), shows your previous run, and lists the room's all-time top-5
-// runs (self-reported: nothing witnesses them yet).
+// is the sum of the numbers you ate: each bite files it into the shared
+// kv table, from which the HUD scores every racer live, and a crash
+// files it into your per-user top-10 in io.element.highscores room
+// state. The HUD also shows your previous run and lists the room's
+// all-time top-5 runs (self-reported: nothing witnesses them yet).
 //
 // Sync model: your snake is YOURS. Its body order lives only in your
 // script; what everyone shares is the props table - one box per
@@ -34,13 +33,18 @@
 // divergence - snake is a foreground game.)
 
 const N = 32, CELL = 0.45, Y = 0.3
-const SEG = 0.21 // segment half-size (boxes render 2*size wide); also the tag that says "snake, not food"
+const SEG = CELL / 2 // segment half-size (boxes render 2*size wide): a full cell, so adjacent segments touch; also the tag that says "snake, not food"
 const FLOOR = 7.4 // half-size of the floor cube; also the tag that says "floor, not snake"
 const FOODC = 0xe8eef5 // soft off-white: lit, the spheres shade as balls instead of blown-out discs
 const foodR = (v) => 0.14 + 0.02 * v // 1..9 -> 0.16..0.32, all distinct
 const foodV = (s) => Math.round((s - 0.14) / 0.02)
 const isFood = (p) => p.kind === 'sphere' && p.color === FOODC && foodV(p.size) >= 1 && foodV(p.size) <= 9
 const FOODS = 4
+// each racer files their run's score (sum of numbers eaten) in the shared
+// kv table under this prefix + their peer id: exact and flicker-free,
+// where deriving it from segment counts wobbled as spawn/despawn ops
+// folded and crept by 1 per step while growth was still in the pipe
+const SCORE_KEY = 'snake:score:'
 // pace: leisurely at spawn length, tightening a little with every
 // segment eaten, floored well before it outruns netcode (or thumbs)
 const STEP0 = 0.24, STEP_MIN = 0.09
@@ -136,6 +140,7 @@ const spawnAt = (c, r) => {
   pendingGrowth = 2 // grow into a length-3 snake as you set off
   eaten = 0
   boostUntil = -1
+  world.setData(SCORE_KEY + me.id, 0)
   console.log('parked - press an arrow key to go')
 }
 
@@ -184,6 +189,7 @@ const step = (segs, foods) => {
     const v = foodV(bite.size)
     pendingGrowth += v
     eaten += v
+    world.setData(SCORE_KEY + me.id, eaten)
     console.log(`ate a ${v} - score ${eaten}`)
   }
 }
@@ -241,8 +247,9 @@ function bestTable(game) {
   return html + '</table>'
 }
 
-// a number label above each food, baked locally (labels are cosmetic
-// vertical planes, which the tilted camera reads like a billboard)
+// a number label on top of each food ball, baked locally: flat (face-up,
+// legible from the near-overhead camera), navy against the pale sphere,
+// sized with the ball so the digit sits within its silhouette
 const drawDigits = (foods) => {
   const seen = new Set()
   for (const f of foods) {
@@ -250,8 +257,8 @@ const drawDigits = (foods) => {
     if (digits.has(f.id)) continue
     digits.set(f.id, world.createLabel({
       text: String(foodV(f.size)),
-      position: { x: f.x, y: Y + 0.65, z: f.z },
-      height: 0.5, color: 0xffc45e,
+      position: { x: f.x, y: Y + f.size + 0.02, z: f.z },
+      height: Math.max(0.3, f.size * 1.4), color: 0x000080, flat: true,
     }))
   }
   for (const [id, label] of [...digits]) {
@@ -307,16 +314,18 @@ world.onupdate = (dt, time) => {
       state = 'alive'
     }
   }
-  // the HUD, tetrix-style: every racer's live score, counted from the
-  // shared props table (segments carry their owner's claim, so any peer
-  // can score anyone: growth comes only from eating, so length minus the
-  // spawn length 3 is the sum of numbers eaten, give or take growth
-  // still in the pipe); our own row adds the previous run, and the
-  // all-time board from room state follows
-  const lens = {}
-  for (const s of segs) if (s.claimedBy !== '') lens[s.claimedBy] = (lens[s.claimedBy] ?? 0) + 1
-  const board = Object.keys(lens)
-    .map((id) => ({ who: id.split(':')[0], mine: id === me.id, score: Math.max(0, lens[id] - 3) }))
+  // the HUD, tetrix-style: every racer's live score, read from the kv
+  // table (each script files its own on every bite, so any peer can
+  // score anyone exactly - no deriving from segment counts); our own row
+  // reads the local sum (our kv write lags its fold by a tick), adds the
+  // previous run, and the all-time board from room state follows
+  const live = new Set(world.peers().map((p) => p.id))
+  const board = world.dataKeys()
+    .filter((k) => k.startsWith(SCORE_KEY) && live.has(k.slice(SCORE_KEY.length)))
+    .map((k) => {
+      const id = k.slice(SCORE_KEY.length)
+      return { who: id.split(':')[0], mine: id === me.id, score: id === me.id ? eaten : world.getData(k) ?? 0 }
+    })
     .sort((a, b) => b.score - a.score)
   const esc = (x) => String(x).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]))
   let html = '<b>snake</b><table>'
@@ -352,11 +361,15 @@ world.onupdate = (dt, time) => {
     // ownerless segments: the player left (their claims were force-cleared
     // on departure) or a claim never landed; either way nobody will ever
     // drive them again. The grace covers the spawn-to-claim window.
-    const live = new Set(world.peers().map((p) => p.id))
     for (const s of segs) {
       if (s.claimedBy !== '' && live.has(s.claimedBy)) { delete orphanSince[s.id]; continue }
       if (orphanSince[s.id] === undefined) orphanSince[s.id] = time
       else if (time - orphanSince[s.id] > 5) { world.despawn(s.id); delete orphanSince[s.id] }
+    }
+    // and departed racers' score rows go the same way (deletes are
+    // idempotent; re-firing until the op folds is harmless)
+    for (const k of world.dataKeys()) {
+      if (k.startsWith(SCORE_KEY) && !live.has(k.slice(SCORE_KEY.length))) world.deleteData(k)
     }
   }
 }
