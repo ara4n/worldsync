@@ -4,12 +4,14 @@
 // until your first key; from then on your snake never stops until it
 // crashes (wall or any snake, yours included), at which point it flashes
 // out and you respawn parked somewhere new. The pace starts leisurely
-// and tightens a little with every segment your snake grows. A crash
-// files the length you reached into your per-user top-10 in
-// io.element.highscores room state; the HUD scores every racer live
-// (lengths counted from the claims in the shared props table), shows
-// your previous run, and lists the room's all-time top-5 runs
-// (self-reported: nothing witnesses them yet).
+// and tightens a little with every segment your snake grows; holding a
+// key down sprints you at a fixed fast pace while it repeats. Your score
+// is the sum of the numbers you ate; a crash files it into your per-user
+// top-10 in io.element.highscores room state. The HUD scores every racer
+// live (length minus the spawn length, counted from the claims in the
+// shared props table - growth comes only from eating, so that IS the sum
+// eaten), shows your previous run, and lists the room's all-time top-5
+// runs (self-reported: nothing witnesses them yet).
 //
 // Sync model: your snake is YOURS. Its body order lives only in your
 // script; what everyone shares is the props table - one box per
@@ -20,7 +22,8 @@
 // exclusion key on claimedBy while color stays cosmetic. Everyone else
 // just renders and collides against those props, so late joiners see
 // every snake mid-race. Food is props too (radius encodes the number,
-// digits are local 7-segment lines), kept stocked by the primary. Two
+// the number labels are baked locally), kept stocked by the primary
+// alongside the floor slab the board sits on. Two
 // heads racing into the same cell on the same tick both survive the
 // entry - worldsync ops race deterministically but this script does not
 // referee photo finishes; the NEXT step kills whoever is still there.
@@ -32,7 +35,8 @@
 
 const N = 32, CELL = 0.45, Y = 0.3
 const SEG = 0.21 // segment half-size (boxes render 2*size wide); also the tag that says "snake, not food"
-const FOODC = 0xffffff
+const FLOOR = 7.4 // half-size of the floor cube; also the tag that says "floor, not snake"
+const FOODC = 0xe8eef5 // soft off-white: lit, the spheres shade as balls instead of blown-out discs
 const foodR = (v) => 0.14 + 0.02 * v // 1..9 -> 0.16..0.32, all distinct
 const foodV = (s) => Math.round((s - 0.14) / 0.02)
 const isFood = (p) => p.kind === 'sphere' && p.color === FOODC && foodV(p.size) >= 1 && foodV(p.size) <= 9
@@ -41,6 +45,9 @@ const FOODS = 4
 // segment eaten, floored well before it outruns netcode (or thumbs)
 const STEP0 = 0.24, STEP_MIN = 0.09
 const stepS = (len) => Math.max(STEP_MIN, STEP0 * Math.pow(0.985, len - 3))
+// holding a key (or mashing it) sprints at this fixed pace - but only
+// when that is actually faster than the length-based pace of the moment
+const STEP_FAST = 0.1, BOOST_HOLD = 0.3 // boost outlives the last repeat by this
 const cx = (c) => (c - (N - 1) / 2) * CELL
 const cz = (r) => (r - (N - 1) / 2) * CELL
 const key = (c, r) => c + ',' + r
@@ -57,12 +64,14 @@ let pendingClaims = [] // spawned segments whose claim waits for the fold
 // about-face against a turn that has not happened yet and get dropped.
 let dirQueue = []
 let dir = null, lastMoved = null, pendingGrowth = 0
+let eaten = 0 // this run's score: the sum of the numbers eaten
+let boostUntil = -1 // key auto-repeat keeps pushing this ahead of now
 let acc = 0, state = 'boot', stateT = 0, now = 0
 let seedWait = -10
 let hudLast = ''
-let prevScore = null // last run's length; local, so just our own HUD row
+let prevScore = null // last run's score; local, so just our own HUD row
 const orphanSince = {} // prop id -> when it first looked ownerless
-const digits = new Map() // food id -> its local digit/pip lines
+const digits = new Map() // food id -> its local number label
 let border = null
 
 world.onload = () => {
@@ -78,7 +87,10 @@ world.onkeydown = (ev) => {
   const prev = dirQueue.length ? dirQueue[dirQueue.length - 1] : lastMoved
   // no about-face: a moving snake cannot reverse into its own neck
   if (prev && myCells.length > 1 && d[0] === -prev[0] && d[1] === -prev[1]) return
-  if (prev && d[0] === prev[0] && d[1] === prev[1]) return // held key, not a turn
+  // a held (or mashed) key arrives as repeats of the direction we are
+  // already following: not a turn, but a sprint request for as long as
+  // the repeats keep coming
+  if (prev && d[0] === prev[0] && d[1] === prev[1]) { boostUntil = now + BOOST_HOLD; return }
   if (dirQueue.length < 3) dirQueue.push(d)
 }
 
@@ -86,11 +98,13 @@ const cellOf = (p) => key(Math.round(p.x / CELL + (N - 1) / 2), Math.round(p.z /
 
 const scan = () => {
   const segs = [], foods = []
+  let floor = false
   for (const p of world.props()) {
     if (p.kind === 'box' && p.size === SEG) segs.push(p)
+    else if (p.kind === 'box' && p.size === FLOOR) floor = true
     else if (isFood(p)) foods.push(p)
   }
-  return { segs, foods }
+  return { segs, foods, floor }
 }
 
 const randFree = (occ) => {
@@ -120,6 +134,8 @@ const spawnAt = (c, r) => {
   dirQueue = []
   lastMoved = null
   pendingGrowth = 2 // grow into a length-3 snake as you set off
+  eaten = 0
+  boostUntil = -1
   console.log('parked - press an arrow key to go')
 }
 
@@ -128,13 +144,12 @@ const crash = () => {
   state = 'dead'
   stateT = now
   dir = null
-  // the run's score is the length reached, growth still in the pipe
-  // included; a bite-less run (exactly the spawn length 3) stays off the
-  // board
-  const score = myCells.length + pendingGrowth
+  // the run's score is the sum of the numbers eaten; a bite-less run
+  // stays off the board
+  const score = eaten
   prevScore = score
-  if (score > 3) submitScore('snake', score)
-  console.log(`crashed at length ${myCells.length}`)
+  if (score > 0) submitScore('snake', score)
+  console.log(`crashed with score ${score} at length ${myCells.length}`)
 }
 
 const step = (segs, foods) => {
@@ -166,8 +181,10 @@ const step = (segs, foods) => {
   const bite = foods.find((f) => cellOf(f) === nk)
   if (bite) {
     world.despawn(bite.id)
-    pendingGrowth += foodV(bite.size)
-    console.log(`ate a ${foodV(bite.size)} - length ${myCells.length + pendingGrowth}`)
+    const v = foodV(bite.size)
+    pendingGrowth += v
+    eaten += v
+    console.log(`ate a ${v} - score ${eaten}`)
   }
 }
 
@@ -224,39 +241,28 @@ function bestTable(game) {
   return html + '</table>'
 }
 
-// 7-segment digit above each food, drawn locally (t,tl,tr,m,bl,br,b)
-const SEGDEFS = {
-  t: [[-1, 1], [1, 1]], m: [[-1, 0], [1, 0]], b: [[-1, -1], [1, -1]],
-  tl: [[-1, 1], [-1, 0]], tr: [[1, 1], [1, 0]], bl: [[-1, 0], [-1, -1]], br: [[1, 0], [1, -1]],
-}
-const LIT = {
-  1: ['tr', 'br'], 2: ['t', 'tr', 'm', 'bl', 'b'], 3: ['t', 'tr', 'm', 'br', 'b'],
-  4: ['tl', 'tr', 'm', 'br'], 5: ['t', 'tl', 'm', 'br', 'b'], 6: ['t', 'tl', 'm', 'bl', 'br', 'b'],
-  7: ['t', 'tr', 'br'], 8: ['t', 'tl', 'tr', 'm', 'bl', 'br', 'b'], 9: ['t', 'tl', 'tr', 'm', 'br', 'b'],
-}
+// a number label above each food, baked locally (labels are cosmetic
+// vertical planes, which the tilted camera reads like a billboard)
 const drawDigits = (foods) => {
   const seen = new Set()
   for (const f of foods) {
     seen.add(f.id)
     if (digits.has(f.id)) continue
-    // drawn just in front of the ball (screen-below, given the camera
-    // tilt), or the sphere itself would hide the number
-    const w = 0.16, h = 0.24
-    const lines = LIT[foodV(f.size)].map((name) => world.createLine({
-      points: SEGDEFS[name].map(([sx, su]) => ({ x: f.x + sx * w, y: Y + 0.02, z: f.z + 0.72 - su * h })),
-      color: 0xffc45e, width: 0.045, worldUnits: true,
+    digits.set(f.id, world.createLabel({
+      text: String(foodV(f.size)),
+      position: { x: f.x, y: Y + 0.65, z: f.z },
+      height: 0.5, color: 0xffc45e,
     }))
-    digits.set(f.id, lines)
   }
-  for (const [id, lines] of [...digits]) {
-    if (!seen.has(id)) { for (const l of lines) l.despawn(); digits.delete(id) }
+  for (const [id, label] of [...digits]) {
+    if (!seen.has(id)) { label.despawn(); digits.delete(id) }
   }
 }
 
 world.onupdate = (dt, time) => {
   if (!me) return // identity arrives with onenter
   now = time
-  const { segs, foods } = scan()
+  const { segs, foods, floor } = scan()
   drawDigits(foods)
   if (!border) {
     const e = (N / 2) * CELL + 0.1
@@ -284,9 +290,11 @@ world.onupdate = (dt, time) => {
     if (dir || dirQueue.length) {
       acc += dt
       // the interval is re-read every step: eating mid-burst quickens
-      // the very next step
-      while (state === 'alive' && acc >= stepS(myCells.length)) {
-        acc -= stepS(myCells.length)
+      // the very next step. A live key-repeat boost sprints at STEP_FAST
+      // unless the length-based pace is already quicker than that.
+      const pace = () => now < boostUntil ? Math.min(stepS(myCells.length), STEP_FAST) : stepS(myCells.length)
+      while (state === 'alive' && acc >= pace()) {
+        acc -= pace()
         step(segs, foods)
       }
     } else acc = 0
@@ -299,21 +307,23 @@ world.onupdate = (dt, time) => {
       state = 'alive'
     }
   }
-  // the HUD, tetrix-style: every racer's live length, counted from the
+  // the HUD, tetrix-style: every racer's live score, counted from the
   // shared props table (segments carry their owner's claim, so any peer
-  // can score anyone); our own row adds the previous run, and the
+  // can score anyone: growth comes only from eating, so length minus the
+  // spawn length 3 is the sum of numbers eaten, give or take growth
+  // still in the pipe); our own row adds the previous run, and the
   // all-time board from room state follows
   const lens = {}
   for (const s of segs) if (s.claimedBy !== '') lens[s.claimedBy] = (lens[s.claimedBy] ?? 0) + 1
   const board = Object.keys(lens)
-    .map((id) => ({ who: id.split(':')[0], mine: id === me.id, len: lens[id] }))
-    .sort((a, b) => b.len - a.len)
+    .map((id) => ({ who: id.split(':')[0], mine: id === me.id, score: Math.max(0, lens[id] - 3) }))
+    .sort((a, b) => b.score - a.score)
   const esc = (x) => String(x).replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[ch]))
   let html = '<b>snake</b><table>'
   for (const r of board) {
     const cell = (s) => (r.mine ? `<span style="color:#7fe0a0">${s}</span>` : s)
-    const len = r.mine && prevScore !== null ? `${r.len} (prev ${prevScore})` : r.len
-    html += `<tr><td>${cell(esc(r.who))}</td><td>${cell(len)}</td></tr>`
+    const score = r.mine && prevScore !== null ? `${r.score} (prev ${prevScore})` : r.score
+    html += `<tr><td>${cell(esc(r.who))}</td><td>${cell(score)}</td></tr>`
   }
   html += '</table>' + bestTable('snake')
   if (html !== hudLast) { hudLast = html; world.hud(html) }
@@ -321,6 +331,13 @@ world.onupdate = (dt, time) => {
   // whose player left (their script alone drove them; nobody else will).
   // world.me is read live: primacy hands over when the senior peer goes.
   if (world.me.primary && time > seedWait + 1.5) {
+    // the opaque plane under the board: props are the only opaque
+    // primitive scripts get, so it is the top face of a big cube parked
+    // with that face at y=0, just under the segments and border
+    if (!floor) {
+      world.createBox({ position: { x: 0, y: -FLOOR, z: 0 }, color: 0x202836, size: FLOOR, bounce: false })
+      seedWait = time
+    }
     if (foods.length < FOODS) {
       const occ = new Set(segs.map(cellOf))
       for (const f of foods) occ.add(cellOf(f))
@@ -328,7 +345,7 @@ world.onupdate = (dt, time) => {
         const v = 1 + Math.floor(Math.random() * 9)
         const [c, r] = randFree(occ)
         occ.add(key(c, r))
-        world.createSphere({ position: { x: cx(c), y: Y, z: cz(r) }, color: FOODC, radius: foodR(v), unlit: true })
+        world.createSphere({ position: { x: cx(c), y: Y, z: cz(r) }, color: FOODC, radius: foodR(v) })
       }
       seedWait = time
     }
