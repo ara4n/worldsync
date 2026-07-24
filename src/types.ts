@@ -115,6 +115,11 @@ export type DcMessage =
   // points removes the line; a departed peer's lines go with it.
   | { kind: 'line'; peer: string; id: string; points: Vec3[]; color: number; opacity: number; width: number
       worldUnits: boolean }
+  // Ephemeral MIDI event from a peer's connected device (world.onmidi):
+  // cosmetic like lines - never folded, never hashed. d is the raw 2-3 byte
+  // channel message [status, data1, data2]; every peer's script hears every
+  // peer's device, so worlds can animate instruments (or jam) together.
+  | { kind: 'midi'; peer: string; d: number[] }
   // The heartbeat: attests the author's present (anything it stamps earlier
   // later is a provable history rewrite) and triggers the healing fold that
   // re-simulates the last interval against complete pose tracks.

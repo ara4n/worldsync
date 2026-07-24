@@ -202,6 +202,10 @@ async function main() {
   // latest-wins per (author, id), purely cosmetic, so they are intercepted
   // before receive().
   const onMsg = (from: string, msg: DcMessage) => {
+    if (msg.kind === 'midi') {
+      deliverMidi(msg.peer, msg.d)
+      return
+    }
     if (msg.kind === 'line') {
       view.setLine(`${msg.peer}/${msg.id}`, msg.points.length ? msg.points : null,
         msg.color, msg.opacity, msg.width, msg.worldUnits)
@@ -283,6 +287,7 @@ async function main() {
   let scriptStarting = false
   let scriptPointerOn = false
   let scriptKeysOn = false
+  let scriptMidiOn = false
   // Arrow keys go to the script while it defines world.onkeydown; typing
   // in the panel or the monaco editor keeps them (same guard as M/V).
   addEventListener('keydown', e => {
@@ -293,6 +298,69 @@ async function main() {
     e.preventDefault()
     script.key({ key: e.key })
   })
+  // --- WebMIDI -> world.onmidi ---
+  // Access is requested lazily, only once a running script defines
+  // world.onmidi (worlds that never use MIDI never prompt). Every parsed
+  // channel message from a local device is delivered to our own script AND
+  // broadcast as a cosmetic 'midi' message (never folded, never hashed),
+  // so every peer's script hears every peer's device, tagged by peer -
+  // which is what lets one world script animate a shared instrument
+  // identically on all clients.
+  let midiAccess: MIDIAccess | null = null
+  let midiRequested = false
+  const midiEvent = (peer: string, d: number[]) => {
+    const type = d[0] >> 4
+    const base = { peer, me: peer === session.id, channel: d[0] & 15 }
+    switch (type) {
+      case 8: return { ...base, type: 'noteoff', note: d[1], velocity: 0 }
+      // a noteon at velocity 0 is the wire's idiom for noteoff; normalize
+      // so scripts never need to know
+      case 9: return d[2] === 0
+        ? { ...base, type: 'noteoff', note: d[1], velocity: 0 }
+        : { ...base, type: 'noteon', note: d[1], velocity: d[2] }
+      case 11: return { ...base, type: 'control', controller: d[1], value: d[2] }
+      case 14: return { ...base, type: 'pitchbend', value: ((d[2] << 7) | d[1]) - 8192 }
+      default: return null // aftertouch/program/system: not worth the surface yet
+    }
+  }
+  const deliverMidi = (peer: string, d: number[]) => {
+    if (!script || !scriptMidiOn) return
+    const ev = midiEvent(peer, d)
+    if (ev) script.midi(ev)
+  }
+  // one entry point for hardware and the __jig test hook alike
+  const onMidiBytes = (d: number[]) => {
+    if (d.length < 2 || d[0] < 0x80 || d[0] >= 0xf0) return // system/realtime chatter stays local
+    deliverMidi(session.id, d)
+    net.broadcast({ kind: 'midi', peer: session.id, d })
+  }
+  const attachMidiInputs = () => {
+    if (!midiAccess) return
+    for (const input of midiAccess.inputs.values()) {
+      input.onmidimessage = script && scriptMidiOn
+        ? e => { if (e.data) onMidiBytes([...e.data]) }
+        : null
+    }
+  }
+  const startMidi = () => {
+    if (midiAccess) { attachMidiInputs(); return }
+    if (midiRequested) return // denied access stays denied; don't prompt-spam
+    midiRequested = true
+    if (!('requestMIDIAccess' in navigator)) {
+      log('world.onmidi defined, but this browser has no WebMIDI')
+      return
+    }
+    navigator.requestMIDIAccess()
+      .then(a => {
+        midiAccess = a
+        const names = [...a.inputs.values()].map(i => i.name ?? i.id)
+        log(`midi: ${names.length ? names.join(', ') : 'no inputs connected (hot-plug works)'}`)
+        a.onstatechange = attachMidiInputs // hot-plugged devices join live
+        attachMidiInputs()
+      })
+      .catch(e => logErr('midi access failed (iframe without allow="midi"?)', e))
+  }
+
   let lastScriptTick = 0
   const scriptSrc = new Map<string, string>()
   const scriptFetches = new Set<string>()
@@ -322,6 +390,7 @@ async function main() {
   const scriptLines = new Map<string, boolean>() // id -> shared
   const scriptScreens = new Set<string>()
   const scriptLabels = new Set<string>()
+  const scriptPianos = new Set<string>()
   // Flipped by the first screen a script places; gates the camera toggle,
   // so worlds that never ask for video never show it.
   let videoWanted = false
@@ -642,6 +711,15 @@ async function main() {
       scriptScreens.delete(id)
       view.removeScreen(`${session.id}/${id}`)
     },
+    piano: (id, x, y, z, yaw, size, color) => {
+      scriptPianos.add(id)
+      view.setPiano(`${session.id}/${id}`, { x, y, z }, yaw, size, color)
+    },
+    pianoNote: (id, note, velocity) => view.pianoNote(`${session.id}/${id}`, note, velocity),
+    removePiano: id => {
+      scriptPianos.delete(id)
+      view.removePiano(`${session.id}/${id}`)
+    },
     label: (id, text, x, y, z, yaw, h, color, flat) => {
       scriptLabels.add(id)
       view.setLabel(`${session.id}/${id}`, text.slice(0, 64), { x, y, z }, yaw, h, color, flat)
@@ -689,9 +767,12 @@ async function main() {
     script = null
     scriptPointerOn = false
     scriptKeysOn = false
+    scriptMidiOn = false
+    attachMidiInputs() // detaches: no script is listening anymore
     for (const id of [...scriptLines.keys()]) scriptHost.removeLine(id) // its lines go with it
     for (const id of [...scriptScreens]) scriptHost.removeScreen(id) // and its screens
     for (const id of [...scriptLabels]) scriptHost.removeLabel(id) // and its labels
+    for (const id of [...scriptPianos]) scriptHost.removePiano(id) // and its pianos
     if (videoWanted) {
       videoWanted = false
       stopCam() // no world is asking for video anymore: stop publishing
@@ -733,6 +814,8 @@ async function main() {
           scriptFor = url
           scriptPointerOn = s.handles('onpointerdown')
           scriptKeysOn = s.handles('onkeydown')
+          scriptMidiOn = s.handles('onmidi')
+          if (scriptMidiOn) startMidi()
           lastScriptTick = sim.tick
           s.enter()
           log(`world script running${isRoot() ? ' (this peer is primary)' : ''}`)
@@ -955,6 +1038,10 @@ async function main() {
     },
     verify: (depth?: number) => sim.verifyReplay(depth ?? 60),
     roundTrip: () => sim.roundTrip(),
+    // inject a MIDI channel message as if a local device sent it (tests
+    // and consoles have no hardware): delivered to our script and
+    // broadcast to peers exactly like the real thing
+    midi: (status: number, d1?: number, d2?: number) => onMidiBytes([status, d1 ?? 0, d2 ?? 0]),
   }
 }
 

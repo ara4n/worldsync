@@ -133,6 +133,17 @@ export interface ScriptHost {
   label(id: string, text: string, x: number, y: number, z: number, yaw: number, h: number,
     color: number, flat: boolean): void
   removeLabel(id: string): void
+  /** create/move a cosmetic grand piano: a client-modelled instrument at
+   * (x,y,z), yawed about Y, scaled by size (1 = full-size ~2.2m grand),
+   * case tinted by color. Local-only like screens and labels: every
+   * peer's script places its own, and animates the keys itself (usually
+   * from world.onmidi, which every peer hears identically). */
+  piano(id: string, x: number, y: number, z: number, yaw: number, size: number, color: number): void
+  /** press (velocity 1-127) or release (velocity 0) one key, MIDI note
+   * numbers 21 (A0) to 108 (C8); the client animates the key pianola
+   * style. Purely cosmetic, no audio. */
+  pianoNote(id: string, note: number, velocity: number): void
+  removePiano(id: string): void
   setEnv(json: string): void
   setCamera(x: number, y: number, z: number, tx: number, ty: number, tz: number): void
 }
@@ -295,6 +306,43 @@ const PRELUDE = `
     set height(h) { this._h = h; this._sync() }
     despawn() { if (!this._dead) { this._dead = true; H.removeScreen(this._id) } }
   }
+  // Cosmetic grand piano: client-modelled instrument, local-only like
+  // screens (every peer's script places its own and drives the keys,
+  // usually from world.onmidi so all views animate identically).
+  let pianoSeq = 0
+  class GrandPiano {
+    constructor(opts = {}) {
+      this._id = 'gp' + (++pianoSeq)
+      const p = vec(opts.position)
+      this._pos = { x: p.x, y: p.y, z: p.z }
+      this._yaw = typeof opts.yaw === 'number' ? opts.yaw : 0
+      this._size = typeof opts.size === 'number' ? opts.size : 1
+      this._color = typeof opts.color === 'number' ? opts.color : 0x080808
+      this._dead = false
+      this._sync()
+    }
+    _sync() {
+      if (this._dead) return
+      H.piano(this._id, this._pos.x, this._pos.y, this._pos.z, this._yaw, this._size, this._color)
+    }
+    get position() { return new Vector3(this._pos.x, this._pos.y, this._pos.z) }
+    set position(p) { const v = vec(p); this._pos = { x: v.x, y: v.y, z: v.z }; this._sync() }
+    get yaw() { return this._yaw }
+    set yaw(y) { this._yaw = y; this._sync() }
+    get size() { return this._size }
+    set size(s) { this._size = s; this._sync() }
+    get color() { return this._color }
+    set color(c) { this._color = c; this._sync() }
+    /** press a key (MIDI note 21-108); velocity 1-127 shades the dip */
+    noteOn(note, velocity) {
+      if (this._dead) return
+      const v = typeof velocity === 'number' ? Math.min(127, Math.max(1, velocity)) : 100
+      H.pianoNote(this._id, note | 0, v)
+    }
+    /** release a key */
+    noteOff(note) { if (!this._dead) H.pianoNote(this._id, note | 0, 0) }
+    despawn() { if (!this._dead) { this._dead = true; H.removePiano(this._id) } }
+  }
   globalThis.WebSG = {
     Vector3,
     PhysicsBodyType: { Rigid: 'rigid', Static: 'static', Kinematic: 'kinematic' },
@@ -315,7 +363,7 @@ const PRELUDE = `
   globalThis.world = {
     onload: null, onenter: null, onupdate: null,
     onpointerdown: null, onpointermove: null, onpointerup: null,
-    onkeydown: null,
+    onkeydown: null, onmidi: null,
     get me() { return parse(H.me()) },
     // chat into the Matrix room as this user (host rate-limits it)
     say(text) { H.say(typeof text === 'string' ? text : JSON.stringify(text)) },
@@ -379,6 +427,7 @@ const PRELUDE = `
     createLine(props) { return new Line(props) },
     createScreen(props) { return new Screen(props) },
     createLabel(props) { return new Label(props) },
+    createGrandPiano(props) { return new GrandPiano(props) },
     // a solid invisible cuboid collider: sim state, so despawn/move it via
     // world.despawn(id) / world.move(id, pos) like any prop
     createSolid(props = {}) {
@@ -479,6 +528,9 @@ export class WorldScript {
   /** deliver a key press to world.onkeydown (same JSON path as pointer) */
   key(ev: unknown) { this.dispatch('onkeydown', JSON.stringify(ev)) }
 
+  /** deliver a MIDI event to world.onmidi (same JSON path as pointer) */
+  midi(ev: unknown) { this.dispatch('onmidi', JSON.stringify(ev)) }
+
   /** does the script define this handler? (pointer capture asks first) */
   handles(name: string): boolean {
     const world = this.ctx.getProp(this.ctx.global, 'world')
@@ -572,6 +624,16 @@ export class WorldScript {
       return ctx.undefined
     })
     fn('removeLabel', (id) => { host.removeLabel(ctx.getString(id)); return ctx.undefined })
+    fn('piano', (id, x, y, z, yaw, size, c) => {
+      host.piano(ctx.getString(id), ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z),
+        ctx.getNumber(yaw), ctx.getNumber(size), ctx.getNumber(c))
+      return ctx.undefined
+    })
+    fn('pianoNote', (id, note, vel) => {
+      host.pianoNote(ctx.getString(id), ctx.getNumber(note), ctx.getNumber(vel))
+      return ctx.undefined
+    })
+    fn('removePiano', (id) => { host.removePiano(ctx.getString(id)); return ctx.undefined })
     fn('setEnv', (j) => { host.setEnv(ctx.getString(j)); return ctx.undefined })
     fn('setCamera', (x, y, z, tx, ty, tz) => {
       host.setCamera(ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z),
