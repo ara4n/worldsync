@@ -128,9 +128,10 @@ export interface ScriptHost {
   removeScreen(id: string): void
   /** create/move a text label: canvas-rendered text on a plane at
    * (x,y,z), yawed about Y, h world-units tall (width follows the text).
+   * flat lays it face-up in the XZ plane instead of standing upright.
    * Local-only cosmetic: every peer's script bakes its own labels. */
   label(id: string, text: string, x: number, y: number, z: number, yaw: number, h: number,
-    color: number): void
+    color: number, flat: boolean): void
   removeLabel(id: string): void
   setEnv(json: string): void
   setCamera(x: number, y: number, z: number, tx: number, ty: number, tz: number): void
@@ -243,12 +244,13 @@ const PRELUDE = `
       this._yaw = typeof opts.yaw === 'number' ? opts.yaw : 0
       this._h = typeof opts.height === 'number' ? opts.height : 0.4
       this._color = typeof opts.color === 'number' ? opts.color : 0xffffff
+      this._flat = opts.flat === true
       this._dead = false
       this._sync()
     }
     _sync() {
       if (this._dead) return
-      H.label(this._id, this._text, this._pos.x, this._pos.y, this._pos.z, this._yaw, this._h, this._color)
+      H.label(this._id, this._text, this._pos.x, this._pos.y, this._pos.z, this._yaw, this._h, this._color, this._flat)
     }
     get text() { return this._text }
     set text(t) { this._text = String(t); this._sync() }
@@ -260,6 +262,8 @@ const PRELUDE = `
     set height(h) { this._h = h; this._sync() }
     get color() { return this._color }
     set color(c) { this._color = c; this._sync() }
+    get flat() { return this._flat }
+    set flat(f) { this._flat = f === true; this._sync() }
     despawn() { if (!this._dead) { this._dead = true; H.removeLabel(this._id) } }
   }
   let screenSeq = 0
@@ -562,9 +566,9 @@ export class WorldScript {
       return ctx.undefined
     })
     fn('removeScreen', (id) => { host.removeScreen(ctx.getString(id)); return ctx.undefined })
-    fn('label', (id, text, x, y, z, yaw, h, c) => {
+    fn('label', (id, text, x, y, z, yaw, h, c, flat) => {
       host.label(ctx.getString(id), ctx.getString(text), ctx.getNumber(x), ctx.getNumber(y),
-        ctx.getNumber(z), ctx.getNumber(yaw), ctx.getNumber(h), ctx.getNumber(c))
+        ctx.getNumber(z), ctx.getNumber(yaw), ctx.getNumber(h), ctx.getNumber(c), ctx.dump(flat) === true)
       return ctx.undefined
     })
     fn('removeLabel', (id) => { host.removeLabel(ctx.getString(id)); return ctx.undefined })

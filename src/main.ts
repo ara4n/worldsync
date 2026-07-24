@@ -642,9 +642,9 @@ async function main() {
       scriptScreens.delete(id)
       view.removeScreen(`${session.id}/${id}`)
     },
-    label: (id, text, x, y, z, yaw, h, color) => {
+    label: (id, text, x, y, z, yaw, h, color, flat) => {
       scriptLabels.add(id)
-      view.setLabel(`${session.id}/${id}`, text.slice(0, 64), { x, y, z }, yaw, h, color)
+      view.setLabel(`${session.id}/${id}`, text.slice(0, 64), { x, y, z }, yaw, h, color, flat)
     },
     removeLabel: id => {
       scriptLabels.delete(id)

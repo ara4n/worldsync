@@ -84,14 +84,17 @@ interface WorldScreen {
 }
 
 /** Cosmetic text label: canvas-rendered text on a plane, h world-units
- * tall (width follows the text). Local-only; every peer's script bakes
- * its own. A changed text or color rebakes the texture. */
+ * tall (width follows the text). Upright by default; flat lays it
+ * face-up in the XZ plane (legible from above, text-up toward -Z), for
+ * captioning props on top-down boards. Local-only; every peer's script
+ * bakes its own. A changed text or color rebakes the texture. */
 interface WorldLabel {
   text: string
   position: WebSG.Vector3
   yaw: number
   height: number
   color: number
+  flat: boolean
   despawn(): void
 }
 
@@ -220,7 +223,7 @@ declare const world: {
     height?: number }): WorldScreen
   /** create a cosmetic text label (local-only; see WorldLabel) */
   createLabel(props?: { text?: string; position?: Vec3Like; yaw?: number; height?: number
-    color?: number }): WorldLabel
+    color?: number; flat?: boolean }): WorldLabel
   /** background/fog colors and whether the default ground shows */
   env(opts?: { background?: number; fog?: { color: number; near: number; far: number } | null
     ground?: boolean }): void

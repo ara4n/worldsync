@@ -387,9 +387,12 @@ export class View {
   }
 
   /** Place (or move) a text label: a plane h world-units tall, width from
-   * the text's aspect, yawed about Y. A changed text or color rebakes. */
+   * the text's aspect, yawed about Y. A changed text or color rebakes.
+   * flat lays it face-up in the XZ plane (top-down boards caption props
+   * with it), yaw then spinning it about world Y; text-up points to -Z,
+   * upright for the stock camera looking down the -Z tilt. */
   setLabel(key: string, text: string, pos: { x: number; y: number; z: number },
-    yaw: number, h: number, color: number) {
+    yaw: number, h: number, color: number, flat = false) {
     let l = this.labels.get(key)
     if (l && (l.text !== text || l.color !== color)) { this.removeLabel(key); l = undefined }
     if (!l) {
@@ -401,7 +404,8 @@ export class View {
       this.labels.set(key, l)
     }
     l.obj.position.set(pos.x, pos.y, pos.z)
-    l.obj.rotation.set(0, yaw, 0)
+    if (flat) l.obj.rotation.set(-Math.PI / 2, 0, yaw)
+    else l.obj.rotation.set(0, yaw, 0)
     l.obj.scale.set(h * l.aspect, h, 1)
   }
 
