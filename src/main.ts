@@ -1,7 +1,9 @@
-import { Vector3 } from 'three'
+import { Raycaster, Vector2, Vector3 } from 'three'
+import sanitizeHtml from 'sanitize-html'
 import { BOOT_LEAD_TICKS, Sim } from './sim'
+import { peerColor } from './color'
 import { cachedScene, cacheScene, configureGlbLoader, parseGlb } from './scene'
-import { fetchWorldAsset, mediaUploadLimit, uploadWorldAsset } from './matrix/world'
+import { fetchWorldAsset, mediaUploadLimit, SCRIPT_STATE_TYPES, uploadWorldAsset } from './matrix/world'
 import { Net } from './net'
 import { Session } from './session'
 import { View } from './render'
@@ -9,7 +11,7 @@ import { Input, type Emitter } from './input'
 import { UI } from './ui'
 import { wallNow, type DcMessage } from './types'
 import { widgetParams } from './matrix/params'
-import { initWidgetClient } from './matrix/widget'
+import { initWidgetClient, requestScriptStateCapabilities } from './matrix/widget'
 
 /** What main needs from a transport; Net (ws demo) and MatrixNet both fit. */
 interface NetLike {
@@ -105,19 +107,58 @@ async function main() {
     // MSC3815 script_url: upload the JS, merge it into the world state
     // event; the state echo (ours and every other peer's watch) feeds the
     // script driver below, which runs it only on the current root peer.
-    onScriptFile: async file => {
-      if (!wp) { log('world scripts need Matrix (run as a widget; the mock host works: /mock.html)'); return }
-      const m = net as import('./matrix/net').MatrixNet
-      try {
-        log(`uploading ${file.name} (${(file.size / 1024).toFixed(1)} kB)...`)
-        const mxc = await uploadWorldAsset(m.api, m.client, wp.roomId, file, 'script')
-        log(`world script set: ${mxc}`)
-        worldScriptChanged(mxc) // don't wait for our own state echo
-      } catch (e) {
-        logErr('script upload failed', e)
-      }
+    onScriptFile: file => uploadScript(file).catch(() => {}),
+    // The monaco editor and glTF inspector are heavy overlays most peers
+    // never open; each lives in its own dynamically-imported chunk.
+    onEditScript: async () => {
+      const { ScriptEditor } = await import('./editor')
+      editor ??= new ScriptEditor(document.body, room, {
+        log,
+        getPersisted: async () => {
+          if (!scriptUrl || !wp) return null
+          const cached = scriptSrc.get(scriptUrl)
+          if (cached !== undefined) return cached
+          const m = net as import('./matrix/net').MatrixNet
+          const src = new TextDecoder().decode(await fetchWorldAsset(m.api, scriptUrl))
+          scriptSrc.set(scriptUrl, src)
+          return src
+        },
+        save: source =>
+          uploadScript(new File([source], 'script.js', { type: 'text/javascript' })),
+      })
+      editor.toggle()
+    },
+    onInspectScene: async () => {
+      const { SceneInspector } = await import('./inspector')
+      inspector ??= new SceneInspector(document.body, {
+        root: () => view.scene,
+        gltfRoot: () => sim.sceneUrl ? cachedScene(sim.sceneUrl)?.object ?? null : null,
+        url: () => sim.sceneUrl,
+        setOutline: objs => view.setOutline(objs),
+      })
+      inspector.toggle()
     },
   })
+  let editor: import('./editor').ScriptEditor | null = null
+  let inspector: import('./inspector').SceneInspector | null = null
+  // Shared by the file picker and the editor's Save & Run; throws so the
+  // editor can show the failure, after it has been logged here.
+  const uploadScript = async (file: File) => {
+    if (!wp) {
+      log('world scripts need Matrix (run as a widget; the mock host works: /mock.html)')
+      throw new Error('no matrix transport')
+    }
+    const m = net as import('./matrix/net').MatrixNet
+    try {
+      log(`uploading ${file.name} (${(file.size / 1024).toFixed(1)} kB)...`)
+      const mxc = await uploadWorldAsset(m.api, m.client, wp.roomId, file, 'script')
+      log(`world script set: ${mxc}`)
+      worldScriptChanged(mxc) // don't wait for our own state echo
+    } catch (e) {
+      logErr('script upload failed', e)
+      throw e
+    }
+  }
   // In widget mode the panel can be tiny or hidden, so mirror every
   // diagnostic line to the console; debugging inside a host iframe with a
   // silent panel is otherwise guesswork.
@@ -157,18 +198,41 @@ async function main() {
     }
   }
 
+  // Ephemeral shared line entities ride beside the session protocol:
+  // latest-wins per (author, id), purely cosmetic, so they are intercepted
+  // before receive().
+  const onMsg = (from: string, msg: DcMessage) => {
+    if (msg.kind === 'line') {
+      view.setLine(`${msg.peer}/${msg.id}`, msg.points.length ? msg.points : null,
+        msg.color, msg.opacity, msg.width, msg.worldUnits)
+      return
+    }
+    session.receive(from, msg)
+  }
+  // A departed peer takes its shared lines with it, and the primary clears
+  // any claims it left behind (its own session can no longer unclaim them).
+  const onLeft = (id: string) => {
+    session.peerLeft(id)
+    view.removeLines(`${id}/`)
+    if (isRoot()) {
+      for (const [pid, p] of sim.props) {
+        if (p.claim === id) session.emit('unclaim', pid, { pos: { x: 0, y: 0, z: 0 }, force: true })
+      }
+    }
+  }
+
   if (net instanceof Net) {
     net.onJoined = (id, order, alone) => session.identity(id, order, alone)
-    net.onMessage = (peer, msg) => session.receive(peer.id, msg)
+    net.onMessage = (peer, msg) => onMsg(peer.id, msg)
     net.onPeerConnected = peer => session.peerConnected(peer.id, peer.order)
-    net.onPeerLeft = id => session.peerLeft(id)
+    net.onPeerLeft = onLeft
     net.onLog = log
   } else {
     const m = net as import('./matrix/net').MatrixNet
     m.onJoined = (id, order, alone) => { log(`joined as ${id} (order ${order}${alone ? ', alone: rooting grid' : ''})`); session.identity(id, order, alone) }
-    m.onMessage = (from, msg) => session.receive(from, msg)
+    m.onMessage = onMsg
     m.onPeerConnected = (id, order) => { log(`peer connected ${id} (#${order})`); session.peerConnected(id, order) }
-    m.onPeerLeft = id => session.peerLeft(id)
+    m.onPeerLeft = onLeft
     m.onLog = log
     // Room already has an MSC3815 scene: fetch, parse, and adopt it before
     // the sim's first tick (connect() awaits this before joining the RTC
@@ -206,15 +270,29 @@ async function main() {
     })
   }
 
-  // --- MSC3815 script_url: WebSG-subset scripts, root-peer authority ---
-  // The script runs ONLY on the current root peer (lowest join order);
-  // everything it does leaves the sandbox as ordinary ops, which is what
-  // keeps remote peers deterministic. Every peer tracks the url so a root
-  // handover just starts the script on the successor (state resets).
+  // --- MSC3815 script_url: WebSG-subset scripts on EVERY peer ---
+  // Each peer runs its own script instance, uncoordinated: everything a
+  // script does leaves the sandbox as ordinary ops, so peers fold script
+  // effects exactly like human input. Claims coordinate sustained
+  // interactions (racing claims resolve deterministically by timeline
+  // order); single-runner logic (board init, ambient behaviour) keys off
+  // world.me.primary, which names the senior-most REACHABLE peer.
   let scriptUrl: string | null = null
   let script: import('./websg').WorldScript | null = null
   let scriptFor: string | null = null
   let scriptStarting = false
+  let scriptPointerOn = false
+  let scriptKeysOn = false
+  // Arrow keys go to the script while it defines world.onkeydown; typing
+  // in the panel or the monaco editor keeps them (same guard as M/V).
+  addEventListener('keydown', e => {
+    if (!script || !scriptKeysOn || e.metaKey || e.ctrlKey || e.altKey) return
+    if (![' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return
+    const t = e.target as HTMLElement | null
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
+    e.preventDefault()
+    script.key({ key: e.key })
+  })
   let lastScriptTick = 0
   const scriptSrc = new Map<string, string>()
   const scriptFetches = new Set<string>()
@@ -223,11 +301,11 @@ async function main() {
     scriptUrl = url
     log(url ? `world script in room state: ${url}` : 'world script cleared')
   }
-  // Script authority goes to the senior-most REACHABLE peer, not the senior
+  // Primacy goes to the senior-most REACHABLE peer, not the senior
   // membership: a ghost membership (dead tab, killed session) must not hold
-  // the script hostage. During a partition both sides can briefly believe
-  // they are root (split-brain: doubled script effects) - a real fix needs
-  // consensus, which the jig deliberately does not have.
+  // single-runner logic hostage. During a partition both sides can briefly
+  // believe they are primary (split-brain: doubled effects) - a real fix
+  // needs consensus, which the jig deliberately does not have.
   const isRoot = () => {
     if (!session.ready()) return false
     for (const p of session.peers.values()) {
@@ -235,8 +313,187 @@ async function main() {
     }
     return true
   }
+  const propView = (id: string, p: import('./sim').Prop) => ({
+    id, x: p.pos.x, y: p.pos.y, z: p.pos.z, color: p.color, size: p.size, kind: p.kind,
+    claimedBy: p.claim ?? '', mine: p.claim === session.id,
+  })
+  // The script's line entities: rendered locally under our author key, and
+  // (when shared) broadcast as full latest-wins state per (author, id).
+  const scriptLines = new Map<string, boolean>() // id -> shared
+  const scriptScreens = new Set<string>()
+  const scriptLabels = new Set<string>()
+  // Flipped by the first screen a script places; gates the camera toggle,
+  // so worlds that never ask for video never show it.
+  let videoWanted = false
+  // world.say: the script chats into the room as this user. Rate-limited
+  // here (not in the sandbox) so a buggy onupdate cannot flood the room;
+  // outside widget mode there is no room, so it just logs.
+  let lastSay = 0
+  const scriptSay = (text: string) => {
+    const t = text.slice(0, 500)
+    if (!wp) { log(`[script chat] ${t}`); return }
+    if (performance.now() - lastSay < 1000) { log(`script chat dropped (rate limit): ${t}`); return }
+    lastSay = performance.now()
+    const m = net as import('./matrix/net').MatrixNet
+    void m.client.sendTextMessage(wp.roomId, t).catch(e => logErr('script chat failed', e))
+  }
+
+  // world.hud: an HTML overlay the script fully owns. The sandbox exists
+  // so scripts CANNOT touch the page, so the HTML goes through
+  // sanitize-html with an ALLOWLIST - element-web's Matrix-message
+  // subset (its Linkify.ts sanitizeHtmlParams) - rather than any
+  // blacklist. Styles are restricted to a cosmetic property set instead
+  // of element-web's data-mx-* transformation dance, and only https
+  // image sources survive. Identical updates are deduped so scripts may
+  // call it every frame.
+  const HUD_STYLE_VALUE = [/^[#\w(),.%/ -]{1,200}$/]
+  const HUD_SANITIZE: sanitizeHtml.IOptions = {
+    allowedTags: [
+      'font', 'del', 's', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'blockquote', 'p', 'a', 'ul', 'ol',
+      'sup', 'sub', 'nl', 'li', 'b', 'i', 'u', 'strong', 'em', 'strike', 'code', 'hr', 'br', 'div',
+      'table', 'thead', 'caption', 'tbody', 'tr', 'th', 'td', 'pre', 'span', 'img', 'details', 'summary',
+    ],
+    allowedAttributes: {
+      font: ['color', 'style'],
+      span: ['style'],
+      a: ['href', 'name', 'target', 'rel'],
+      img: ['src', 'alt', 'title', 'width', 'height'],
+      ol: ['start'],
+      code: ['class'],
+    },
+    allowedStyles: {
+      '*': {
+        'color': HUD_STYLE_VALUE, 'background-color': HUD_STYLE_VALUE,
+        'font-weight': HUD_STYLE_VALUE, 'font-style': HUD_STYLE_VALUE, 'font-size': HUD_STYLE_VALUE,
+        'text-decoration': HUD_STYLE_VALUE, 'text-align': HUD_STYLE_VALUE,
+        'padding': HUD_STYLE_VALUE, 'margin': HUD_STYLE_VALUE, 'opacity': HUD_STYLE_VALUE,
+      },
+    },
+    allowedSchemes: ['https', 'http', 'mailto', 'matrix'],
+    allowedSchemesByTag: { img: ['https'] },
+    allowProtocolRelative: false,
+    nestingLimit: 50,
+    // an img whose src the scheme filter ate is a husk; drop it whole
+    exclusiveFilter: (frame) => frame.tag === 'img' && !frame.attribs.src,
+  }
+  let hudEl: HTMLElement | null = null
+  let hudLast = ''
+  const scriptHud = (html: string) => {
+    if (html === hudLast) return
+    hudLast = html
+    if (!hudEl) {
+      hudEl = document.createElement('div')
+      hudEl.id = 'hud'
+      document.body.appendChild(hudEl)
+    }
+    hudEl.innerHTML = sanitizeHtml(html, HUD_SANITIZE)
+    hudEl.style.display = html.trim() ? 'block' : 'none'
+  }
+
+  // world.getStateEvents / world.setStateEvent: real Matrix room state,
+  // scoped to the SCRIPT_STATE_TYPES allowlist and, for writes, to OUR
+  // OWN MXID as the state key (core auth rules bar writing anyone else's
+  // @-prefixed key, so per-user events cannot clobber each other;
+  // nothing stops lying in your own - no witnessing yet). The widget
+  // capabilities for these are NOT part of the boot handshake: they are
+  // renegotiated (MSC2974) on the first state API call, so worlds that
+  // never touch room state never prompt the user for it. Content is
+  // entirely the script's business - the example games keep top-10
+  // highscore lists in io.element.highscores - the host only stores,
+  // capping size and rate. Reads are local cosmetics for HUDs and never
+  // touch the sim. Outside widget mode an in-memory map stands in so
+  // scripts behave; it dies with the tab.
+  const scriptUser = () => wp ? wp.userId : session.id
+  let stateCaps: Promise<void> | null = null
+  // Events that PREDATE the grant need an explicit fetch: only hosts on a
+  // recent widget-api re-push current room state after an MSC2974
+  // renegotiation, so without this a room's standing high scores never
+  // load. Kept as a fallback layer under the live-pushed room state.
+  const stateBackfill = new Map<string, Map<string, { sender: string; ts: number; content: unknown }>>()
+  const ensureStateCaps = (): Promise<void> => {
+    if (!wp) return Promise.resolve()
+    const m = net as import('./matrix/net').MatrixNet
+    return stateCaps ??= requestScriptStateCapabilities(m.api, wp.userId)
+      .then(async () => {
+        for (const type of SCRIPT_STATE_TYPES) {
+          try {
+            const forType = stateBackfill.get(type) ?? new Map<string, { sender: string; ts: number; content: unknown }>()
+            for (const ev of await m.api.readStateEvents(type, undefined, undefined, [wp.roomId])) {
+              if ((ev.room_id && ev.room_id !== wp.roomId) || typeof ev.state_key !== 'string') continue
+              const prev = forType.get(ev.state_key)
+              if (!prev || prev.ts <= ev.origin_server_ts) {
+                forType.set(ev.state_key, { sender: ev.sender, ts: ev.origin_server_ts, content: ev.content })
+              }
+            }
+            stateBackfill.set(type, forType)
+          } catch (e) {
+            logErr(`room-state backfill failed for ${type}`, e)
+          }
+        }
+      })
+      .catch(e => {
+        stateCaps = null // a transport hiccup should not wedge state access for good
+        throw e
+      })
+  }
+  const memState = new Map<string, Map<string, unknown>>() // type -> stateKey -> content
+  const scriptGetStateEvents = (type: string) => {
+    if (!SCRIPT_STATE_TYPES.includes(type)) {
+      log(`getStateEvents: event type not allowlisted: ${type}`)
+      return []
+    }
+    if (!wp) {
+      return [...(memState.get(type) ?? [])].map(([stateKey, content]) =>
+        ({ type, stateKey, sender: scriptUser(), ts: 0, content }))
+    }
+    // first touch kicks off the capability grab; until the grant (and its
+    // backfill) lands, reads just come back empty. Live-pushed room state
+    // shadows the backfill per state key
+    void ensureStateCaps().catch(e => logErr('room-state capability request failed', e))
+    const m = net as import('./matrix/net').MatrixNet
+    const out = new Map<string, { type: string; stateKey: string; sender: string; ts: number; content: unknown }>()
+    for (const [stateKey, e] of stateBackfill.get(type) ?? []) {
+      out.set(stateKey, { type, stateKey, sender: e.sender, ts: e.ts, content: e.content })
+    }
+    for (const ev of m.client.getRoom(wp.roomId)?.currentState.getStateEvents(type) ?? []) {
+      const stateKey = ev.getStateKey() ?? ''
+      out.set(stateKey, { type, stateKey, sender: ev.getSender() ?? '', ts: ev.getTs(), content: ev.getContent() as unknown })
+    }
+    return [...out.values()]
+  }
+  let lastStateWrite = -Infinity
+  const scriptSetStateEvent = (type: string, json: string, stateKey: string) => {
+    if (!SCRIPT_STATE_TYPES.includes(type)) {
+      log(`setStateEvent: event type not allowlisted: ${type}`)
+      return
+    }
+    if (stateKey !== scriptUser()) {
+      log(`setStateEvent: scripts may only write their own state key (${scriptUser()})`)
+      return
+    }
+    if (json.length > 16384) { log('setStateEvent dropped: content over 16KB'); return }
+    let content: unknown
+    try { content = JSON.parse(json) } catch { return }
+    if (performance.now() - lastStateWrite < 2000) { log('setStateEvent dropped (rate limit)'); return }
+    lastStateWrite = performance.now()
+    if (!wp) {
+      const forType = memState.get(type) ?? new Map<string, unknown>()
+      forType.set(stateKey, content)
+      memState.set(type, forType)
+      return
+    }
+    const m = net as import('./matrix/net').MatrixNet
+    const sendState = m.client.sendStateEvent.bind(m.client) as
+      (roomId: string, type: string, content: unknown, stateKey: string) => Promise<unknown>
+    void ensureStateCaps()
+      .then(() => sendState(wp.roomId, type, content, stateKey))
+      .catch(e => logErr('setStateEvent failed (no permission to send room state?)', e))
+  }
+
   const scriptHost: import('./websg').ScriptHost = {
     log: l => log(`[script] ${l}`),
+    say: scriptSay,
+    hud: scriptHud,
     boxes: () => {
       const out = []
       for (const netId of sim.bodies.keys()) {
@@ -289,13 +546,166 @@ async function main() {
       session.emit('release', id, { pos: { x: p.x, y: p.y, z: p.z }, vel: { x: vx, y: vy, z: vz } })
       return true
     },
+    me: () => ({ id: session.id, user: scriptUser(), primary: isRoot(), color: peerColor(session.id) }),
+    peers: () => {
+      const out = [{ id: session.id, order: session.order, color: peerColor(session.id), me: true }]
+      for (const p of session.peers.values()) {
+        if (!p.excluded) out.push({ id: p.id, order: p.order, color: peerColor(p.id), me: false })
+      }
+      return out.sort((a, b) => a.order - b.order)
+    },
+    getStateEvents: scriptGetStateEvents,
+    setStateEvent: scriptSetStateEvent,
+    props: () => [...sim.props].map(([id, p]) => propView(id, p)),
+    prop: id => {
+      const p = sim.props.get(id)
+      return p ? propView(id, p) : null
+    },
+    spawnProp: (kind, x, y, z, color, size, unlit, bounce, pop, opacity) => {
+      const id = session.nextNetId()
+      // bounce/pop/opacity are only carried when non-default, keeping the
+      // common op lean
+      session.emit('prop', id, {
+        pos: { x, y, z }, color, shape: kind, size, unlit,
+        ...(bounce ? {} : { bounce: false }), ...(pop ? {} : { pop: false }),
+        ...(opacity >= 1 ? {} : { opacity: Math.max(0, opacity) }),
+      })
+      return id
+    },
+    spawnSolid: (x, y, z, yaw, w, h, d) => {
+      const id = session.nextNetId()
+      session.emit('prop', id, { pos: { x, y, z }, shape: 'collider', yaw, dims: { x: w, y: h, z: d }, solid: true })
+      return id
+    },
+    despawn: id => {
+      if (!sim.props.has(id) && !sim.bodies.has(id)) return false
+      session.emit('despawn', id, { pos: { x: 0, y: 0, z: 0 } })
+      return true
+    },
+    claim: id => {
+      const p = sim.props.get(id)
+      if (!p || (p.claim !== null && p.claim !== session.id)) return false
+      session.emit('claim', id, { pos: { x: 0, y: 0, z: 0 } })
+      return true
+    },
+    unclaim: id => {
+      const p = sim.props.get(id)
+      if (!p || p.claim !== session.id) return false
+      session.emit('unclaim', id, { pos: { x: 0, y: 0, z: 0 } })
+      return true
+    },
+    setPos: (id, x, y, z) => {
+      if (!sim.props.has(id)) return false
+      session.emit('move', id, { pos: { x, y, z } })
+      return true
+    },
+    paint: (id, color) => {
+      if (!sim.props.has(id)) return false
+      session.emit('paint', id, { pos: { x: 0, y: 0, z: 0 }, color })
+      return true
+    },
+    getData: key => sim.data.get(key) ?? null,
+    dataKeys: () => [...sim.data.keys()].sort(),
+    setData: (key, json) => {
+      if (json.length > 4096) { log(`setData('${key}') dropped: value over 4KB`); return false }
+      // a same-value write is dropped here rather than folded: it could
+      // only churn the timeline (last-write-wins makes it a no-op)
+      if ((sim.data.get(key) ?? '') === json) return true
+      session.emit('data', key, { pos: { x: 0, y: 0, z: 0 }, data: json })
+      return true
+    },
+    line: (id, pointsJson, color, opacity, width, worldUnits, shared) => {
+      const points = pointsJson ? JSON.parse(pointsJson) as { x: number; y: number; z: number }[] : []
+      scriptLines.set(id, shared)
+      view.setLine(`${session.id}/${id}`, points, color, opacity, width, worldUnits)
+      if (shared) {
+        (net as NetLike).broadcast({ kind: 'line', peer: session.id, id, points, color, opacity, width, worldUnits })
+      }
+    },
+    removeLine: id => {
+      const shared = scriptLines.get(id)
+      if (shared === undefined) return
+      scriptLines.delete(id)
+      view.setLine(`${session.id}/${id}`, null, 0, 0, 0, false)
+      if (shared) {
+        (net as NetLike).broadcast({
+          kind: 'line', peer: session.id, id, points: [], color: 0, opacity: 0, width: 0, worldUnits: false,
+        })
+      }
+    },
+    screen: (id, peer, x, y, z, yaw, w, h) => {
+      scriptScreens.add(id)
+      if (!videoWanted) { videoWanted = true; camUi() }
+      view.setScreen(`${session.id}/${id}`, peer, { x, y, z }, yaw, w, h)
+    },
+    removeScreen: id => {
+      scriptScreens.delete(id)
+      view.removeScreen(`${session.id}/${id}`)
+    },
+    label: (id, text, x, y, z, yaw, h, color, flat) => {
+      scriptLabels.add(id)
+      view.setLabel(`${session.id}/${id}`, text.slice(0, 64), { x, y, z }, yaw, h, color, flat)
+    },
+    removeLabel: id => {
+      scriptLabels.delete(id)
+      view.removeLabel(`${session.id}/${id}`)
+    },
+    setEnv: json => view.setEnvironment(JSON.parse(json)),
+    setCamera: (x, y, z, tx, ty, tz) => view.setCameraPose({ x, y, z }, { x: tx, y: ty, z: tz }),
+  }
+
+  // Pointer events for the script: raycast the prop layer, hand the script
+  // the hit plus the raw ray (for its own plane math), and capture the
+  // gesture away from box spawning/grabbing when a prop was hit.
+  const scriptRay = new Raycaster()
+  const scriptNdc = new Vector2()
+  const scriptEv = (e: PointerEvent) => {
+    const r = view.renderer.domElement.getBoundingClientRect()
+    scriptNdc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1)
+    scriptRay.setFromCamera(scriptNdc, view.camera)
+    const hit = view.props.pick(scriptRay)
+    const o = scriptRay.ray.origin, d = scriptRay.ray.direction
+    return {
+      entity: hit?.id ?? null,
+      point: hit ? { x: hit.point.x, y: hit.point.y, z: hit.point.z } : null,
+      origin: { x: o.x, y: o.y, z: o.z },
+      dir: { x: d.x, y: d.y, z: d.z },
+    }
+  }
+  const scriptPointerDelegate: import('./input').ScriptPointer = {
+    down: e => {
+      if (!script || !scriptPointerOn) return false
+      const ev = scriptEv(e)
+      if (!ev.entity) return false
+      script.pointer('onpointerdown', ev)
+      return true
+    },
+    move: e => script?.pointer('onpointermove', scriptEv(e)),
+    up: e => script?.pointer('onpointerup', scriptEv(e)),
+  }
+  const stopScript = (why: string) => {
+    if (!script) return
+    script.dispose()
+    script = null
+    scriptPointerOn = false
+    scriptKeysOn = false
+    for (const id of [...scriptLines.keys()]) scriptHost.removeLine(id) // its lines go with it
+    for (const id of [...scriptScreens]) scriptHost.removeScreen(id) // and its screens
+    for (const id of [...scriptLabels]) scriptHost.removeLabel(id) // and its labels
+    if (videoWanted) {
+      videoWanted = false
+      stopCam() // no world is asking for video anymore: stop publishing
+    }
+    view.setEnvironment({}) // back to the default look
+    scriptHud('') // its HUD goes with it
+    log(why)
   }
   const syncScript = () => {
-    const want = scriptUrl !== null && wp !== null && isRoot()
+    // Scripts wait for the session: they read sim state and emit ops from
+    // the first dispatch, neither of which means anything before startAt.
+    const want = scriptUrl !== null && wp !== null && session.ready()
     if (script && (!want || scriptFor !== scriptUrl)) {
-      script.dispose()
-      script = null
-      log(!want ? 'world script stopped (not root here)' : 'world script replaced')
+      stopScript(!want ? 'world script stopped' : 'world script replaced')
     }
     if (!want) return
     const url = scriptUrl!
@@ -309,18 +719,23 @@ async function main() {
         .catch(e => { scriptFetches.delete(url); log(`script fetch failed: ${e}`) })
       return
     }
-    if (!script && !scriptStarting) {
+    // A boot seam still in flight means the world the script would read
+    // (and might seed!) is about to be replaced: hold the start until it
+    // lands, or a rejoining primary plants a second board on everyone.
+    if (!script && !scriptStarting && session.worldSettled()) {
       scriptStarting = true
       import('./websg')
         .then(({ WorldScript }) => WorldScript.create(src, scriptHost))
         .then(s => {
           scriptStarting = false
-          if (scriptUrl !== url || !isRoot()) { s.dispose(); return }
+          if (scriptUrl !== url) { s.dispose(); return }
           script = s
           scriptFor = url
+          scriptPointerOn = s.handles('onpointerdown')
+          scriptKeysOn = s.handles('onkeydown')
           lastScriptTick = sim.tick
           s.enter()
-          log('world script running (this peer is root)')
+          log(`world script running${isRoot() ? ' (this peer is primary)' : ''}`)
         })
         .catch(e => {
           scriptStarting = false
@@ -334,10 +749,8 @@ async function main() {
       lastScriptTick = sim.tick
       script.update(dt, (sim.tick - session.startTick) / 60)
       if (script.dead) {
-        script.dispose()
-        script = null
         scriptSrc.delete(scriptFor!)
-        log('world script disabled after repeated errors')
+        stopScript('world script disabled after repeated errors')
       }
     }
   }
@@ -357,11 +770,101 @@ async function main() {
     streamPose: (netId, pos) => session.streamPose(netId, pos),
   }
   const input = new Input(view, out)
+  input.scriptPointer = scriptPointerDelegate
+
+  // Voice, muted by default: the mic is never captured or published until
+  // the first unmute (M toggles it), so joining a world never prompts for
+  // permission on its own. Remote peers' audio always plays - hearing
+  // others needs no mic of your own.
+  let micLive = false
+  let micBusy = false
+  const audioNet = net as { hasAudio?: () => boolean; setMicEnabled?: (on: boolean) => Promise<boolean> }
+  const toggleMic = () => {
+    if (!audioNet.hasAudio?.()) {
+      log('voice needs the LiveKit transport (the mock host and ws demo have no media path)')
+      return
+    }
+    if (micBusy) return // a permission prompt is likely up; don't queue flips
+    micBusy = true
+    audioNet.setMicEnabled!(!micLive)
+      .then(on => { micLive = on; log(on ? 'mic live (M mutes)' : 'mic muted (M unmutes)') })
+      .catch(e => logErr('mic toggle failed', e))
+      .finally(() => { micBusy = false; micUi() })
+  }
+  addEventListener('keydown', e => {
+    if ((e.key !== 'm' && e.key !== 'M') || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return
+    const t = e.target as HTMLElement | null
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
+    toggleMic()
+  })
+  // On-canvas mute state, always visible (the panel can be collapsed or
+  // tiny in a widget iframe); hidden on transports with no media path.
+  const micBtn = document.createElement('button')
+  micBtn.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:20;display:none;'
+    + 'padding:8px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.3);cursor:pointer;'
+    + 'font:13px system-ui,sans-serif;color:#fff;background:rgba(20,24,32,0.75)'
+  micBtn.onclick = () => toggleMic()
+  document.body.appendChild(micBtn)
+  // Redrawn on the events that can change it: a mic toggle settling, and
+  // the transport coming up mid-connect (hasAudio flips exactly once).
+  const micUi = () => {
+    if (!audioNet.hasAudio?.()) { micBtn.style.display = 'none'; return }
+    micBtn.style.display = 'block'
+    micBtn.textContent = micLive ? '\u{1F399} mic live · click to mute (M)' : '\u{1F507} muted · click to talk (M)'
+    micBtn.style.background = micLive ? 'rgba(46,125,50,0.9)' : 'rgba(20,24,32,0.75)'
+  }
+  micUi()
+
+  // Camera, same lifecycle as the mic (never captured until the first
+  // enable), but only offered while a world script has placed video
+  // screens: without one the pixels would have nowhere to go.
+  let camLive = false
+  let camBusy = false
+  const videoNet = net as { hasVideo?: () => boolean; setCameraEnabled?: (on: boolean) => Promise<boolean> }
+  const toggleCam = () => {
+    if (!videoWanted) return
+    if (!videoNet.hasVideo?.()) {
+      log('video needs the LiveKit transport (the mock host and ws demo have no media path)')
+      return
+    }
+    if (camBusy) return // a permission prompt is likely up; don't queue flips
+    camBusy = true
+    videoNet.setCameraEnabled!(!camLive)
+      .then(on => { camLive = on; log(on ? 'camera live (V stops it)' : 'camera off (V shares it)') })
+      .catch(e => logErr('camera toggle failed', e))
+      .finally(() => { camBusy = false; camUi() })
+  }
+  const stopCam = () => {
+    if (camLive) void videoNet.setCameraEnabled?.(false).then(() => { camLive = false; camUi() })
+    else camUi()
+  }
+  addEventListener('keydown', e => {
+    if ((e.key !== 'v' && e.key !== 'V') || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return
+    const t = e.target as HTMLElement | null
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
+    toggleCam()
+  })
+  const camBtn = document.createElement('button')
+  camBtn.style.cssText = 'position:fixed;left:12px;bottom:52px;z-index:20;display:none;'
+    + 'padding:8px 14px;border-radius:20px;border:1px solid rgba(255,255,255,0.3);cursor:pointer;'
+    + 'font:13px system-ui,sans-serif;color:#fff;background:rgba(20,24,32,0.75)'
+  camBtn.onclick = () => toggleCam()
+  document.body.appendChild(camBtn)
+  const camUi = () => {
+    if (!videoWanted || !videoNet.hasVideo?.()) { camBtn.style.display = 'none'; return }
+    camBtn.style.display = 'block'
+    camBtn.textContent = camLive ? '\u{1F4F9} camera live · click to stop (V)' : '\u{1F4F7} camera off · click to share (V)'
+    camBtn.style.background = camLive ? 'rgba(46,125,50,0.9)' : 'rgba(20,24,32,0.75)'
+  }
+  if ('onVideo' in net) {
+    (net as import('./matrix/net').MatrixNet).onVideo = (peer, track) => view.setVideoTrack(peer, track)
+  }
 
   if (net instanceof Net) net.connect(room)
   else {
     (net as import('./matrix/net').MatrixNet)
       .connect(wp!, params.get('lkService'), widgetBoot!)
+      .then(() => { micUi(); camUi() })
       .catch(e => { log(`matrix connect failed: ${e}`); console.error('[worldsync]', e) })
   }
 
@@ -377,6 +880,7 @@ async function main() {
     session.advance()
     sim.mirror()
     view.syncBodies(sim.bodies.keys())
+    view.props.sync(sim.props, now)
     syncScene()
     syncScript()
     const alpha = session.calibrated
@@ -385,6 +889,7 @@ async function main() {
     view.frame(now, alpha)
     ui.maybe(now, () => ({
       room, id: session.id, order: session.order,
+      mic: audioNet.hasAudio?.() ? (micLive ? 'live - M mutes' : 'muted - M unmutes') : 'n/a',
       entities: sim.bodies.size, tick: sim.tick - session.startTick, stepMs: sim.stepMs,
       perf: sim.perf, norm: sim.cadence > 1 ? `${sim.normalizeMode}/${sim.cadence}` : sim.normalizeMode,
       rollbacks: sim.rollbacks, lastDepth: sim.lastReplayDepth,
@@ -421,6 +926,14 @@ async function main() {
       if (!b) return null
       const p = b.translation()
       return { x: p.x, y: p.y, z: p.z }
+    },
+    props: () => [...sim.props].map(([id, p]) => ({ id, ...p.pos, color: p.color, claim: p.claim })),
+    screenOfProp: (netId: string) => {
+      const p = sim.props.get(netId)
+      if (!p) return null
+      const v = new Vector3(p.pos.x, p.pos.y, p.pos.z).project(view.camera)
+      const el = view.renderer.domElement
+      return { x: ((v.x + 1) / 2) * el.clientWidth, y: ((1 - v.y) / 2) * el.clientHeight }
     },
     screenPos: (netId: string) => {
       const eid = sim.ecs.entityFor(netId)

@@ -1,8 +1,14 @@
 # worldsync
 
-A test jig for experimenting with peer-to-peer multiplayer physics: Three.js
-rendering, bitECS entities, Rapier simulation, WebRTC data channels, and
-rollback netcode with rubber-band presentation.
+Peer-to-peer multiplayer physics on Matrix: Three.js rendering, bitECS
+entities, deterministic Rapier simulation, and rollback netcode with
+rubber-band presentation, running as a Matrix widget on MatrixRTC (the
+E2EE calling stack behind Element Call). Identity, membership and
+encryption come from the host client through the matryoshka widget API;
+sim data and voice ride the MatrixRTC LiveKit SFU. The original
+standalone jig (Vite dev server signaling a WebRTC mesh) survives as the
+zero-infrastructure dev loop, and a mock widget host exercises the full
+widget stack without a homeserver.
 
 Every participant runs their own full Rapier simulation. There is no server
 authority. Replication happens on two planes: discrete ops (spawn, grab,
@@ -11,7 +17,7 @@ peer folds in by rolling the physics world back and replaying, while
 continuous drag motion travels as latest-wins pose streams that never cause
 rollbacks and are healed in batches by heartbeat folds.
 
-## Run it
+## Run it (standalone demo)
 
 ```
 npm install
@@ -46,8 +52,12 @@ Matrix widget instead of the ws demo: matrix-widget-api + matrix-js-sdk's
 `createRoomWidgetClient` proxy everything through the host client, so
 identity and encryption are inherited from it. Room presence is MatrixRTC
 (`m.call.member` state events); each member's `createdTs` is its join
-order, and the oldest member roots the tick grid. Data travels as LiveKit
-text streams (topic `worldsync`), with the SFU url + JWT obtained via the
+order, and the oldest member roots the tick grid. Data travels over
+LiveKit's reliable data channel (topic `worldsync`): retransmitted and
+per-sender ordered, which the session's beat-attestation rule depends on
+(text streams were tried first, but each sendText is its own chunked
+stream delivered in completion order, so a beat could overtake the ops
+sent just before it and get them struck). The SFU url + JWT come from the
 OpenID exchange against an lk-jwt-service (element-call's flow; override
 the service url with `?lkService=`). The Session and Sim are identical in
 both modes - MatrixNet is just another transport behind the same seam.
@@ -96,46 +106,76 @@ repo to share bytes through, so its button just explains that.
 the world state event. The script runs in a QuickJS-in-WASM sandbox
 (quickjs-emscripten, singlefile variant) with a 32MB memory limit, 1MB
 stack, and a 20ms interrupt deadline per hook call - tighter than
-thirdroom's runtime, which relies on its fixed 64MiB WASM heap alone. The
-API is a WebSG-flavoured subset: `world.onload` / `world.onenter` /
-`world.onupdate(dt, time)`, `world.createNode({translation, color})`,
-`world.findNodeByName`, `world.boxes()`, `node.translation`, plus
-worldsync extensions `node.grab()` / `node.moveTo()` / `node.release(vel)`
-for driving bodies through the grab pipeline. `examples/stir.js` is an
-uploadable demo.
+thirdroom's runtime, which relies on its fixed 64MiB WASM heap alone.
 
-The execution model deliberately differs from thirdroom. There, every
-peer runs the script with its own wall-clock `dt` and networking is
-owner-authoritative replication plus interpolation - fine for that
-engine, fatal for deterministic lockstep (each peer's sandbox would read
-rolled-back state and diverge, and QuickJS heaps cannot be snapshotted
-into the rollback history). Here the script runs ONLY on the current
-root peer, and everything it does leaves the sandbox as ordinary ops
-(spawn / grab / pose / release) on the shared tick grid: remote peers
-fold script effects exactly like human input, so determinism is
-preserved without the sandbox ever being rollback state. The trade: the
-script is a singleton with local state - a root handover (root closes or
-becomes unreachable) restarts it from scratch on the successor, and
-during a network partition both sides can briefly run it (split-brain,
-doubled effects) until connectivity settles. Script authority follows
-the senior-most *reachable* peer, so a ghost membership does not hold
-the script hostage even though it still blocks tick calibration.
+The execution model: EVERY peer runs its own script instance,
+uncoordinated and wall-clock, like thirdroom - but where thirdroom's
+WebSG hands scripts raw netcode (`network.broadcast`, listeners,
+replicators, `isHost`) and papers over disagreement with
+owner-authoritative interpolation, here the script never sees the
+network at all. **The sim is the network**: scripts read the
+deterministic sim state, and every mutation leaves the sandbox as an
+ordinary op on the shared tick grid, folded by all peers exactly like
+human input. QuickJS heaps are never rollback state; script state is
+per-peer and disposable. Two primitives make multi-peer scripts work:
 
-WebSG API gaps against thirdroom's surface, and how they collide with
-the world model: materials, lights, meshes, UI canvases, the action bar,
-ECS component stores, and collision listeners are all absent - worldsync
-has no deterministic backend for them, since the op vocabulary is the
-only mutation channel (a script-created material would exist on the root
-alone). `node.translation` is a read-only snapshot, not thirdroom's
-live write-through wrapper: writing a transform directly would bypass
-the tick grid, so movement must go through grab/moveTo/release.
-Collision events would need deterministic contact extraction from
-Rapier, which differs across peers inside the unsettled window; physics
-impulses (`PhysicsBody.applyImpulse`) would need a new op type to be
-foldable. `network.*` (host detection, broadcast, replicators) is
-unnecessary by construction - replication IS the sim - but that also
-means scripts cannot yet react to per-peer input, and raw-WASM scripts
-(which thirdroom accepts alongside JS) are not supported.
+- **Claims.** Props (see below) carry a `claim` field; a `claim` op only
+  applies to an unclaimed prop, so racing claims from rival peers
+  resolve deterministically by `(tick, order, seq)` with zero consensus
+  machinery. Sustained interactions (chaining dots) claim as they go and
+  `unclaim`/despawn on completion; `unclaim` is owner-only unless
+  `force` (the ghost path: the primary force-clears claims of departed
+  peers). One-shot ops never touch claims - they just race.
+- **`world.me.primary`.** True on the senior-most *reachable* peer.
+  Single-runner logic (board seeding, ambient behaviour) guards on it;
+  a handover flips the flag on the survivor's already-running instance.
+  During a partition both sides can briefly believe they are primary
+  (split-brain, doubled effects) until connectivity settles.
+
+The API surface, WebSG-flavoured: `world.onload/onenter/onupdate(dt,
+time)`; boxes via `world.createNode({translation, color})` /
+`world.boxes()` / `node.grab()/moveTo()/release(vel)` (the grab
+pipeline); props - kinematic, physics-free entities whose position /
+color / size / claim are folded sim state - via `world.createSphere`,
+`world.props()/prop(id)`, `world.claim/unclaim/move/paint/despawn`;
+pointer input via `world.onpointerdown/move/up(ev)` where `ev` carries
+the hit prop plus the raw ray (`WebSG.rayPlane` does plane math for drag
+previews) and a prop hit captures the gesture away from box spawning;
+cosmetics via generic line entities - `world.createLine({points, color,
+opacity, width, worldUnits, shared})` returns a handle whose
+points/color/opacity/width the script mutates (and animates) itself,
+drawn as fat lines (width in screen px, or world units for wire-like
+lines that scale with the camera); `shared` lines are broadcast
+latest-wins per (author, id) beside the protocol - never folded, never
+hashed - while local ones never leave the client (`world.me.color` is
+each peer's deterministic accent color for drawing in) - plus
+`world.env` (background/fog/ground) and `world.camera`. Prop motion is
+animated client-side (bounce drops, fade-in spawns, pop-out despawns):
+the sim stores logical poses, renderers add the juice.
+
+**`examples/dots.js` is dots-3d ported whole into the sandbox** - the
+proving example for all of the above. The 3x3x3 board is props; players
+race to claim dots as they drag chains (you cannot claim a dot someone
+holds - rival chains contest the board dot-by-dot and the timeline
+arbitrates); everyone watches everyone else's chain line wave around
+live; on release the acting peer computes the outcome (clears, column
+drops, refills, stalemate reshuffle) with its own local `Math.random`
+and ships it as ops, so no shared randomness or seed sync exists
+anywhere. Rollback races are handled in ~15 lines of script
+(`revalidate()`: drop chain links you turned out not to own).
+`examples/stir.js` shows the primary-guard pattern for ambient logic.
+
+Remaining WebSG API gaps against thirdroom's surface: materials,
+lights, arbitrary meshes, UI canvases, the action bar, and ECS component
+stores are absent (no deterministic backend - the op vocabulary is the
+only mutation channel). Collision events would need deterministic
+contact extraction from Rapier, which differs across peers inside the
+unsettled window; `applyImpulse` would need a new op type to be
+foldable. Raw-WASM scripts (thirdroom accepts them alongside JS) are
+not supported. Scripts doing tight read-act loops on *unsettled* state
+can double-fire across rollbacks; dots sidesteps this by being
+event-driven with idempotent one-shots, but a "settled reads only"
+dispatch mode is the structural fix if it bites.
 
 For the dev loop, `/mock.html?room=x` is a mock widget host: the real
 `ClientWidgetApi` against an in-memory widget driver whose room state is
@@ -149,14 +189,22 @@ test/mockwidget.mjs` asserts bit-exact convergence through this stack,
 late join included; `node test/scene.mjs` runs the full scene flow across
 three tabs (upload, live fetch, late-join preload) and asserts the healed
 peer converges to the bit; `node test/script.mjs` uploads a world script,
-asserts only the root runs it (with no divergence), then closes the root
-tab and asserts the survivor takes the script over.
+asserts only the primary emits ops (with no divergence), then closes the
+primary's tab and asserts the survivor's instance takes over; `node
+test/dots.mjs` plays dots for real - uploads `examples/dots.js`, waits
+for the board, drags a chain with the mouse, asserts the second tab sees
+the claims and the chain line mid-drag, then the clear + refills, all
+hash-clean.
 
 To embed for real, serve the app (dev server works: `npm run dev --
 --host`) and add it to a room in Element Web with
 
 ```
 /addwidget http://HOST:5173/?widgetId=$matrix_widget_id&userId=$matrix_user_id&deviceId=$org.matrix.msc3819.matrix_device_id&baseUrl=$org.matrix.msc4039.matrix_base_url&roomId=$matrix_room_id
+
+or for CI on the dots branch:
+
+/addwidget https://ara4n.github.io/worldsync/?widgetId=$matrix_widget_id&userId=$matrix_user_id&deviceId=$org.matrix.msc3819.matrix_device_id&baseUrl=$org.matrix.msc4039.matrix_base_url&roomId=$matrix_room_id
 ```
 
 (Element Web substitutes the `$`-templates and appends `parentUrl`
@@ -169,9 +217,15 @@ overrides all of that. Status: verified END-TO-END against Element
 Desktop + matrix.org + livekit-jwt.call.matrix.org - handshake,
 capability grant (the widget logs the approved/denied sets, since a
 quietly-denied capability presents as a silent hang), OpenID -> SFU JWT
-exchange, LiveKit connect, scene upload/download and play. LiveKit text
-streams are not yet end-to-end encrypted - wiring the MatrixRTC key
-events into payload encryption is the natural next step. Ghost
+exchange, LiveKit connect, scene upload/download and play. Voice rides
+the same LiveKit room: the mic starts muted and is never captured or
+published until the first unmute (M or the on-canvas mic button toggles,
+so joining never prompts for permission by itself), while remote peers'
+audio always plays - hearing others needs no mic of your own (the mock
+host and the ws demo have no media path, so the toggle just logs there).
+The LiveKit payloads (data channel and voice) are not yet end-to-end
+encrypted - wiring the MatrixRTC key events into payload encryption is
+the natural next step. Ghost
 `m.call.member`s from killed sessions no longer stall calibration: a
 joiner gives seniors 3s to become reachable on the transport, then
 writes them off and roots the tick grid itself (a senior that shows up
@@ -418,9 +472,16 @@ serialisation hazards stay exercised.
   joiner whose scene preload FAILS joins without colliders and diverges
   on scene contacts until a new scene op arrives; the failure is logged
   but not retried.
-- World scripts are root-singleton with unreplicated state: a root
-  handover restarts the script from scratch, and a partition can run it
-  on both sides at once (doubled effects) until connectivity settles.
-  The sandbox has no clock/network access, so a hostile script is
-  bounded to what ops can do - but ops are exactly what a hostile PEER
-  can already do, so the trust model is unchanged.
+- World-script state is per-peer and unreplicated by design (only ops
+  replicate): primary-guarded ambient logic restarts from scratch on a
+  handover, and a partition can run it on both sides at once (doubled
+  effects) until connectivity settles. The sandbox has no clock/network
+  access, so a hostile script is bounded to what ops can do - but ops
+  are exactly what a hostile PEER can already do, so the trust model is
+  unchanged.
+- Claims are cooperative, not access control: any peer can force-unclaim
+  (needed for ghost cleanup, usable for griefing), and nothing yet maps
+  Matrix power levels onto who may claim/move/despawn what. Doing that
+  deterministically means feeding ACL changes through the timeline as
+  ops (room state arrives at different wall times per peer), with
+  Matrix state as the source that stamps them - designed, not built.

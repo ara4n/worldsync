@@ -16,6 +16,7 @@
   }
   #panel h1 { font-size: 13px; margin: 0 0 6px; color: #e6edf3; cursor: pointer; }
   #panel h1 .caret { color: #8b949e; font-size: 11px; }
+  #panel h1 .commit { color: #8b949e; font-size: 11px; font-weight: normal; }
   #panel #body { overflow-y: auto; min-height: 0; }
   #panel.collapsed #body { display: none; }
   #panel.collapsed h1 { margin-bottom: 0; }
@@ -29,6 +30,61 @@
   #panel .hint { color: #8b949e; }
   #panel #status { margin-top: 8px; }
   #panel #log { margin-top: 8px; border-top: 1px solid #30363d; padding-top: 6px; color: #8b949e; }
+  /* script editor and glTF inspector: overlays docked left, out of the
+     stats panel's way, sharing the panel's dark chrome */
+  #editor, #inspector {
+    position: fixed; top: 10px; left: 10px; bottom: 10px; z-index: 10;
+    display: flex; flex-direction: column;
+    background: rgba(13, 17, 23, 0.96); border: 1px solid #30363d; border-radius: 8px;
+    color: #c9d1d9; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    box-sizing: border-box; overflow: hidden;
+  }
+  #editor { width: min(620px, calc(100vw - 340px)); }
+  #inspector { width: min(360px, calc(100vw - 340px)); }
+  #editor .bar, #inspector .bar {
+    display: flex; align-items: center; gap: 6px; flex: none;
+    padding: 8px 10px; border-bottom: 1px solid #30363d; color: #e6edf3;
+  }
+  #editor .bar .spacer, #inspector .bar .spacer { flex: 1; }
+  #editor .bar .state, #inspector .bar .state {
+    color: #8b949e; font-weight: normal; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  #editor .code { flex: 1; min-height: 0; }
+  #inspector .tree { flex: 1; min-height: 0; overflow: auto; padding: 6px 8px; user-select: none; }
+  #inspector .props { flex: none; max-height: 45%; overflow: auto; border-top: 1px solid #30363d; padding: 6px 10px; }
+  #inspector .row { cursor: pointer; white-space: nowrap; border-radius: 4px; padding-right: 6px; }
+  #inspector .row:hover { background: #161b22; }
+  #inspector .row.sel { background: #1f6feb33; }
+  #inspector .row .twist { display: inline-block; width: 14px; color: #8b949e; }
+  #inspector .row .type { color: #8b949e; }
+  #inspector .props table { border-collapse: collapse; width: 100%; }
+  #inspector .props th { text-align: left; color: #8b949e; font-weight: normal; padding-right: 8px; vertical-align: top; white-space: nowrap; }
+  #inspector .props td { word-break: break-all; }
+  #inspector .props input[type=number] {
+    width: 52px; background: #161b22; color: #c9d1d9;
+    border: 1px solid #30363d; border-radius: 4px; margin: 1px 2px 1px 0;
+  }
+  #inspector .props input[type=text].wide {
+    width: 95%; background: #161b22; color: #c9d1d9;
+    border: 1px solid #30363d; border-radius: 4px;
+  }
+  #inspector .props input[type=color] {
+    width: 40px; height: 18px; padding: 0; border: 1px solid #30363d; border-radius: 4px;
+    background: #161b22; vertical-align: middle;
+  }
+  #inspector .props .hint { margin-top: 6px; }
+  #inspector .hint { color: #8b949e; }
+  /* script HUD: world.hud(html) renders here; pointer-transparent so it
+     never eats clicks meant for the world */
+  #hud {
+    position: fixed; top: 10px; left: 10px; z-index: 15; pointer-events: none;
+    max-width: 40vw; max-height: 60vh; overflow: hidden; display: none;
+    background: rgba(13, 17, 23, 0.82); border: 1px solid #30363d; border-radius: 8px;
+    color: #e6edf3; font: 12px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+    padding: 8px 12px;
+  }
+  #hud table { border-collapse: collapse; }
+  #hud td, #hud th { padding: 0 10px 0 0; text-align: left; }
   #help {
     position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); white-space: nowrap;
     color: #8b949e; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -38,7 +94,7 @@
 </head>
 <body>
 <div id="panel"></div>
-<div id="help">click ground: spawn box &nbsp;|&nbsp; drag box: move it &nbsp;|&nbsp; cmd-drag or right-drag: orbit &nbsp;|&nbsp; two-finger drag: pan &nbsp;|&nbsp; pinch or ctrl-wheel: zoom</div>
+<div id="help">cmd-drag/right-drag: orbit</div>
 <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

@@ -4,7 +4,7 @@ import { logger } from 'matrix-js-sdk/lib/logger'
 import type { DcMessage } from '../types'
 import type { WidgetParams } from './params'
 import { initWidgetClient } from './widget'
-import type { WidgetApi } from 'matrix-widget-api'
+import { WidgetApiToWidgetAction, type IRoomEvent, type WidgetApi } from 'matrix-widget-api'
 import { BroadcastTransport, LiveKitTransport, type DataTransport } from './transport'
 import { readWorldSceneUrl, readWorldScriptUrl, worldUrls, WORLD_EVENT_TYPE } from './world'
 
@@ -70,8 +70,56 @@ export class MatrixNet {
   private rtc!: MatrixRTCSession
   private transport!: DataTransport
   private reachable = new Set<string>()
+  /** membership id -> the SFU identity it matched (see matchParticipant) */
+  private sfuIdFor = new Map<string, string>()
   private announced = new Set<string>()
   private joined = false
+
+  /** The SFU identity for a membership id. The lk-jwt-service does not
+   * necessarily mint identities as `${userId}:${deviceId}` - the modern
+   * /get_token slot flow mints OPAQUE HASHES - and an unmatched identity
+   * silently kills ALL targeted traffic (pings, pongs, boots) while
+   * broadcasts still arrive, which is maximally confusing. The reliable
+   * mapping comes from the hello broadcast (each client introduces its
+   * membership id over the transport); the string heuristics remain for
+   * services that do mint member-id-shaped identities, where they let
+   * reachability resolve a hello round-trip earlier. */
+  private matchParticipant(memberId: string): string | null {
+    const known = this.sfuIdFor.get(memberId)
+    if (known !== undefined && this.reachable.has(known)) return known
+    if (this.reachable.has(memberId)) return memberId
+    for (const pi of this.reachable) {
+      if (pi.endsWith(memberId) || pi.includes(memberId) || memberId.startsWith(pi)) return pi
+    }
+    return null
+  }
+
+  /** Introduce our membership id to everyone on the transport; with ackTo,
+   * answer one peer's hello instead (targeted at its SFU identity). Acks
+   * carry the same mapping but are never answered, so introductions
+   * cannot ping-pong. Once joined, hellos also carry our join order, so
+   * receivers can mesh with us without waiting for our membership state
+   * to surface through their (possibly throttled) host. */
+  private sayHello(ackTo?: string) {
+    this.transport?.send(ackTo ?? null,
+      JSON.stringify({
+        kind: 'hello', peer: this.id,
+        ...(this.joined ? { order: this.order } : {}),
+        ...(ackTo ? { ack: true } : {}),
+      }))
+  }
+
+  /** join orders learned from hellos: lets reconcile() treat a reachable,
+   * joined peer as a member before its state crawls through the host */
+  private helloOrder = new Map<string, number>()
+
+  private memberIdFor(sfuId: string): string | null {
+    for (const [mid, sid] of this.sfuIdFor) if (sid === sfuId) return mid
+    for (const id of this.peers.keys()) {
+      if (sfuId === id || sfuId.endsWith(id) || sfuId.includes(id) || id.startsWith(sfuId)) return id
+    }
+    return null
+  }
 
   async connect(
     p: WidgetParams, lkServiceUrl: string | null,
@@ -98,6 +146,13 @@ export class MatrixNet {
     manager.start()
     this.rtc = manager.getRoomSession(room)
     this.rtc.on(MatrixRTCSessionEvent.MembershipsChanged, () => this.reconcile())
+    // The sdk's MembershipManager can die quietly (its errors go to the
+    // sdk logger, invisible next to our panel log): a widget-mapped error
+    // the retry classifier does not recognise kills the join loop and the
+    // membership is never published. Surface it where we look.
+    this.rtc.on(MatrixRTCSessionEvent.MembershipManagerError, (e: unknown) => {
+      this.onLog(`membership manager error (join status ${this.rtc.membershipStatus}): ${e}`)
+    })
     // The widget client surfaces injected events via ClientEvent.Event, but
     // the session manager's RoomStateEvent re-emission does not always fire
     // down this path (it does under hosts that negotiate update_state).
@@ -113,7 +168,7 @@ export class MatrixNet {
       void poke?.call(this.rtc).then(() => this.reconcile())
     })
 
-    const serviceUrl = lkServiceUrl ?? await this.discoverService(p)
+    const serviceUrl = lkServiceUrl ?? (p.mockTransport ? null : await this.discoverService(p))
     if (!p.mockTransport && !serviceUrl) {
       throw new Error('no LiveKit service url: not in rtc_foci of the client well-known, '
         + 'none advertised by current members - pass ?lkService=https://your-lk-jwt-service')
@@ -122,13 +177,45 @@ export class MatrixNet {
     this.transport = p.mockTransport
       ? new BroadcastTransport(p.roomId, this.id)
       : new LiveKitTransport(client, serviceUrl!, p.roomId, p.userId, p.deviceId)
+    this.transport.onLog = l => this.onLog(l)
     this.transport.onData = (from, data) => {
-      try { this.onMessage(from, JSON.parse(data)) } catch { /* not ours */ }
+      // 'from' is the SFU identity; the session keys peers by membership id
+      let msg: DcMessage
+      try { msg = JSON.parse(data) } catch { return /* not ours */ }
+      if (msg.kind === 'hello') {
+        const orderNews = msg.order !== undefined && this.helloOrder.get(msg.peer) !== msg.order
+        if (orderNews) this.helloOrder.set(msg.peer, msg.order!)
+        if (this.sfuIdFor.get(msg.peer) !== from) {
+          this.sfuIdFor.set(msg.peer, from)
+          this.onLog(`hello${msg.ack ? '-ack' : ''}: ${msg.peer} is sfu identity ${from}`)
+          this.reconcile()
+        } else if (orderNews) this.reconcile()
+        // Answer EVERY hello, not just mapping-changing ones: a reloaded
+        // peer keeps its membership id AND its SFU identity, so its fresh
+        // hello changes nothing on our side - but it still needs our
+        // mapping, or it writes us off as a ghost and roots a second
+        // world (split-brain). Acks are never answered.
+        if (!msg.ack) this.sayHello(from)
+        return
+      }
+      this.onMessage(this.memberIdFor(from) ?? from, msg)
     }
     this.transport.onParticipants = ids => {
+      const changed = ids.size !== this.reachable.size || [...ids].some(i => !this.reachable.has(i))
       this.reachable = ids
+      if (changed && !p.mockTransport) {
+        this.onLog(`transport participants: ${[...ids].join(', ') || '(none)'}`)
+        this.sayHello() // whoever appeared needs our membership id mapping
+      }
       this.reconcile()
     }
+    this.transport.onVideoTrack = (identity, track) => {
+      const mid = this.memberIdFor(identity)
+      if (mid) this.onVideo(mid, track)
+      else if (track) this.pendingVideo.set(identity, track)
+      else this.pendingVideo.delete(identity)
+    }
+    this.transport.onLocalVideo = track => this.onVideo(this.id, track)
 
     // Adopt the room's glTF scene before publishing our membership: nobody
     // can be waiting on us yet, and the sim must not start (senior pongs
@@ -141,66 +228,265 @@ export class MatrixNet {
     }
     this.onWorldScript(readWorldScriptUrl(client, p.roomId))
 
+    // A dead session's stale membership does worse than linger on an
+    // msc4140-less homeserver: the sdk PRESERVES its created_ts when
+    // rejoining (join-order stability) and computes expiry relative to
+    // it (created_ts + expires), so every fresh membership this device
+    // sends after the old one expired is BORN EXPIRED and ignored by
+    // every peer, itself included - the device can never rejoin however
+    // often it retries. Clear our own expired membership first (and
+    // inject the cleared event locally: the clear's own echo can be
+    // lost like any push) so the join starts from scratch.
+    try {
+      for (const ev of room.currentState.getStateEvents(EventType.GroupCallMemberPrefix)) {
+        const key = ev.getStateKey() ?? ''
+        if (!key.includes(`${p.userId}_${p.deviceId}`)) continue
+        const c = ev.getContent() as { created_ts?: number; expires?: number }
+        if (Object.keys(c).length === 0) continue // already left
+        const expiresAt = (c.created_ts ?? ev.getTs()) + (c.expires ?? 14400000)
+        if (expiresAt > Date.now()) continue // live (another tab?): leave it
+        this.onLog('clearing our stale rtc membership (expired '
+          + `${Math.round((Date.now() - expiresAt) / 60000)}min ago) so the rejoin is not born expired`)
+        const sendState = client.sendStateEvent.bind(client) as
+          (roomId: string, type: string, content: unknown, stateKey: string) => Promise<{ event_id: string }>
+        const { event_id } = await sendState(p.roomId, EventType.GroupCallMemberPrefix, {}, key)
+        this.injectStateEvent(p, {
+          type: EventType.GroupCallMemberPrefix, state_key: key, content: {}, event_id,
+          room_id: p.roomId, sender: p.userId, origin_server_ts: Date.now(), unsigned: {},
+        })
+      }
+    } catch (e) {
+      this.onLog(`stale membership cleanup failed (continuing): ${e}`)
+    }
+
     this.rtc.joinRTCSession(
       { userId: p.userId, deviceId: p.deviceId, memberId: this.id },
       p.mockTransport || !serviceUrl ? [] : [{ type: 'livekit', livekit_service_url: serviceUrl }],
     )
     // Best-effort clean leave on refresh/close, so our membership does not
     // linger as a ghost for everyone else (the server-side delayed leave
-    // event remains the backstop when this postMessage never lands).
+    // event remains the backstop when this postMessage never lands). There
+    // is no reliable teardown hook beyond this: an iframe removed on a
+    // room switch may never deliver pagehide, so ghost cleanup ultimately
+    // RESTS on the MSC4140 delayed leave the sdk arms at join (leave fires
+    // server-side ~8s after the keep-alives stop). That backstop silently
+    // degrades to the 4h membership expiry when the homeserver lacks
+    // msc4140 - surface which world we live in, per homeserver.
     addEventListener('pagehide', () => this.leave())
+    void client.doesServerSupportUnstableFeature('org.matrix.msc4140').then(ok => {
+      this.onLog(ok
+        ? 'delayed events supported: a dead session\'s membership clears in ~8s'
+        : 'homeserver lacks delayed events (msc4140): a dead session\'s membership only expires after 4h')
+    }).catch(() => this.onLog('delayed-event support probe failed (versions unreachable)'))
     await this.transport.connect()
+    if (!p.mockTransport) this.sayHello()
     this.reconcile()
 
-    // A missing own-membership echo is a capability problem, not a race:
-    // publishing succeeded, so if it never comes back the host is not
-    // delivering m.call.member state to us. Say so instead of hanging.
-    setTimeout(() => {
-      if (!this.joined) {
-        this.onLog(`own membership echo still missing after 5s (${this.rtc.memberships.length} memberships `
-          + 'visible): the host is probably not granting the m.call.member receive capability - '
-          + 'check the widget permission prompt / re-add the widget and approve everything')
+    // The own-membership echo is what starts the whole session, and it is
+    // delivered entirely by events - which hosts drop on the floor often
+    // enough (state pushed before our listeners attach, or down paths the
+    // sdk does not re-emit) that waiting passively strands the widget on
+    // a blank world. Poll: poke the session and reconcile every second
+    // until the membership surfaces. A genuinely denied capability never
+    // heals, so diagnose that once at 15s - but keep polling regardless;
+    // a slow homeserver echo recovers on a later poke.
+    const membershipPoke = (this.rtc as unknown as { _onRTCSessionMemberUpdate?: () => Promise<void> })
+      ._onRTCSessionMemberUpdate
+    const echoStart = Date.now()
+    let echoWarned = false
+    let lastRecover = 0
+    const echoPoll = setInterval(() => {
+      if (this.joined) { clearInterval(echoPoll); return }
+      void membershipPoke?.call(this.rtc).then(() => this.reconcile())
+      // Poking only re-reads state that ARRIVED; the host's push is
+      // delivered exactly once and can be lost outright (seen in the
+      // wild: join status Connected - the send was acknowledged - yet
+      // the echo never surfaced). Past 5s, also re-read the room state
+      // from the host directly and inject whatever the sdk is missing.
+      if (Date.now() - echoStart > 5000 && Date.now() - lastRecover > 3000) {
+        lastRecover = Date.now()
+        void this.recoverMembershipState(p)
       }
-    }, 5000)
+      if (!echoWarned && Date.now() - echoStart > 15000) {
+        echoWarned = true
+        this.onLog(`own membership echo still missing after 15s (${this.rtc.memberships.length} memberships `
+          + `visible, join status ${this.rtc.membershipStatus}), still retrying and re-reading room state `
+          + 'every few seconds - if this never resolves, the host is probably not granting the '
+          + 'm.call.member capabilities; re-add the widget and approve everything')
+      }
+    }, 1000)
 
     // Ghost-membership fallback: a crashed session leaves its m.call.member
     // behind (the delayed leave event may never fire), and a joiner would
     // wait forever to calibrate against a senior that cannot answer. Give
     // real seniors a grace period to show up on the transport; if none of
-    // them do, declare them ghosts.
+    // them do, declare them ghosts. This also covers the senior-MOST peer
+    // rejoining a room of juniors: it has no senior to calibrate from, and
+    // before rooting fresh it gets the same grace for a running junior's
+    // pong to hand it the existing grid (Session adopts any calibrated
+    // peer's grid, whatever its order).
     setTimeout(() => {
-      let anySenior = false
-      let reachableSenior = false
+      if (!this.joined) {
+        // Lone-boot fallback: the whole session hangs off our own
+        // membership echo, and real hosts do lose it (a dead membership
+        // manager, a host that never pushes the state back). When NOBODY
+        // else is on the transport there is nobody to disagree with:
+        // self-assign an identity and root the grid rather than strand
+        // the user in a dead world. The polls keep running; a late echo
+        // just confirms a membership we already act under. (Its server ts
+        // may differ from our local order - a peer joining inside that
+        // window resolves against the sim via calibration, not orders.)
+        if (this.reachable.size === 0) {
+          this.onLog('own membership echo missing but nobody else is on the transport: starting alone '
+            + '(the echo can catch up later)')
+          this.joined = true
+          this.order = Date.now()
+          this.onJoined(this.id, this.order, true)
+          this.sayHello() // late arrivals mesh with us via the hello order
+        }
+        return // the ghost scan below is meaningless without an identity
+      }
+      let senior = false, reachableSenior = false
       for (const m of this.rtc.memberships) {
         const id = `${m.userId}:${m.deviceId}`
         if (id === this.id || m.createdTs() >= this.order) continue
-        anySenior = true
-        if (this.reachable.has(id)) reachableSenior = true
+        senior = true
+        if (this.matchParticipant(id) !== null) reachableSenior = true
       }
-      if (anySenior && !reachableSenior) {
-        this.onLog('senior members never became reachable; treating them as ghosts')
+      if (!reachableSenior) {
+        // With no senior membership at all there was nothing to wait for
+        // (alone, or everyone is junior): fire the callback - it is a
+        // no-op on an already-rooted session - but skip the ghost log.
+        if (senior) this.onLog('no reachable senior after the grace period; rooting the grid here unless a running peer calibrates us first')
         this.onSeniorsUnreachable()
       }
     }, GHOST_GRACE_MS)
   }
 
+  /** State pushes are delivered exactly once and hosts lose them: seen in
+   * the wild with join status Connected (the send was acknowledged, the
+   * event is on the server) while the widget's room state stayed stuck on
+   * the PREVIOUS session's expired membership - which the sdk then
+   * rightly ignored on every poke, forever. Ask the host for the room's
+   * current m.call.member state directly (the receive capability also
+   * grants reads) and feed anything the sdk lacks through the client's
+   * own update_state injection path, exactly as if the push had arrived. */
+  private async recoverMembershipState(p: WidgetParams) {
+    let events: IRoomEvent[]
+    try {
+      events = await this.api.readStateEvents(EventType.GroupCallMemberPrefix, 30, undefined, [p.roomId])
+    } catch {
+      return // host without state reads; the poke loop keeps trying
+    }
+    const room = this.client.getRoom(p.roomId)
+    // Under update_state this read is served from the TIMELINE, which can
+    // contain superseded memberships: keep only the newest per state key,
+    // and never replace room state with something older than it has.
+    const newest = new Map<string, IRoomEvent>()
+    for (const raw of events ?? []) {
+      if (!raw?.event_id || raw.room_id !== p.roomId || raw.state_key === undefined) continue
+      const prev = newest.get(raw.state_key)
+      if (!prev || (raw.origin_server_ts ?? 0) > (prev.origin_server_ts ?? 0)) newest.set(raw.state_key, raw)
+    }
+    for (const raw of newest.values()) {
+      const have = room?.currentState.getStateEvents(raw.type, raw.state_key ?? '')
+      if (have && (have.getId() === raw.event_id || (have.getTs() ?? 0) > (raw.origin_server_ts ?? 0))) continue
+      this.onLog(`state push lost by the host: recovering ${raw.type} ${raw.state_key ?? ''} by direct read`)
+      this.injectStateEvent(p, raw)
+    }
+  }
+
+  /** Impersonate the host's update_state push: RoomWidgetClient's
+   * handler injects it into room state on every host flavour (the
+   * unsupported-version case only warns). The fabricated requestId
+   * makes its ack an unsolicited response the host quietly drops. */
+  private injectStateEvent(p: WidgetParams, raw: IRoomEvent) {
+    this.api.emit(`action:${WidgetApiToWidgetAction.UpdateState}`,
+      new CustomEvent(`action:${WidgetApiToWidgetAction.UpdateState}`, {
+        cancelable: true,
+        detail: {
+          api: 'toWidget', widgetId: p.widgetId, requestId: `worldsync-inject-${raw.event_id}`,
+          action: WidgetApiToWidgetAction.UpdateState, data: { state: [raw] },
+        },
+      }))
+  }
+
+  /** the focus advertised by the OLDEST other member (the session's owner,
+   * per MSC4143 oldest_membership focus selection) */
+  private serviceFromMemberships(): string | null {
+    const sorted = [...this.rtc.memberships].sort((a, b) => a.createdTs() - b.createdTs())
+    for (const m of sorted) {
+      if (`${m.userId}:${m.deviceId}` === this.id) continue
+      for (const t of m.transports) {
+        if (isLivekitTransportConfig(t)) return t.livekit_service_url
+      }
+    }
+    return null
+  }
+
+  /** is there m.call.member state from anyone else, surfaced by the sdk yet
+   * or not? (empty content = a left membership, ignored) */
+  private hasForeignMemberState(p: WidgetParams): boolean {
+    const events = this.client.getRoom(p.roomId)?.currentState.getStateEvents(EventType.GroupCallMemberPrefix) ?? []
+    return events.some(ev =>
+      Object.keys(ev.getContent()).length > 0 && !(ev.getStateKey() ?? '').includes(p.deviceId))
+  }
+
+  /** last-ditch: pull a livekit service straight out of raw m.call.member
+   * content (foci_preferred / transports), for state the sdk never parsed */
+  private serviceFromRawState(p: WidgetParams): string | null {
+    const events = this.client.getRoom(p.roomId)?.currentState.getStateEvents(EventType.GroupCallMemberPrefix) ?? []
+    for (const ev of events) {
+      if ((ev.getStateKey() ?? '').includes(p.deviceId)) continue
+      const c = ev.getContent() as Record<string, unknown>
+      for (const list of [c.foci_preferred, c.transports]) {
+        if (!Array.isArray(list)) continue
+        for (const t of list) {
+          const f = t as { type?: string; livekit_service_url?: string }
+          if (f?.type === 'livekit' && typeof f.livekit_service_url === 'string') return f.livekit_service_url
+        }
+      }
+    }
+    return null
+  }
+
   /**
-   * Find the lk-jwt-service, element-call style, in preference order:
-   * a transport an existing member advertises (joining their session means
-   * using their SFU), the host-provided client well-known (usually absent
-   * for widgets: a RoomWidgetClient never talks to a homeserver), and
-   * finally the user's homeserver .well-known fetched directly over HTTP.
+   * Find the lk-jwt-service, element-call style, in preference order: the
+   * focus an existing member advertises - joining their session MUST mean
+   * using their SFU, since two peers on different LiveKit clouds (each
+   * discovering their own homeserver's focus in a federated room) both
+   * come up healthy and never see each other - then the host-provided
+   * client well-known (usually absent for widgets: a RoomWidgetClient
+   * never talks to a homeserver), and finally the user's homeserver
+   * .well-known fetched directly over HTTP. Membership state can surface
+   * from the widget AFTER connect() starts, so poke the session and wait
+   * briefly before concluding no member advertises a focus.
    */
   private async discoverService(p: WidgetParams): Promise<string | null> {
+    const poke = (this.rtc as unknown as { _onRTCSessionMemberUpdate?: () => Promise<void> })._onRTCSessionMemberUpdate
+    for (let i = 0; i < 10; i++) {
+      await poke?.call(this.rtc)
+      const advertised = this.serviceFromMemberships()
+      if (advertised) {
+        this.onLog('livekit service advertised by an existing member (joining their sfu)')
+        return advertised
+      }
+      // surfaced members that advertise no focus, or no member state at
+      // all: nothing to wait for
+      if (this.rtc.memberships.some(m => `${m.userId}:${m.deviceId}` !== this.id)) break
+      if (!this.hasForeignMemberState(p)) break
+      if (i === 0) this.onLog('m.call.member state present but not surfaced yet; giving the sdk a moment')
+      await new Promise(r => setTimeout(r, 300))
+    }
+    const raw = this.serviceFromRawState(p)
+    if (raw) {
+      this.onLog('livekit service pulled from raw membership state (joining their sfu)')
+      return raw
+    }
     const fromWk = (wk: unknown): string | null => {
       const foci = (wk as Record<string, unknown> | undefined)?.['org.matrix.msc4143.rtc_foci'] as
         { type: string; livekit_service_url?: string }[] | undefined
       return foci?.find(f => f.type === 'livekit')?.livekit_service_url ?? null
-    }
-    for (const m of this.rtc.memberships) {
-      for (const t of m.transports) {
-        if (isLivekitTransportConfig(t)) return t.livekit_service_url
-      }
     }
     const viaClient = fromWk(this.client.getClientWellKnown())
     if (viaClient) return viaClient
@@ -224,8 +510,19 @@ export class MatrixNet {
       this.order = mine
       this.onJoined(this.id, this.order, members.size === 1)
       this.onLog(`rtc membership up (${members.size} member${members.size === 1 ? '' : 's'})`)
+      // Announce our order: a host whose sync is throttled (hidden tab)
+      // can take a MINUTE to surface our membership to its widget, and
+      // until then that peer would silently drop our pings and boot-reqs.
+      // The hello order lets it mesh with us on transport presence alone.
+      this.sayHello()
     }
     if (!this.joined) return
+    // Reachable peers that introduced themselves (hello + order) count as
+    // members even before their state surfaces; membership, once seen,
+    // wins (same value in practice - the order IS the membership ts).
+    for (const [id, ord] of this.helloOrder) {
+      if (!members.has(id) && this.matchParticipant(id) !== null) members.set(id, ord)
+    }
     for (const [id, ts] of members) {
       if (id === this.id) continue
       let peer = this.peers.get(id)
@@ -233,7 +530,9 @@ export class MatrixNet {
         peer = { id, order: ts, connected: false }
         this.peers.set(id, peer)
       }
-      const reachableNow = this.reachable.has(id)
+      const sfuId = this.matchParticipant(id)
+      if (sfuId !== null) this.sfuIdFor.set(id, sfuId)
+      const reachableNow = sfuId !== null
       if (reachableNow && !this.announced.has(id)) {
         peer.connected = true
         this.announced.add(id)
@@ -246,23 +545,59 @@ export class MatrixNet {
       if (!members.has(id)) {
         this.peers.delete(id)
         this.announced.delete(id)
+        this.helloOrder.delete(id) // no resurrection from a stale hello
         this.onLog(`${id.split(':')[0]} left`)
         this.onPeerLeft(id)
       }
     }
+    this.flushPendingVideo()
   }
 
   private sendRaw(to: string | null, msg: DcMessage) {
     if (!this.transport) return // still connecting; peers are not up yet either
+    // targeted sends need the SFU identity, not the membership id
+    const dest = to === null ? null : this.sfuIdFor.get(to) ?? to
     const data = JSON.stringify(msg)
     const clockMsg = msg.kind === 'ping' || msg.kind === 'pong'
     const delay = clockMsg && !this.lagPings ? 0 : this.sendDelayMs
-    if (delay > 0) setTimeout(() => this.transport.send(to, data), delay)
-    else this.transport.send(to, data)
+    if (delay > 0) setTimeout(() => this.transport.send(dest, data), delay)
+    else this.transport.send(dest, data)
   }
 
   sendToId(id: string, msg: DcMessage) { this.sendRaw(id, msg) }
   broadcast(msg: DcMessage) { this.sendRaw(null, msg) }
+
+  /** true once the transport has a media path (LiveKit; not the mock) */
+  hasAudio(): boolean { return !!this.transport?.setMicEnabled }
+
+  /** publish/unpublish the local mic; resolves to the resulting state
+   * (false when the transport has no media path) */
+  async setMicEnabled(on: boolean): Promise<boolean> {
+    return this.transport?.setMicEnabled ? this.transport.setMicEnabled(on) : false
+  }
+
+  hasVideo(): boolean { return !!this.transport?.setCameraEnabled }
+
+  async setCameraEnabled(on: boolean): Promise<boolean> {
+    return this.transport?.setCameraEnabled ? this.transport.setCameraEnabled(on) : false
+  }
+
+  /** a peer's camera track appeared (or, with null, went away), keyed by
+   * membership id; fires for our own camera too (self-view) */
+  onVideo: (peer: string, track: MediaStreamTrack | null) => void = () => {}
+  /** tracks whose SFU identity had no membership mapping yet when they
+   * arrived; re-attributed after every reconcile (a hello may land after
+   * the SFU already delivered the participant's video) */
+  private pendingVideo = new Map<string, MediaStreamTrack>()
+  private flushPendingVideo() {
+    for (const [identity, track] of [...this.pendingVideo]) {
+      const mid = this.memberIdFor(identity)
+      if (mid) {
+        this.pendingVideo.delete(identity)
+        this.onVideo(mid, track)
+      }
+    }
+  }
 
   leave() {
     this.rtc?.leaveRoomSession(1000)

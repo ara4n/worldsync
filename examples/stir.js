@@ -1,7 +1,8 @@
 // worldsync WebSG example: spawns a ring of boxes, then endlessly picks one
 // up and stirs it through the pile. Upload with the panel's "load world
 // script (.js)" button (widget mode; the mock host at /mock.html works).
-// Runs only on the room's root peer; everything it does replicates as ops.
+// Every peer runs the script; the primary guard makes the ambient loop a
+// single-runner, and everything it does replicates as ops.
 const COUNT = 6
 const COLORS = [0xff8844, 0x44ff88, 0x4488ff, 0xffcc22, 0xcc44ff, 0x22ccff]
 let boxes = []
@@ -11,6 +12,11 @@ let t0 = 0
 world.onenter = () => console.log('stirrer entered the world')
 
 world.onupdate = (dt, time) => {
+  if (!world.me.primary) return
+  if (boxes.length === 0 && world.boxes().length >= COUNT) {
+    // a previous primary already built the ring; adopt it instead of doubling
+    boxes = world.boxes().slice(0, COUNT)
+  }
   if (boxes.length < COUNT) {
     const k = boxes.length
     boxes.push(world.createNode({

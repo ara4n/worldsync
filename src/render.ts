@@ -1,7 +1,15 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { CSM } from 'three/addons/csm/CSM.js'
+import { Line2 } from 'three/addons/lines/Line2.js'
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js'
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
+import { OutlinePass } from 'three/addons/postprocessing/OutlinePass.js'
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import type { EcsStore } from './ecs'
+import { PropLayer } from './props'
 
 const IDENTITY = new THREE.Quaternion()
 const tmpQ = new THREE.Quaternion()
@@ -19,8 +27,15 @@ export class View {
   // Rubber-band state: presented pose = sim pose + err decayed to zero over rubberMs.
   errors = new Map<number, { p: THREE.Vector3; q: THREE.Quaternion; t0: number }>()
   rubberMs = 100
+  props: PropLayer
   private geo = new THREE.BoxGeometry(1, 1, 1)
   private mats = new Map<number, THREE.MeshStandardMaterial>()
+  /** cosmetic line entities keyed "author/lineId"; scripts animate them.
+   * Line2 "fat lines", because WebGL clamps core line rasterisation to
+   * 1px: width is real - screen px, or world units for wire-like lines
+   * that should scale with the camera. */
+  private lines = new Map<string, { obj: Line2; pointsKey: string }>()
+  private defaultBackground = new THREE.Color(0x0e1116)
 
   constructor(parent: HTMLElement, public ecs: EcsStore) {
     this.renderer.setSize(innerWidth, innerHeight)
@@ -85,8 +100,15 @@ export class View {
 
     // Feature stamp: stale-bundle confusion (host iframes cache hard) has
     // burned enough debugging time that the renderer announces itself.
-    console.log('[worldsync] renderer: csm x4 backface-shadows aces (46aabb0+)')
-    this.scene.add(new THREE.HemisphereLight(0xbfd4ff, 0x30281e, 0.85))
+    // The commit comes from the build (vite define), not a hand-updated
+    // string: a hardcoded one drifted for weeks and pointed a debugging
+    // session at phantom staleness.
+    console.log('[worldsync] renderer: csm x4 backface-shadows aces '
+      + `(${typeof __COMMIT__ === 'string' ? __COMMIT__ : 'dev'})`)
+    // Fixtures are named for the inspector's whole-scene tree.
+    const hemi = new THREE.HemisphereLight(0xbfd4ff, 0x30281e, 0.85)
+    hemi.name = 'hemisphere'
+    this.scene.add(hemi)
     // Cascaded shadow maps with splits weighted hard toward the camera:
     // the near cascade covers only the first ~4m of view depth, so contact
     // shadows get millimetre texels and the bias needed to prevent acne
@@ -124,19 +146,52 @@ export class View {
     const groundMat = new THREE.MeshStandardMaterial({ color: 0x2a3140, roughness: 1 })
     this.patchMaterial(groundMat)
     this.ground = new THREE.Mesh(new THREE.PlaneGeometry(40, 40), groundMat)
+    this.ground.name = 'ground'
     this.ground.rotation.x = -Math.PI / 2
     this.ground.receiveShadow = true
     this.scene.add(this.ground)
     this.grid = new THREE.GridHelper(40, 40, 0x39414d, 0x252b33)
+    this.grid.name = 'grid'
     this.grid.position.y = 0.01
     this.scene.add(this.grid)
+
+    this.props = new PropLayer(m => this.patchMaterial(m))
+    this.props.group.name = 'props'
+    this.scene.add(this.props.group)
 
     addEventListener('resize', () => {
       this.camera.aspect = innerWidth / innerHeight
       this.camera.updateProjectionMatrix()
       this.renderer.setSize(innerWidth, innerHeight)
+      this.composer?.setSize(innerWidth, innerHeight)
       this.csm.updateFrustums()
+      // fat-line widths are screen-space: their materials carry the viewport
+      for (const l of this.lines.values()) l.obj.material.resolution.set(innerWidth, innerHeight)
     })
+  }
+
+  // Selection outline (the inspector's): a post silhouette like thirdroom's,
+  // via EffectComposer + OutlinePass. The composer only exists after the
+  // first selection and only renders while one is active, so the everyday
+  // frame keeps the plain single-pass path.
+  private composer: EffectComposer | null = null
+  private outlinePass: OutlinePass | null = null
+  setOutline(objects: THREE.Object3D[]) {
+    if (objects.length && !this.composer) {
+      this.composer = new EffectComposer(this.renderer)
+      this.composer.setPixelRatio(Math.min(devicePixelRatio, 2))
+      this.composer.addPass(new RenderPass(this.scene, this.camera))
+      this.outlinePass = new OutlinePass(new THREE.Vector2(innerWidth, innerHeight), this.scene, this.camera)
+      this.outlinePass.edgeStrength = 4
+      this.outlinePass.edgeThickness = 1
+      this.outlinePass.visibleEdgeColor.set(0x58a6ff)
+      this.outlinePass.hiddenEdgeColor.set(0x1f4e8c) // dimmer through walls
+      this.composer.addPass(this.outlinePass)
+      // tone mapping + sRGB happen here when composing (render targets get
+      // neither), matching the direct path's on-screen output
+      this.composer.addPass(new OutputPass())
+    }
+    if (this.outlinePass) this.outlinePass.selectedObjects = objects
   }
 
   private sceneRoot: THREE.Object3D | null = null
@@ -182,8 +237,214 @@ export class View {
   /** The ground plane and grid hide while a scene is active (tracks the
    * SIM's scene, not the visual fetch: the colliders are already gone). */
   setGroundVisible(on: boolean) {
-    this.ground.visible = on
-    this.grid.visible = on
+    this.ground.visible = on && !this.groundSuppressed
+    this.grid.visible = on && !this.groundSuppressed
+  }
+  private groundSuppressed = false
+
+  /** Script-facing cosmetic environment: background/fog colors and whether
+   * the default ground visuals show at all (the dots board floats in a
+   * white void). Local-only state, so determinism is untouched; every peer
+   * runs the same script and converges on the same look. */
+  setEnvironment(env: { background?: number; fog?: { color: number; near: number; far: number } | null; ground?: boolean }) {
+    if (env.background !== undefined) this.scene.background = new THREE.Color(env.background)
+    else this.scene.background = this.defaultBackground
+    this.scene.fog = env.fog ? new THREE.Fog(env.fog.color, env.fog.near, env.fog.far) : null
+    if (env.ground !== undefined) {
+      this.groundSuppressed = !env.ground
+      this.ground.visible = env.ground && this.ground.visible
+      this.grid.visible = env.ground && this.grid.visible
+    }
+  }
+
+  /** One-shot camera framing hint from a script (onload). */
+  setCameraPose(pos: { x: number; y: number; z: number }, target: { x: number; y: number; z: number }) {
+    this.camera.position.set(pos.x, pos.y, pos.z)
+    this.controls.target.set(target.x, target.y, target.z)
+    this.controls.update()
+  }
+
+  /** Cosmetic line entity, keyed "author/lineId": full state per call,
+   * latest wins; null or fewer than 2 points removes it. Geometry rebuilds
+   * only when the points actually change, so per-frame color/opacity/width
+   * animation from a script stays a material-only update. */
+  setLine(key: string, points: { x: number; y: number; z: number }[] | null, color: number, opacity: number,
+    width: number, worldUnits: boolean) {
+    const existing = this.lines.get(key)
+    if (!points || points.length < 2) {
+      if (existing) {
+        this.scene.remove(existing.obj)
+        existing.obj.geometry.dispose()
+        existing.obj.material.dispose()
+        this.lines.delete(key)
+      }
+      return
+    }
+    const lineGeo = () => {
+      const g = new LineGeometry()
+      g.setPositions(points.flatMap(p => [p.x, p.y, p.z]))
+      return g
+    }
+    const pointsKey = JSON.stringify(points)
+    if (existing) {
+      if (existing.pointsKey !== pointsKey) {
+        existing.obj.geometry.dispose()
+        existing.obj.geometry = lineGeo()
+        existing.obj.computeLineDistances()
+        existing.pointsKey = pointsKey
+      }
+      const m = existing.obj.material
+      m.color.setHex(color)
+      m.opacity = opacity
+      m.linewidth = width
+      if (m.worldUnits !== worldUnits) { m.worldUnits = worldUnits; m.needsUpdate = true }
+      // fully transparent still writes depth, which carves invisible
+      // notches out of lines it coincides with - skip rendering instead
+      existing.obj.visible = opacity > 0
+      return
+    }
+    const mat = new LineMaterial({ color, transparent: true, opacity, linewidth: width, worldUnits })
+    mat.resolution.set(innerWidth, innerHeight)
+    const obj = new Line2(lineGeo(), mat)
+    obj.name = key // "author/lineId", for the inspector
+    obj.visible = opacity > 0
+    obj.computeLineDistances()
+    obj.renderOrder = 999 // never buried by the props it threads through
+    this.scene.add(obj)
+    this.lines.set(key, { obj, pointsKey })
+  }
+
+  /** Remove every line whose key starts with prefix (an author's "id/"). */
+  removeLines(prefix: string) {
+    for (const key of [...this.lines.keys()]) {
+      if (key.startsWith(prefix)) this.setLine(key, null, 0, 0, 0, false)
+    }
+  }
+
+  // -- video screens: flat planes a world script places, textured with a
+  // peer's camera track when one is live and a dark placeholder otherwise.
+  // Cosmetic like lines: never part of sim state, never picked. --
+  private screens = new Map<string, { obj: THREE.Mesh; peer: string }>()
+  private video = new Map<string, { el: HTMLVideoElement; tex: THREE.VideoTexture; mat: THREE.MeshBasicMaterial }>()
+  private screenBlank = new THREE.MeshBasicMaterial({ color: 0x10141a, side: THREE.DoubleSide })
+  private screenMat(peer: string) { return this.video.get(peer)?.mat ?? this.screenBlank }
+
+  setScreen(key: string, peer: string, pos: { x: number; y: number; z: number },
+    yaw: number, w: number, h: number) {
+    let s = this.screens.get(key)
+    if (!s) {
+      s = { obj: new THREE.Mesh(new THREE.PlaneGeometry(1, 1), this.screenMat(peer)), peer }
+      s.obj.name = key
+      this.scene.add(s.obj)
+      this.screens.set(key, s)
+    } else if (s.peer !== peer) {
+      s.peer = peer
+      s.obj.material = this.screenMat(peer)
+    }
+    s.obj.position.set(pos.x, pos.y, pos.z)
+    s.obj.rotation.set(0, yaw, 0)
+    s.obj.scale.set(w, h, 1)
+  }
+
+  removeScreen(key: string) {
+    const s = this.screens.get(key)
+    if (!s) return
+    this.scene.remove(s.obj)
+    s.obj.geometry.dispose() // materials are shared per peer; disposed with the track
+    this.screens.delete(key)
+  }
+
+  /** Remove every screen whose key starts with prefix (an author's "id/"). */
+  removeScreens(prefix: string) {
+    for (const key of [...this.screens.keys()]) {
+      if (key.startsWith(prefix)) this.removeScreen(key)
+    }
+  }
+
+  // -- text labels: flat planes textured with canvas-rendered text, so
+  // scripts can caption the world (tetrix names each player's lane above
+  // their next-piece ghost). Cosmetic like lines: never sim state, never
+  // picked. --
+  private labels = new Map<string, { obj: THREE.Mesh; text: string; color: number; aspect: number }>()
+
+  private labelTexture(text: string, color: number) {
+    const pad = 14, fontPx = 64
+    const font = `600 ${fontPx}px ui-monospace, SFMono-Regular, Menlo, monospace`
+    const canvas = document.createElement('canvas')
+    let ctx = canvas.getContext('2d')!
+    ctx.font = font
+    canvas.width = Math.max(2, Math.ceil(ctx.measureText(text).width) + pad * 2)
+    canvas.height = fontPx + pad * 2
+    ctx = canvas.getContext('2d')! // resizing resets the context state
+    ctx.font = font
+    ctx.textBaseline = 'middle'
+    ctx.fillStyle = '#' + color.toString(16).padStart(6, '0')
+    ctx.fillText(text, pad, canvas.height / 2)
+    const tex = new THREE.CanvasTexture(canvas)
+    tex.colorSpace = THREE.SRGBColorSpace
+    tex.anisotropy = 4
+    return { tex, aspect: canvas.width / canvas.height }
+  }
+
+  /** Place (or move) a text label: a plane h world-units tall, width from
+   * the text's aspect, yawed about Y. A changed text or color rebakes.
+   * flat lays it face-up in the XZ plane (top-down boards caption props
+   * with it), yaw then spinning it about world Y; text-up points to -Z,
+   * upright for the stock camera looking down the -Z tilt. */
+  setLabel(key: string, text: string, pos: { x: number; y: number; z: number },
+    yaw: number, h: number, color: number, flat = false) {
+    let l = this.labels.get(key)
+    if (l && (l.text !== text || l.color !== color)) { this.removeLabel(key); l = undefined }
+    if (!l) {
+      const { tex, aspect } = this.labelTexture(text, color)
+      const mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, side: THREE.DoubleSide, depthWrite: false })
+      l = { obj: new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat), text, color, aspect }
+      l.obj.name = key
+      this.scene.add(l.obj)
+      this.labels.set(key, l)
+    }
+    l.obj.position.set(pos.x, pos.y, pos.z)
+    if (flat) l.obj.rotation.set(-Math.PI / 2, 0, yaw)
+    else l.obj.rotation.set(0, yaw, 0)
+    l.obj.scale.set(h * l.aspect, h, 1)
+  }
+
+  removeLabel(key: string) {
+    const l = this.labels.get(key)
+    if (!l) return
+    this.scene.remove(l.obj)
+    l.obj.geometry.dispose()
+    const mat = l.obj.material as THREE.MeshBasicMaterial
+    mat.map?.dispose()
+    mat.dispose()
+    this.labels.delete(key)
+  }
+
+  /** A peer's camera track came (or, with null, went): retexture every
+   * screen bound to that peer. The <video> element never joins the DOM;
+   * VideoTexture reads it directly. */
+  setVideoTrack(peer: string, track: MediaStreamTrack | null) {
+    const cur = this.video.get(peer)
+    if (cur) {
+      cur.mat.dispose()
+      cur.tex.dispose()
+      cur.el.srcObject = null
+      this.video.delete(peer)
+    }
+    if (track) {
+      const el = document.createElement('video')
+      el.muted = true // audio arrives separately; a muted element autoplays
+      el.playsInline = true
+      el.autoplay = true
+      el.srcObject = new MediaStream([track])
+      void el.play().catch(() => {})
+      const tex = new THREE.VideoTexture(el)
+      tex.colorSpace = THREE.SRGBColorSpace
+      this.video.set(peer, { el, tex, mat: new THREE.MeshBasicMaterial({ map: tex, side: THREE.DoubleSide }) })
+    }
+    for (const s of this.screens.values()) {
+      if (s.peer === peer) s.obj.material = this.screenMat(peer)
+    }
   }
 
   private matFor(color: number) {
@@ -205,11 +466,11 @@ export class View {
     const live = new Set<number>()
     for (const id of liveNetIds) {
       const eid = this.ecs.entityFor(id)
-      if (eid !== undefined) live.add(eid)
-    }
-    for (const eid of live) {
+      if (eid === undefined) continue
+      live.add(eid)
       if (this.meshes.has(eid)) continue
       const mesh = new THREE.Mesh(this.geo, this.matFor(this.ecs.Tint.value[eid]))
+      mesh.name = id // the box's net id, for the inspector
       mesh.castShadow = true
       mesh.receiveShadow = true
       mesh.userData.eid = eid
@@ -276,8 +537,10 @@ export class View {
         }
       }
     }
+    this.props.update(now)
     this.controls.update()
     this.csm.update() // cascade frusta track the camera; must follow controls
-    this.renderer.render(this.scene, this.camera)
+    if (this.outlinePass?.selectedObjects.length) this.composer!.render()
+    else this.renderer.render(this.scene, this.camera)
   }
 }

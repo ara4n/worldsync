@@ -1,10 +1,10 @@
 import {
-  WidgetApi, MatrixCapabilities, WidgetApiToWidgetAction,
-  type INotifyCapabilitiesActionRequest,
+  WidgetApi, MatrixCapabilities, WidgetApiToWidgetAction, WidgetEventCapability, EventDirection,
+  type INotifyCapabilitiesActionRequest, type IWidgetApiRequest,
 } from 'matrix-widget-api'
 import { createRoomWidgetClient, EventType, type MatrixClient, type ICapabilities } from 'matrix-js-sdk'
 import type { WidgetParams } from './params'
-import { WORLD_EVENT_TYPE } from './world'
+import { SCRIPT_STATE_TYPES, WORLD_EVENT_TYPE } from './world'
 
 /**
  * Matryoshka bootstrap, after element-call's src/widget.ts: the WidgetApi
@@ -25,6 +25,14 @@ export async function initWidgetClient(p: WidgetParams): Promise<{ api: WidgetAp
     const denied = requested.filter(c => !approved.includes(c))
     console.log('[worldsync] capabilities approved:', approved)
     if (denied.length) console.warn('[worldsync] capabilities DENIED by the host:', denied)
+  })
+  // Element Web notifies widgets of client theme switches; with no
+  // handler the transport error-replies AND throws an uncaught rejection
+  // into the console each time. Worldsync has one look: ack and ignore.
+  api.on(`action:${WidgetApiToWidgetAction.ThemeChange}`, (raw: Event) => {
+    const ev = raw as CustomEvent<IWidgetApiRequest>
+    ev.preventDefault()
+    api.transport.reply(ev.detail, {})
   })
   api.requestCapability(MatrixCapabilities.AlwaysOnScreen)
   // MSC4039 media actions: the glTF scene GLB is uploaded/downloaded through
@@ -49,12 +57,19 @@ export async function initWidgetClient(p: WidgetParams): Promise<{ api: WidgetAp
       { eventType: EventType.RoomMember },
       { eventType: EventType.RoomEncryption },
     ],
-    sendEvent: [EventType.CallEncryptionKeysPrefix],
+    // RoomMessage: world scripts narrate their player's actions into the
+    // room via world.say (chess announces moves). Sent as this user.
+    sendEvent: [EventType.CallEncryptionKeysPrefix, EventType.RoomMessage],
     receiveEvent: [EventType.CallEncryptionKeysPrefix],
     sendDelayedEvents: true,
     updateDelayedEvents: true,
   }
 
+  // The SCRIPT_STATE_TYPES capabilities for world.getStateEvents /
+  // world.setStateEvent are deliberately absent above: they are
+  // renegotiated lazily (requestScriptStateCapabilities below) the first
+  // time a world script actually calls those APIs, so worlds that never
+  // touch room state never ask the user for them.
   const client = createRoomWidgetClient(
     api, capabilities, p.roomId,
     {
@@ -72,4 +87,23 @@ export async function initWidgetClient(p: WidgetParams): Promise<{ api: WidgetAp
   )
   await client.startClient()
   return { api, client }
+}
+
+/**
+ * MSC2974 capability renegotiation for the script state APIs: request
+ * send (our own MXID as state_key only) + receive for every type in
+ * SCRIPT_STATE_TYPES. Called on a world script's FIRST
+ * getStateEvents/setStateEvent call - Element prompts the user for
+ * approval right then. On grant the host re-pushes the room's current
+ * state for the newly readable types (update_state), so pre-existing
+ * events land in the client without any extra backfill here. A DENIAL
+ * still resolves (MSC2974 has no rejection path); it just leaves later
+ * sends failing with a logged permission error and reads empty.
+ */
+export async function requestScriptStateCapabilities(api: WidgetApi, userId: string): Promise<void> {
+  api.requestCapabilities(SCRIPT_STATE_TYPES.flatMap(t => [
+    WidgetEventCapability.forStateEvent(EventDirection.Send, t, userId).raw,
+    WidgetEventCapability.forStateEvent(EventDirection.Receive, t).raw,
+  ]))
+  await api.updateRequestedCapabilities()
 }

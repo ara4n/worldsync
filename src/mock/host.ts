@@ -16,6 +16,18 @@ import {
 
 const qs = new URLSearchParams(location.search)
 const room = qs.get('room') ?? 'default'
+// Test hook: withhold the widget's own m.call.member echo, simulating
+// hosts that lose it (what the widget's lone-boot fallback exists for).
+const dropOwnEcho = qs.get('dropOwnEcho') === '1'
+// Test hook: seed an EXPIRED membership for this device, reproducing a
+// dead session on an msc4140-less homeserver (the sdk would preserve
+// its created_ts and rejoin born-expired forever without the widget's
+// pre-join cleanup).
+const staleOwnMembership = qs.get('staleOwnMembership') === '1'
+// Test hook: withhold OTHER peers' m.call.member feeds, reproducing a
+// throttled host tab whose sync crawls (the widget never learns a
+// joiner's membership; peers must mesh via the transport hello order).
+const dropPeerEcho = qs.get('dropPeerEcho') === '1'
 const roomId = `!${room}:mock.localhost`
 const userId = `@u${Math.random().toString(36).slice(2, 8)}:mock.localhost`
 const deviceId = `MOCK${Math.random().toString(36).slice(2, 6).toUpperCase()}`
@@ -81,6 +93,8 @@ class MockDriver extends WidgetDriver {
       this.state.set(key, ev)
     }
     if (gossip) this.ch.postMessage({ t: 'state', ev } satisfies HostSync)
+    if (dropOwnEcho && ev.sender === userId && ev.type === 'org.matrix.msc3401.call.member') return
+    if (dropPeerEcho && ev.sender !== userId && ev.type === 'org.matrix.msc3401.call.member') return
     if (this.api) {
       // Deferred: when the widget itself sent this event, its send request
       // must resolve before the echo arrives (like a real /sync round trip),
@@ -149,6 +163,14 @@ class MockDriver extends WidgetDriver {
 
   readRoomEvents(): Promise<IRoomEvent[]> { return Promise.resolve([]) }
 
+  // Modern widgets (update_state negotiated) get their read_events state
+  // requests routed HERE, not to readRoomState; there is no timeline
+  // store, but the state entries are exactly the tail such reads want
+  // (the widget's state-push recovery reads m.call.member this way).
+  readRoomTimeline(roomId: string, eventType: string): Promise<IRoomEvent[]> {
+    return this.readRoomState(roomId, eventType, undefined)
+  }
+
   // MSC4039 media repo, in-memory: uploads are gossiped to every tab so a
   // peer's widget can download a scene its neighbour uploaded.
   getMediaConfig(): Promise<IGetMediaConfigResult> {
@@ -184,7 +206,8 @@ class MockDriver extends WidgetDriver {
 
 function boot() {
   const iframe = document.getElementById('widget') as HTMLIFrameElement
-  const widgetUrl = new URL('/', location.origin)
+  // relative to wherever mock.html is served (subpath hosts included)
+  const widgetUrl = new URL('.', location.href)
   widgetUrl.searchParams.set('widgetId', `worldsync-${room}`)
   widgetUrl.searchParams.set('parentUrl', location.href)
   widgetUrl.searchParams.set('roomId', roomId)
@@ -205,6 +228,21 @@ function boot() {
     url: widgetUrl.toString(),
   })
   const driver = new MockDriver()
+  if (staleOwnMembership) {
+    // five hours old with a four-hour relative expiry: dead on arrival,
+    // exactly what a crashed session leaves on an msc4140-less server
+    const key = `_${userId}_${deviceId}_m.call`
+    const ts = Date.now() - 5 * 3600_000
+    driver.state.set(`org.matrix.msc3401.call.member|${key}`, {
+      room_id: roomId, event_id: `$stale-${userId}`, origin_server_ts: ts, sender: userId,
+      type: 'org.matrix.msc3401.call.member', state_key: key, unsigned: {},
+      content: {
+        application: 'm.call', call_id: '', scope: 'm.room', device_id: deviceId,
+        membershipID: `${userId}:${deviceId}`, expires: 4 * 3600_000, created_ts: ts,
+        focus_active: { type: 'livekit', focus_selection: 'oldest_membership' }, foci_preferred: [],
+      },
+    } as IRoomEvent)
+  }
   const api = new ClientWidgetApi(widget, iframe, driver)
   driver.attach(api)
   ;(window as unknown as Record<string, unknown>).__mockhost = { driver, api }

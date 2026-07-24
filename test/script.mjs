@@ -1,7 +1,8 @@
 // MSC3815 script_url e2e under the mock widget host: tab a uploads a
-// WebSG-subset JS script; only the root peer (a) runs it, its spawns and
-// drags replicate to b as ordinary ops, and when a closes the root role
-// hands over and b restarts the script. Run the dev server first: npm run dev
+// WebSG-subset JS script. EVERY peer runs it, but its ambient loop is
+// guarded by world.me.primary, so only the primary (a) emits ops; when a
+// closes, primacy hands over and b's already-running instance takes up the
+// loop from its own state. Run the dev server first: npm run dev
 import { chromium } from 'playwright'
 
 const base = process.env.URL ?? 'http://localhost:5173'
@@ -20,6 +21,7 @@ const SCRIPT = `
 let phase = 'spawn', box = null, t0 = 0, n = 0
 world.onenter = () => console.log('script entered')
 world.onupdate = (dt, time) => {
+  if (!world.me.primary) return
   if (phase === 'spawn') {
     if (n >= 5) { phase = 'idle'; return }
     box = world.createNode({ translation: [(n % 3) - 1, 3, 0], color: 0x22ccff })
@@ -55,7 +57,7 @@ await a.page().waitForTimeout(1000)
 await a.setInputFiles('#scriptfile', {
   name: 'wave.js', mimeType: 'text/javascript', buffer: Buffer.from(SCRIPT),
 })
-console.log('a uploaded the script; only the root (a) should run it...')
+console.log('a uploaded the script; both run it, only the primary (a) should emit ops...')
 
 for (const [name, f] of [['a', a], ['b', b]]) {
   const ok = await f.waitForFunction(

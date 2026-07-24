@@ -25,6 +25,15 @@ export interface Emitter {
   streamPose(netId: string, pos: Vec3): void
 }
 
+/** A world script's claim on pointer interactions: down() returning true
+ * captures the gesture (props were hit), routing move/up to the script and
+ * away from box spawning/grabbing until release. */
+export interface ScriptPointer {
+  down(e: PointerEvent): boolean
+  move(e: PointerEvent): void
+  up(e: PointerEvent): void
+}
+
 interface Drag {
   netId: string
   eid: number
@@ -37,6 +46,9 @@ interface Drag {
 
 export class Input {
   draggedEid: number | null = null
+  /** installed by main once a world script with pointer handlers is running */
+  scriptPointer: ScriptPointer | null = null
+  private captured = false
   private drag: Drag | null = null
   private down: { x: number; y: number; t: number; onBox: boolean } | null = null
   private ray = new THREE.Raycaster()
@@ -63,6 +75,8 @@ export class Input {
   private onDown(e: PointerEvent) {
     // cmd/ctrl-drag belongs to the orbit controls
     if (e.button !== 0 || e.metaKey || e.ctrlKey || !this.out.ready()) return
+    // the world script gets first refusal (it consumes when a prop is hit)
+    if (this.scriptPointer?.down(e)) { this.captured = true; return }
     const hit = this.pickBox(e)
     this.down = { x: e.clientX, y: e.clientY, t: performance.now(), onBox: !!hit }
     if (!hit) return
@@ -88,6 +102,7 @@ export class Input {
   }
 
   private onMove(e: PointerEvent) {
+    if (this.captured) { this.scriptPointer?.move(e); return }
     if (!this.drag) {
       if (e.target === this.view.renderer.domElement) {
         this.view.renderer.domElement.style.cursor = this.pickBox(e) ? 'grab' : ''
@@ -110,6 +125,11 @@ export class Input {
   }
 
   private onUp(e: PointerEvent) {
+    if (this.captured) {
+      this.captured = false
+      this.scriptPointer?.up(e)
+      return
+    }
     if (this.drag) {
       const d = this.drag
       const first = d.trail[0]
