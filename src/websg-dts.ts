@@ -301,8 +301,15 @@ declare const world: {
   /** background/fog colors and whether the default ground shows */
   env(opts?: { background?: number; fog?: { color: number; near: number; far: number } | null
     ground?: boolean }): void
-  /** one-shot camera framing hint (use from onload) */
+  /** one-shot camera framing hint (use from onload). While the user is
+   * walking, the pose becomes the avatar's (eye at pos, facing target). */
   camera(pos: Vec3Like, target: Vec3Like): void
+  /** pin the navigation mode: 'orbit' for board worlds (dots, chess -
+   * a first-person walker makes no sense there), 'walk' for explorable
+   * ones. The user's walk/orbit toggle yields while pinned; cleared when
+   * the script stops. Selecting a box still borrows orbit for precision
+   * manipulation. */
+  navigation(mode: 'orbit' | 'walk'): void
 
   createBoxMesh(props?: unknown): unknown
   createCollider(props?: unknown): unknown

@@ -32,6 +32,7 @@ let turnRing = null, winLine = null, winShown = false
 
 world.onload = () => {
   world.env({ background: 0x232b36 })
+  world.navigation('orbit') // a board world: pin orbit so walkers never fall into the void
   world.camera({ x: 0, y: 2.9, z: 8.8 }, { x: 0, y: 2.9, z: 0 })
   const xL = X0 - CELL / 2, xR = colX(COLS - 1) + CELL / 2
   const yB = Y0 - CELL / 2, yT = rowY(ROWS - 1) + CELL / 2

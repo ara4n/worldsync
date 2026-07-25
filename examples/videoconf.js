@@ -19,6 +19,7 @@ let shown = ''    // signature of the peer set currently laid out
 
 world.onload = () => {
   world.env({ background: 0x10141a, fog: { color: 0x10141a, near: 14, far: 30 }, ground: true })
+  world.navigation('orbit') // a board world: pin orbit so walkers never fall into the void
   world.camera({ x: 0, y: 2, z: 2.5 }, { x: 0, y: 2, z: -RADIUS })
 }
 

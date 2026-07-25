@@ -169,6 +169,10 @@ export interface ScriptHost {
   removeLabel(id: string): void
   setEnv(json: string): void
   setCamera(x: number, y: number, z: number, tx: number, ty: number, tz: number): void
+  /** pin the navigation mode: 'orbit' (board worlds - dots, chess - where
+   * a first-person walker makes no sense) or 'walk' (explorable worlds).
+   * Cleared when the script stops; selection still borrows orbit. */
+  setNavMode(mode: string): void
   /** send a raw MIDI channel message as if a local device played it:
    * echoed into our own world.onmidi and the audio engine, and broadcast
    * on the cosmetic midi plane, so a script-driven note (clicked piano
@@ -508,6 +512,9 @@ const PRELUDE = `
       const p = vec(pos), t = vec(target)
       H.setCamera(p.x, p.y, p.z, t.x, t.y, t.z)
     },
+    // pin the navigation mode ('orbit' for board worlds, 'walk' for
+    // explorable ones); the user's toggle yields while pinned
+    navigation(mode) { H.setNavMode(String(mode)) },
     createBoxMesh: (p) => ({ __mesh: p }),
     createCollider: (p) => ({ __collider: p }),
     createMaterial: (p) => ({ __material: p }),
@@ -699,6 +706,7 @@ export class WorldScript {
         ctx.getNumber(tx), ctx.getNumber(ty), ctx.getNumber(tz))
       return ctx.undefined
     })
+    fn('setNavMode', (m) => { host.setNavMode(ctx.getString(m)); return ctx.undefined })
     ctx.setProp(ctx.global, '__host', bridge)
     bridge.dispose()
   }

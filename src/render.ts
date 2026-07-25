@@ -86,6 +86,7 @@ export class View {
     const fwd = new THREE.Vector3()
     this.renderer.domElement.addEventListener('wheel', e => {
       e.preventDefault()
+      if (!this.controls.enabled) return // walk mode: the wheel has no job
       const unit = e.deltaMode === 1 ? 16 : 1 // lines -> px
       if (e.ctrlKey || e.metaKey) {
         const dir = this.camera.position.clone().sub(this.controls.target)
@@ -368,6 +369,17 @@ export class View {
     })
   }
 
+  /** What the walk-mode avatar stands on: the glTF scene when present
+   * (plus any script-instantiated glTF), else the default ground plane.
+   * Raycast targets only - the avatar is a camera, not sim state. */
+  floorObjects(): THREE.Object3D[] {
+    const out: THREE.Object3D[] = []
+    if (this.sceneRoot) out.push(this.sceneRoot)
+    if (this.scriptRoot.children.length) out.push(this.scriptRoot)
+    if (this.ground.visible) out.push(this.ground)
+    return out
+  }
+
   /** The ground plane and grid hide while a scene is active (tracks the
    * SIM's scene, not the visual fetch: the colliders are already gone). */
   setGroundVisible(on: boolean) {
@@ -618,7 +630,9 @@ export class View {
       }
     }
     this.props.update(now)
-    this.controls.update()
+    // walk mode disables the orbit controls and drives the camera itself;
+    // update() would snap the camera back onto the orbit sphere
+    if (this.controls.enabled) this.controls.update()
     this.csm.update() // cascade frusta track the camera; must follow controls
     if (this.outlinePass?.selectedObjects.length) this.composer!.render()
     else this.renderer.render(this.scene, this.camera)

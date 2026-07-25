@@ -10,6 +10,7 @@ import { AudioEngine } from './audio'
 import { Session } from './session'
 import { View } from './render'
 import { Input, type Emitter } from './input'
+import { Nav } from './nav'
 import { UI } from './ui'
 import { wallNow, type DcMessage } from './types'
 import { widgetParams } from './matrix/params'
@@ -853,7 +854,13 @@ async function main() {
       view.removeLabel(`${session.id}/${id}`)
     },
     setEnv: json => view.setEnvironment(JSON.parse(json)),
-    setCamera: (x, y, z, tx, ty, tz) => view.setCameraPose({ x, y, z }, { x: tx, y: ty, z: tz }),
+    setCamera: (x, y, z, tx, ty, tz) => nav.setCameraPose({ x, y, z }, { x: tx, y: ty, z: tz }),
+    // world.navigation: the script pins the camera regime - board worlds
+    // (dots, chess) force orbit so the walker never falls into their void.
+    setNavMode: mode => {
+      if (mode === 'walk' || mode === 'orbit') nav.setScriptMode(mode)
+      else log(`world.navigation: unknown mode '${mode}' (use 'walk' or 'orbit')`)
+    },
     // world.sendMidi: the script PERFORMS - its bytes take the exact
     // hardware path (own script + audio engine + broadcast), so a clicked
     // piano key sounds and moves on every peer. Deferred a microtask so
@@ -879,8 +886,14 @@ async function main() {
   const scriptRay = new Raycaster()
   const scriptNdc = new Vector2()
   const scriptEv = (e: PointerEvent) => {
-    const r = view.renderer.domElement.getBoundingClientRect()
-    scriptNdc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1)
+    // while the walker holds pointer lock the cursor is captured: script
+    // pointer events ray through the crosshair instead (piano keys are
+    // clicked by looking at them)
+    if (nav.locked) scriptNdc.set(0, 0)
+    else {
+      const r = view.renderer.domElement.getBoundingClientRect()
+      scriptNdc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1)
+    }
     scriptRay.setFromCamera(scriptNdc, view.camera)
     const hit = view.props.pick(scriptRay)
     let entity = hit?.id ?? null
@@ -937,6 +950,7 @@ async function main() {
     for (const id of [...scriptLabels]) scriptHost.removeLabel(id) // and its labels
     restoreSceneNodes() // scene nodes it moved go back where the glb put them
     scriptInteractables.clear()
+    nav.setScriptMode(null) // its navigation pin goes with it
     view.setOutline([]) // its hover/selection glow goes with it
     if (videoWanted) {
       videoWanted = false
@@ -1089,7 +1103,9 @@ async function main() {
     emit: (type, netId, data) => session.emit(type, netId, data),
     streamPose: (netId, pos) => session.streamPose(netId, pos),
   }
-  const input = new Input(view, out)
+  const nav = new Nav(view, out, document.body)
+  nav.keysClaimedByScript = () => !!script && scriptKeysOn
+  const input = new Input(view, out, nav)
   input.scriptPointer = scriptPointerDelegate
 
   // Voice, muted by default: the mic is never captured or published until
@@ -1200,7 +1216,7 @@ async function main() {
       const presented = view.capture()
       if (session.foldIfNeeded()) {
         sim.mirror()
-        view.applyCorrections(presented, now, input.draggedEid)
+        view.applyCorrections(presented, now, input.draggedEid ?? nav.authorityEid)
       }
     }
     session.advance()
@@ -1210,6 +1226,8 @@ async function main() {
     syncScene()
     syncScript()
     syncPersist(now)
+    nav.update(now)  // walk-mode camera first...
+    input.tick(now)  // ...then carried boxes retarget off the fresh view ray
     const alpha = session.calibrated
       ? Math.min(Math.max(session.tickTimeNow(now) - sim.tick, 0), 1)
       : 0
@@ -1249,7 +1267,7 @@ async function main() {
 
   // Hooks for automated smoke tests and console poking.
   ;(window as any).__jig = {
-    sim, net, session, view,
+    sim, net, session, view, nav, input,
     pos: (netId: string) => {
       const b = sim.body(netId)
       if (!b) return null

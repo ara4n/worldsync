@@ -920,8 +920,11 @@ export class Sim {
         const b = bodyOf(ctx, i.netId)
         if (!b) return
         // Physics takes back over from the author's authoritative state.
+        // rot rides along on gizmo releases: the rotation pin alone could
+        // leave the final orientation one tick stale.
         b.setBodyType(RAPIER.RigidBodyType.Dynamic, true)
         b.setTranslation(i.pos, true)
+        if (i.rot) b.setRotation(i.rot, true)
         if (i.vel) b.setLinvel(i.vel, true)
         b.setAngvel(ZERO, true)
         return

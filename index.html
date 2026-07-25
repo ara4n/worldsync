@@ -85,16 +85,32 @@
   }
   #hud table { border-collapse: collapse; }
   #hud td, #hud th { padding: 0 10px 0 0; text-align: left; }
-  #help {
-    position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); white-space: nowrap;
-    color: #8b949e; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
-    background: rgba(13, 17, 23, 0.7); padding: 6px 12px; border-radius: 6px; pointer-events: none;
+  /* navigation HUD: mode toggle, hints, selection + edit controls (nav.ts) */
+  #navhud {
+    position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); z-index: 20;
+    display: flex; align-items: center; gap: 8px; white-space: nowrap;
+    color: #c9d1d9; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: rgba(13, 17, 23, 0.82); border: 1px solid #30363d; border-radius: 8px;
+    padding: 6px 10px; user-select: none;
+  }
+  #navhud button {
+    background: #21262d; color: #c9d1d9; border: 1px solid #30363d; border-radius: 6px;
+    padding: 3px 10px; cursor: pointer; font: inherit;
+  }
+  #navhud button:hover { background: #30363d; }
+  #navhud button.on { background: #1f6feb; border-color: #388bfd; color: #fff; }
+  #navhud button:disabled { opacity: 0.55; cursor: default; }
+  #navhud .hint { color: #8b949e; }
+  /* walk-mode crosshair, shown while the pointer is locked */
+  #crosshair {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 20;
+    color: #e6edf3; font: 18px/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+    text-shadow: 0 0 4px #000; pointer-events: none; display: none;
   }
 </style>
 </head>
 <body>
 <div id="panel"></div>
-<div id="help">cmd-drag/right-drag: orbit</div>
 <script type="module" src="/src/main.ts"></script>
 </body>
 </html>

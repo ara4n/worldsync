@@ -71,6 +71,7 @@ let mateOver = null, posSig = '' // mate/stalemate verdict, sticky between settl
 
 world.onload = () => {
   world.env({ background: 0x2b3440 })
+  world.navigation('orbit') // a board world: pin orbit so walkers never fall into the void
   world.camera({ x: 0, y: 9.5, z: 10.8 }, { x: 0, y: 0, z: 0.5 })
 }
 
