@@ -593,6 +593,58 @@ for (const [from, a] of Object.entries(analyzed)) {
     allEdges.push({ from, to, e, local: d1 === d2, pair: d1 === d2 ? null : [d1, d2].sort().join('|') })
   }
 }
+
+// -- pipe endpoints MEAN something --
+// Outgoing: every module has ONE import port - a breakout block on the
+// slab edge facing its district mast - and all its pipes leave from it,
+// fanned just enough not to merge.
+const portOf = {}
+for (const id of Object.keys(layout)) {
+  const L = layout[id]
+  const m = mastPos[districtOf[id]]
+  let dx = m.x - L.x, dz = m.z - L.z
+  if (Math.hypot(dx, dz) < 0.01) { dx = 0; dz = -1 } // main IS its mast: port faces the sim heart
+  const t = 1 / Math.max(Math.abs(dx) / L.hw, Math.abs(dz) / L.hd)
+  const mag = Math.hypot(dx, dz)
+  portOf[id] = {
+    x: L.x + dx * t * 0.96, z: L.z + dz * t * 0.96,
+    // boundary tangent, for fanning the departures
+    tx: -dz / mag, tz: dx / mag,
+  }
+}
+const outSlot = {}
+{
+  const byModule = new Map()
+  for (const e of allEdges) {
+    if (!byModule.has(e.from)) byModule.set(e.from, [])
+    byModule.get(e.from).push(e)
+  }
+  for (const [id, es] of byModule) {
+    es.sort((a, b) => a.to.localeCompare(b.to))
+    es.forEach((e, i) => { outSlot[`${e.from} ${e.to}`] = i - (es.length - 1) / 2 })
+  }
+}
+// Incoming: the socket lands at the centroid of the member blocks this
+// edge imports (nudged clear of the boxes so the drop pipe does not
+// spear them); slab center when those symbols are not displayed.
+const socketFor = (fromId, B, symbols) => {
+  const hits = B.items.filter(it => symbols.has(it.name))
+  let sx = hits.length ? hits.reduce((n, it) => n + it.x, 0) / hits.length : 0
+  let sz = hits.length ? hits.reduce((n, it) => n + it.z, 0) / hits.length : 0
+  const A = layout[fromId]
+  let dx = A.x - (B.x + sx), dz = A.z - (B.z + sz)
+  const mag = Math.hypot(dx, dz) || 1
+  dx /= mag; dz /= mag
+  for (let step = 0; step < 30; step++) {
+    const blocked = B.items.some(it =>
+      Math.abs(sx - it.x) < it.w / 2 + 0.12 && Math.abs(sz - it.z) < it.d / 2 + 0.12)
+    if (!blocked) break
+    sx += dx * 0.14; sz += dz * 0.14
+    sx = Math.max(-B.hw + 0.15, Math.min(B.hw - 0.15, sx))
+    sz = Math.max(-B.hd + 0.15, Math.min(B.hd - 0.15, sz))
+  }
+  return { x: B.x + sx, z: B.z + sz }
+}
 const pairs = [...new Set(allEdges.filter(x => x.pair).map(x => x.pair))].sort()
 const busHeight = Object.fromEntries(pairs.map((p, i) => [p, 2.8 + 0.5 * i]))
 const slots = {}
@@ -615,12 +667,12 @@ for (const { from, to, e, local, pair } of allEdges) {
   const A = layout[from], B = layout[to]
   const name = `pipe_${from}__${to}`
   const j = hash01(name)
-  const ax = A.x + (j - 0.5) * A.hw, az = A.z + (hash01(name + 'z') - 0.5) * A.hd
-  const dirx = A.x - B.x, dirz = A.z - B.z
-  const mag = Math.hypot(dirx, dirz) || 1
-  const jx = B.x + (dirx / mag) * (Math.abs(dirx / mag) * B.hw) * 0.82
-  const jz = B.z + (dirz / mag) * (Math.abs(dirz / mag) * B.hd) * 0.82
-  const aTop = Math.max(...A.items.map(i => i.h)) + SLAB_H
+  const port = portOf[from]
+  const fan = outSlot[`${from} ${to}`] * 0.09
+  const ax = port.x + port.tx * fan, az = port.z + port.tz * fan
+  const socket = socketFor(from, B, e.symbols)
+  const jx = socket.x, jz = socket.z
+  const aTop = SLAB_H + 0.02 // pipes leave from the import port at slab level
   const r = e.dynamic ? 0.03 : e.runtime ? 0.033 : TRUNKS.has(`${from} ${to}`) ? 0.075 : 0.045
   const color = e.dynamic ? 0xaab2bc : e.runtime ? 0xd8dce2 : districtColor[districtOf[from]]
   const mat = matFor(color, { roughness: 0.35, metalness: 0.6 })
@@ -632,7 +684,8 @@ for (const { from, to, e, local, pair } of allEdges) {
   let pts
   if (local) {
     const dist = Math.hypot(jx - ax, jz - az)
-    const H = Math.max(0.7 + 0.6 * j + dist * 0.04, aTop + 0.35)
+    const clear = Math.max(...A.items.map(i => i.h), ...B.items.map(i => i.h)) + SLAB_H
+    const H = Math.max(0.7 + 0.6 * j + dist * 0.04, clear + 0.35)
     pts = [
       P(ax, aTop, az), P(ax, H, az),
       P((ax + jx) / 2, H + dist * 0.02, (az + jz) / 2),
@@ -684,6 +737,17 @@ for (const { from, to, e, local, pair } of allEdges) {
   }
   pipes.add(group)
   pipeCount++
+}
+
+// the import ports: one breakout block per module with outgoing pipes
+const portMat = matFor(0x656e7a, { roughness: 0.4, metalness: 0.7 })
+for (const id of new Set(allEdges.map(e => e.from))) {
+  const port = portOf[id]
+  const block = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.24, 0.3), portMat)
+  block.name = `${layout[id].kind === 'vendor' ? 'dep_' : 'mod_'}${id}_port`
+  block.position.set(port.x, SLAB_H + 0.12, port.z)
+  block.userData = { port: id }
+  pipes.add(block)
 }
 
 // masts: a pylon per district with a collar at each bus height it serves
@@ -756,8 +820,9 @@ floorText('worldsync', cx0 + ext - 5.5, cz0 + ext - 2, 1.3)
     ['slab = one src module in its district colour - dark rim-framed slab = external package', 0.5],
     ['box = function/class - tank = state/const - upright panel = type', 0.5],
     ['footprint = lines of code - height = how many modules consume it', 0.5],
-    ['pipe = an import between two modules, riding its district-pair tray - cones point at the dependency', 0.5],
-    ['slab traces = the exact symbols that import pulls - thin pale pipe = lazy import()', 0.5],
+    ['pipe = an import between two modules - cones point at the dependency', 0.5],
+    ['pipes leave from a module\'s import port (the small gray breakout block on its slab edge)', 0.5],
+    ['and plug in amid the symbols they pull - traces mark each one; thin pale pipe = lazy import()', 0.5],
   ]
   let z = maxZ + 2.2
   for (const [text, size] of lines) {
