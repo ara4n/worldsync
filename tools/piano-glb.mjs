@@ -7,12 +7,22 @@
 // concert grand src/piano.ts used to build at runtime: curved rim, open
 // lid on its stick, strung frame, legs, lyre, 88 keys to scale.
 //
+// The world also CARRIES ITS OWN SOUND: a KHR_audio extension
+// (thirdroom's flavour of the draft) with the Salamander Grand Piano
+// samples (Alexander Holm, CC-BY 3.0; the tonejs minor-third set,
+// A0..C8 every 3 semitones) embedded in the BIN chunk as per-note audio
+// sources ({note} in each source's extras) on one positional emitter
+// attached to the soundboard node. The app's MIDI engine reads exactly
+// that shape: nearest sample per note, pitch-shifted the remaining
+// semitones. Samples are fetched into tools/samples/ on first run
+// (gitignored cache; re-runs are offline).
+//
 // Run: node tools/piano-glb.mjs
 // Upload the result with "load glTF scene (.glb)" (examples/piano.js is
 // the matching pianola script). The app bakes every mesh into the fixed
 // trimesh collider, so the case and floor are solid on all peers without
 // any script-side collider seeding.
-import { writeFileSync } from 'node:fs'
+import { writeFileSync, readFileSync, existsSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import * as THREE from 'three'
@@ -282,21 +292,121 @@ for (let note = FIRST_NOTE; note <= LAST_NOTE; note++) {
   piano.add(mesh)
 }
 
+// -- the sound: Salamander Grand Piano samples as KHR_audio. The tonejs
+// set samples every minor third from A0 (21) to C8 (108); the cache in
+// tools/samples/ is fetched once and reused. --
+const SAMPLE_BASE = 'https://tonejs.github.io/audio/salamander/'
+const SAMPLE_DIR = join(dirname(fileURLToPath(import.meta.url)), 'samples')
+const SAMPLE_NOTES = Array.from({ length: 30 }, (_, i) => 21 + 3 * i) // A0, C1, D#1, ... C8
+const NAMES = ['C', 'Cs', 'D', 'Ds', 'E', 'F', 'Fs', 'G', 'Gs', 'A', 'As', 'B']
+const sampleFile = (note) => NAMES[note % 12] + (Math.floor(note / 12) - 1) + '.mp3'
+
+async function loadSamples() {
+  mkdirSync(SAMPLE_DIR, { recursive: true })
+  const out = []
+  for (const note of SAMPLE_NOTES) {
+    const file = join(SAMPLE_DIR, sampleFile(note))
+    if (!existsSync(file)) {
+      const url = SAMPLE_BASE + sampleFile(note)
+      console.log(`fetching ${url}`)
+      const res = await fetch(url)
+      if (!res.ok) throw new Error(`${url}: ${res.status}`)
+      writeFileSync(file, Buffer.from(await res.arrayBuffer()))
+    }
+    out.push({ note, bytes: readFileSync(file) })
+  }
+  return out
+}
+
+/** Splice a KHR_audio extension into GLB bytes: sample mp3s appended to
+ * the BIN chunk as bufferViews, one audio+source per note ({note} in the
+ * source's extras), one positional emitter carrying every source,
+ * attached to `nodeName`. Returns the rebuilt GLB as a Buffer. */
+function injectAudio(glb, samples, nodeName) {
+  const view = new DataView(glb)
+  if (view.getUint32(0, true) !== 0x46546c67) throw new Error('not a GLB')
+  const jsonLen = view.getUint32(12, true)
+  const json = JSON.parse(Buffer.from(glb, 20, jsonLen).toString('utf8'))
+  let bin = Buffer.alloc(0)
+  let off = 20 + jsonLen
+  while (off < glb.byteLength) {
+    const len = view.getUint32(off, true)
+    const type = view.getUint32(off + 4, true)
+    if (type === 0x004e4942) bin = Buffer.from(glb, off + 8, len)
+    off += 8 + len
+  }
+
+  const parts = [bin]
+  let binLen = bin.byteLength
+  const audio = []
+  const sources = []
+  json.bufferViews ??= []
+  for (const { note, bytes } of samples) {
+    const pad = (4 - (binLen % 4)) % 4
+    if (pad) { parts.push(Buffer.alloc(pad)); binLen += pad }
+    json.bufferViews.push({ buffer: 0, byteOffset: binLen, byteLength: bytes.byteLength })
+    parts.push(bytes)
+    binLen += bytes.byteLength
+    audio.push({ mimeType: 'audio/mpeg', bufferView: json.bufferViews.length - 1, name: `pcm_${note}` })
+    sources.push({ audio: audio.length - 1, gain: 1, name: `note_${note}`, extras: { note } })
+  }
+  json.extensions ??= {}
+  json.extensions.KHR_audio = {
+    audio, sources,
+    emitters: [{
+      name: 'piano', type: 'positional', gain: 1,
+      sources: sources.map((_, i) => i),
+      positional: { distanceModel: 'inverse', refDistance: 1.5, maxDistance: 60, rolloffFactor: 1 },
+    }],
+  }
+  const node = json.nodes.find(n => n.name === nodeName)
+  if (!node) throw new Error(`no node named ${nodeName} to carry the emitter`)
+  node.extensions = { ...node.extensions, KHR_audio: { emitter: 0 } }
+  json.extensionsUsed = [...new Set([...(json.extensionsUsed ?? []), 'KHR_audio'])]
+  json.buffers[0].byteLength = binLen
+  json.asset.copyright = 'Piano samples: Salamander Grand Piano by Alexander Holm, CC-BY 3.0'
+
+  let jsonBuf = Buffer.from(JSON.stringify(json), 'utf8')
+  const jsonPad = (4 - (jsonBuf.byteLength % 4)) % 4
+  if (jsonPad) jsonBuf = Buffer.concat([jsonBuf, Buffer.alloc(jsonPad, 0x20)])
+  const binBuf = Buffer.concat(parts)
+  const header = Buffer.alloc(12 + 8)
+  header.writeUInt32LE(0x46546c67, 0)
+  header.writeUInt32LE(2, 4)
+  header.writeUInt32LE(12 + 8 + jsonBuf.byteLength + 8 + binBuf.byteLength, 8)
+  header.writeUInt32LE(jsonBuf.byteLength, 12)
+  header.writeUInt32LE(0x4e4f534a, 16) // JSON
+  const binHeader = Buffer.alloc(8)
+  binHeader.writeUInt32LE(binBuf.byteLength, 0)
+  binHeader.writeUInt32LE(0x004e4942, 4) // BIN
+  return Buffer.concat([header, jsonBuf, binHeader, binBuf])
+}
+
+const samples = await loadSamples()
 const exporter = new GLTFExporter()
 exporter.parse(world, result => {
   const out = join(dirname(fileURLToPath(import.meta.url)), '..', 'examples', 'piano.glb')
-  writeFileSync(out, Buffer.from(result))
-  // self-check: parse the GLB's JSON chunk and count the rig
-  const view = new DataView(result)
-  const jsonLen = view.getUint32(12, true)
-  const json = JSON.parse(Buffer.from(result, 20, jsonLen).toString('utf8'))
+  // the emitter rides the soundboard: the acoustic center of the case
+  const glb = injectAudio(result, samples, 'soundboard')
+  writeFileSync(out, glb)
+  // self-check: parse the GLB's JSON chunk back and count the rig
+  const jsonLen = glb.readUInt32LE(12)
+  const json = JSON.parse(glb.subarray(20, 20 + jsonLen).toString('utf8'))
   const keys = json.nodes.filter(n => /^key_\d+$/.test(n.name ?? ''))
+  const au = json.extensions?.KHR_audio
   console.log(`wrote ${out}`)
-  console.log(`  ${(result.byteLength / 1024).toFixed(0)} kB, ${json.nodes.length} nodes, `
+  console.log(`  ${(glb.byteLength / 1024).toFixed(0)} kB, ${json.nodes.length} nodes, `
     + `${keys.length} keys (${keys[0]?.name}..${keys[keys.length - 1]?.name}), `
-    + `${json.meshes.length} meshes, ${json.materials.length} materials`)
+    + `${json.meshes.length} meshes, ${json.materials.length} materials, `
+    + `${au?.audio.length ?? 0} audio samples`)
   if (keys.length !== 88) { console.error('FAIL: expected 88 key nodes'); process.exit(1) }
   if (!keys.every(k => typeof k.extras?.note === 'number' && typeof k.extras?.dip === 'number')) {
     console.error('FAIL: key extras missing rigging metadata'); process.exit(1)
+  }
+  if (au?.sources.length !== 30 || !au.sources.every(s => typeof s.extras?.note === 'number')) {
+    console.error('FAIL: audio sources missing note metadata'); process.exit(1)
+  }
+  if (json.nodes.find(n => n.name === 'soundboard')?.extensions?.KHR_audio?.emitter !== 0) {
+    console.error('FAIL: soundboard node carries no emitter'); process.exit(1)
   }
 }, err => { console.error(err); process.exit(1) }, { binary: true })
