@@ -2,3 +2,4 @@ node_modules
 dist
 certs
 tools/samples
+.DS_Store
