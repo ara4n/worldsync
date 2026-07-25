@@ -12,9 +12,10 @@ import type { MatrixClient } from 'matrix-js-sdk'
  */
 export interface DataTransport {
   connect(): Promise<void>
-  /** to === null broadcasts to everyone currently reachable */
-  send(to: string | null, data: string): void
-  onData: (from: string, data: string) => void
+  /** to === null broadcasts to everyone currently reachable. Payloads
+   * are opaque bytes (CBOR-encoded DcMessages; see src/wire.ts). */
+  send(to: string | null, data: Uint8Array<ArrayBuffer>): void
+  onData: (from: string, data: Uint8Array) => void
   /** fires with the full set of reachable identities on every change */
   onParticipants: (identities: Set<string>) => void
   /** transport-level diagnostics (connection state changes, rejoins) */
@@ -89,7 +90,7 @@ async function getSFUConfig(
 }
 
 export class LiveKitTransport implements DataTransport {
-  onData: (from: string, data: string) => void = () => {}
+  onData: (from: string, data: Uint8Array) => void = () => {}
   onParticipants: (identities: Set<string>) => void = () => {}
   onLog: (line: string) => void = () => {}
   onVideoTrack: (identity: string, track: MediaStreamTrack | null) => void = () => {}
@@ -112,13 +113,10 @@ export class LiveKitTransport implements DataTransport {
     this.onParticipants(new Set([...this.room.remoteParticipants.values()].map(p => p.identity)))
   }
 
-  private readonly encoder = new TextEncoder()
-  private readonly decoder = new TextDecoder()
-
   async connect() {
     this.room.on(RoomEvent.DataReceived, (payload, participant, _kind, topic) => {
       if (topic !== TOPIC || !participant) return
-      this.onData(participant.identity, this.decoder.decode(payload))
+      this.onData(participant.identity, payload)
     })
     const emit = () => this.emitParticipants()
     this.room.on(RoomEvent.ParticipantConnected, emit)
@@ -240,13 +238,13 @@ export class LiveKitTransport implements DataTransport {
     return this.room.localParticipant.isCameraEnabled
   }
 
-  send(to: string | null, data: string) {
+  send(to: string | null, data: Uint8Array<ArrayBuffer>) {
     // The session starts broadcasting the moment its grid roots, which can
     // beat the SFU connect; publishData on a pre-connect engine makes
     // livekit-client log a NegotiationError while it tries to negotiate a
     // data channel that cannot exist yet. Drop instead, like any outage.
     if (this.room.state !== ConnectionState.Connected) return
-    void this.room.localParticipant.publishData(this.encoder.encode(data), {
+    void this.room.localParticipant.publishData(data, {
       reliable: true, // retransmitted AND per-sender ordered, unlike text streams
       topic: TOPIC,
       destinationIdentities: to === null ? undefined : [to],
@@ -265,7 +263,7 @@ export class LiveKitTransport implements DataTransport {
  * and confirmed pairwise (hello/ack), so late tabs see early ones.
  */
 export class BroadcastTransport implements DataTransport {
-  onData: (from: string, data: string) => void = () => {}
+  onData: (from: string, data: Uint8Array) => void = () => {}
   onParticipants: (identities: Set<string>) => void = () => {}
   private ch: BroadcastChannel
   private present = new Set<string>()
@@ -279,7 +277,8 @@ export class BroadcastTransport implements DataTransport {
 
   async connect() {
     this.ch.onmessage = ev => {
-      const m = ev.data as { t: 'hello' | 'ack' | 'bye' | 'data'; from: string; to?: string | null; data?: string }
+      // data payloads are CBOR bytes; Uint8Array survives structured clone
+      const m = ev.data as { t: 'hello' | 'ack' | 'bye' | 'data'; from: string; to?: string | null; data?: Uint8Array }
       if (m.from === this.identity) return
       this.lastSeen.set(m.from, Date.now())
       switch (m.t) {
@@ -322,7 +321,7 @@ export class BroadcastTransport implements DataTransport {
     this.onParticipants(new Set(this.present))
   }
 
-  send(to: string | null, data: string) {
+  send(to: string | null, data: Uint8Array<ArrayBuffer>) {
     this.ch.postMessage({ t: 'data', from: this.identity, to, data })
   }
 

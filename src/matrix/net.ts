@@ -2,6 +2,7 @@ import { MatrixRTCSessionManager, MatrixRTCSessionEvent, isLivekitTransportConfi
 import { ClientEvent, EventType, type MatrixClient, type MatrixEvent } from 'matrix-js-sdk'
 import { logger } from 'matrix-js-sdk/lib/logger'
 import type { DcMessage } from '../types'
+import { decodeDc, encodeDc } from '../wire'
 import type { WidgetParams } from './params'
 import { initWidgetClient } from './widget'
 import { WidgetApiToWidgetAction, type IRoomEvent, type WidgetApi } from 'matrix-widget-api'
@@ -102,7 +103,7 @@ export class MatrixNet {
    * to surface through their (possibly throttled) host. */
   private sayHello(ackTo?: string) {
     this.transport?.send(ackTo ?? null,
-      JSON.stringify({
+      encodeDc({
         kind: 'hello', peer: this.id,
         ...(this.joined ? { order: this.order } : {}),
         ...(ackTo ? { ack: true } : {}),
@@ -180,8 +181,8 @@ export class MatrixNet {
     this.transport.onLog = l => this.onLog(l)
     this.transport.onData = (from, data) => {
       // 'from' is the SFU identity; the session keys peers by membership id
-      let msg: DcMessage
-      try { msg = JSON.parse(data) } catch { return /* not ours */ }
+      const msg = decodeDc(data)
+      if (!msg) return // not ours
       if (msg.kind === 'hello') {
         const orderNews = msg.order !== undefined && this.helloOrder.get(msg.peer) !== msg.order
         if (orderNews) this.helloOrder.set(msg.peer, msg.order!)
@@ -557,7 +558,7 @@ export class MatrixNet {
     if (!this.transport) return // still connecting; peers are not up yet either
     // targeted sends need the SFU identity, not the membership id
     const dest = to === null ? null : this.sfuIdFor.get(to) ?? to
-    const data = JSON.stringify(msg)
+    const data = encodeDc(msg)
     const clockMsg = msg.kind === 'ping' || msg.kind === 'pong'
     const delay = clockMsg && !this.lagPings ? 0 : this.sendDelayMs
     if (delay > 0) setTimeout(() => this.transport.send(dest, data), delay)

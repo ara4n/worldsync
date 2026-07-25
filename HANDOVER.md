@@ -153,8 +153,16 @@ test mid-flight; finish edits first.
 
 ## Wire protocol notes
 
-- JSON on data channels (ordered reliable). JSON round-trips f64 exactly
-  except -0 -> 0; emit normalizes -0 (keep this).
+- CBOR on data channels (ordered reliable), src/wire.ts: cbor-x with
+  useRecords:false so every message is a self-describing plain map (no
+  cross-message schema state; joiners decode mid-stream). Swapped from
+  JSON 2026-07-25 (Matthew asked; thirdroom's bespoke ECS replication
+  does not fit this message vocabulary). f64 round-trips exactly;
+  UNLIKE JSON, CBOR would carry -0 faithfully, so session.emit's -0
+  normalization is now the only thing upholding the "-0 never crosses
+  the wire" guarantee (keep it). The headless hub round-trips through
+  the same codec. ws SIGNALING (vite plugin) stays JSON - it never
+  carries sim data.
 - Staleness enforcement is OFF by default (a drop = guaranteed permanent
   divergence; it fights determinism testing). Checkbox re-enables:
   max(250ms, 1.5*RTT+120ms), 10 strikes = excluded.

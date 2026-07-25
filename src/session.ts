@@ -230,8 +230,10 @@ export class Session {
     }
   }
 
-  // JSON round-trips doubles exactly except that -0 becomes 0, so normalise
-  // negative zeros at the source to keep local and remote inputs bit-equal.
+  // Normalise negative zeros at the source to keep local and remote inputs
+  // bit-equal. The original JSON wire flattened -0 to 0 on its own; CBOR
+  // (src/wire.ts) would carry -0 faithfully, so this normalisation is now
+  // the only thing upholding the guarantee - keep it.
   private z = (n: number) => n + 0 === 0 ? 0 : n
   private zv = (v: Vec3) => ({ x: this.z(v.x), y: this.z(v.y), z: this.z(v.z) })
   private zq = (q: Quat) => ({ x: this.z(q.x), y: this.z(q.y), z: this.z(q.z), w: this.z(q.w) })

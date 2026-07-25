@@ -1,4 +1,5 @@
 import { type DcMessage } from './types'
+import { decodeDc, encodeDc } from './wire'
 
 /** Transport-level peer: connection plumbing only. Protocol state (RTT,
  * strikes, divergence) lives in Session's SessionPeer. */
@@ -120,6 +121,7 @@ export class Net {
 
   private bindChannel(peer: Peer, dc: RTCDataChannel) {
     peer.dc = dc
+    dc.binaryType = 'arraybuffer' // CBOR frames; the default is Blob
     dc.onopen = () => {
       peer.connected = true
       this.onLog(`connected to ${peer.id} (#${peer.order})`)
@@ -129,16 +131,15 @@ export class Net {
       peer.connected = false
     }
     dc.onmessage = ev => {
-      let msg: DcMessage
-      try { msg = JSON.parse(String(ev.data)) } catch { return }
-      this.onMessage(peer, msg)
+      const msg = decodeDc(ev.data)
+      if (msg) this.onMessage(peer, msg)
     }
   }
 
   sendTo(peer: Peer, msg: DcMessage) {
     const dc = peer.dc
     if (!dc || dc.readyState !== 'open') return
-    const data = JSON.stringify(msg)
+    const data = encodeDc(msg)
     const clockMsg = msg.kind === 'ping' || msg.kind === 'pong'
     const delay = clockMsg && !this.lagPings ? 0 : this.sendDelayMs
     if (delay > 0) setTimeout(() => { if (dc.readyState === 'open') dc.send(data) }, delay)
