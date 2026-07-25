@@ -195,13 +195,16 @@ counters during serialization to make cross-peer byte comparison
 meaningful again (early-warning internals check, chapter 9) - nice-to-have
 only.
 
-## WebMIDI + pianola (2026-07-24, reworked to glTF 2026-07-25)
+## WebMIDI + pianola (2026-07-24, glTF 2026-07-25, audio 2026-07-25)
 
 world.onmidi exposes WebMIDI to scripts: defining the handler is the
-subscription (access requested lazily, so non-MIDI worlds never prompt);
-local device events are parsed (noteon/noteoff/control/pitchbend),
-delivered to our own script, and broadcast as {kind:'midi'} - a COSMETIC
-plane, never folded/hashed. Deliberate design call
+subscription (access requested lazily, so non-MIDI worlds never
+prompt); a scene carrying note-mapped KHR_audio samples counts as the
+same subscription (an instrument world prompts at scene load, script
+or not). Local device events are parsed
+(noteon/noteoff/control/pitchbend), delivered to our own script, and
+broadcast as {kind:'midi'} - a COSMETIC plane, never folded/hashed.
+Deliberate design call
 (Matthew asked): folding notes as prop ops would cost a rollback per
 note on every peer at piano rates (fold storms, see perf section) to
 sync state physics never reads; cosmetics that do not feed physics stay
@@ -221,7 +224,30 @@ local TRS (write-through components, thirdroom-style), node.extras, and
 addInteractable() for pointer picking - all local cosmetics, restored
 on script stop, trimesh collider untouched (see websg.ts ScriptHost).
 examples/piano.js is the pianola; test/piano.mjs e2e's the full flow
-(glb upload, rig, __jig.midi chord on both tabs, click-a-key capture).
+(glb upload, rig, __jig.midi chord on both tabs, click-a-key capture,
+sample decode + voices sounding/silencing on both tabs).
+
+SOUND is glTF data too (2026-07-25, Matthew asked): piano-glb.mjs
+fetches the Salamander grand set (tonejs mirror, CC-BY 3.0 Alexander
+Holm; 30 mp3s every minor third A0..C8, cached in gitignored
+tools/samples/) and splices thirdroom-flavour KHR_audio into the GLB:
+per-note audio+source ({note} in source extras), one positional
+emitter on the soundboard node; attribution in asset.copyright (glb is
+~2.5MB). scene.ts extracts that at parse time into ParsedScene.audio
+(bytes + emitter anchored to its THREE node); src/audio.ts is the
+engine: decode-once per scene, voice = BufferSource->Gain into the
+emitter's Gain->HRTF-Panner chain, nearest sample pitch-shifted by
+playbackRate (max half a semitone off with minor-third spacing),
+velocity^1.6 gain, 0.35s noteoff ramp, per-peer CC64 sustain, 48-voice
+cap with oldest-steal, listener follows the camera per frame
+(audio.frame in the rAF loop). Driven from deliverMidi - BOTH local
+WebMIDI and remote 'midi' broadcasts, so all peers hear the same
+performance; AudioContext resumes on first gesture (autoplay), tests
+pass --autoplay-policy=no-user-gesture-required. world.sendMidi(status,
+d1, d2) lets scripts perform down the same path (microtask-deferred so
+the onmidi echo cannot re-enter QuickJS mid-dispatch); piano.js clicks
+use it, so a clicked key sounds and dips everywhere. __jig.audio()
+exposes {context, emitters, samples, voices, sounding} for tests.
 
 ## WebSG = glTF manipulation, not drawing (2026-07-25)
 

@@ -163,7 +163,8 @@ data (props, claims, the kv table), never a cosmetic broadcast -
 in.
 
 **MIDI is a cosmetic input plane.** Defining `world.onmidi` *is* the
-subscription: only then does the host request WebMIDI access (so worlds
+subscription - as is a scene carrying note-mapped `KHR_audio` samples
+(see below): only then does the host request WebMIDI access (so worlds
 that never use it never prompt), and every parsed channel message
 (noteon/noteoff/control/pitchbend) from any peer's connected device is
 delivered to every peer's script instance, tagged with its player - the
@@ -171,7 +172,22 @@ local ones directly, the rest over a `midi` broadcast that rides beside
 the protocol: never folded, never hashed. Physics
 never reads a note, so determinism is untouched; a world that folded
 each keypress as an op would instead buy a rollback per note on every
-peer at piano rates.
+peer at piano rates. Scripts can also *perform*:
+`world.sendMidi(status, d1, d2)` pushes a channel message down the
+exact hardware path, so a clicked instrument or a script sequencer
+sounds and animates for the whole room.
+
+**Worlds carry their own sound (`KHR_audio`).** A GLB scene can embed
+audio in thirdroom's flavour of the KHR_audio draft: sample data as
+bufferViews, sources (a `{note}` in a source's extras marks it as an
+instrument sample), and emitters - positional ones ride their scene
+node through an HRTF panner whose listener tracks the camera. The MIDI
+engine (`src/audio.ts`) plays those samples straight off the midi
+plane, local and remote events alike, script or no script: nearest
+sampled note, pitch-shifted the rest of the way via playbackRate,
+velocity to gain, noteoff release, per-peer sustain (CC64), 48-voice
+cap. Everything is local cosmetics; every peer hears the same
+performance because every peer hears the same midi plane.
 
 **Scripts animate existing glTF data, not app primitives.**
 `world.findNodeByName` on a named scene node exposes its local
@@ -186,10 +202,13 @@ the pianola: `examples/piano.glb` (regenerate with `node
 tools/piano-glb.mjs`; the generator stays outside `src/` so vite never
 bundles it) is a modelled concert grand rigged the obvious glTF way -
 each of the 88 keys is a named node (`key_21`..`key_108`) whose origin
-sits on the balance rail, carrying `{note, black, dip}` in its extras -
-and `examples/piano.js` plays it: plug a MIDI keyboard into any peer's
-machine and everyone watches the same key nodes dip (or click a key to
-sound it locally; no audio yet). Nothing folds at all - the scene
+sits on the balance rail, carrying `{note, black, dip}` in its extras,
+and the Salamander grand samples (Alexander Holm, CC-BY 3.0; every
+minor third A0..C8) ride the soundboard node as KHR_audio - and
+`examples/piano.js` plays it: plug a MIDI keyboard into any peer's
+machine (or click a key: `world.sendMidi` performs it for the room)
+and everyone watches the same key nodes dip and hears the same notes
+from the same spot on the stage. Nothing folds at all - the scene
 trimesh already makes the case and floor solid on every peer.
 
 **`examples/dots.js` is dots-3d ported whole into the sandbox** - the
@@ -240,7 +259,9 @@ the claims and the shared chain record (order + tip bead) mid-drag, then
 the clear + refills, all hash-clean; `node test/piano.mjs` uploads the rigged `piano.glb` world
 plus `examples/piano.js`, injects MIDI via the hardware-free
 `__jig.midi` hook asserting both tabs dip (and release) the same key
-nodes, and clicks a key to prove interactable scene-node picking.
+nodes AND sound them (30 KHR_audio samples decoded, voices held while
+the chord is down, silent after release), and clicks a key to prove
+interactable picking performs for both tabs via `world.sendMidi`.
 
 To embed for real, serve the app (dev server works: `npm run dev --
 --host`) and add it to a room in Element Web with
