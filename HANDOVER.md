@@ -370,6 +370,22 @@ for precision manipulation instead of carrying it around. Decisions:
   orbit; the pin clears when the script stops.
 - Selection outline shares the OutlinePass with the inspector and
   world.highlight: last caller wins, fine for a jig.
+- POINTER LOCK (bug Matthew hit in the piano room, fixed 2026-07-26):
+  the walk toggle originally did not request lock - only a later canvas
+  click did, which nobody does - so mouselook silently never engaged.
+  Now the toggle click itself locks (it is a user gesture). When lock is
+  genuinely unavailable, nav latches lockBroken and walk falls back to
+  DRAG-LOOK on empty space (street-view style), with clicks acting
+  normally - that is the Element Web path, whose iframe grants no
+  pointer-lock (mock.html's does now, for what it is worth: current
+  Chrome does not even list pointer-lock as a permissions-policy
+  feature). Esc-exit cooldown failures (~1.3s) are ignored, not latched.
+  Debugging trap: under Playwright/CDP the browser window is UNFOCUSED
+  and requestPointerLock rejects with WrongDocumentError everywhere,
+  iframe or not - bringToFront() + a real click makes it succeed; do not
+  mistake that for a host restriction. Locked mouselook is therefore
+  untestable headlessly (no movementX on synthetic events); drag-look is
+  covered in test/nav.mjs instead.
 
 ## Known gaps / next-step candidates
 

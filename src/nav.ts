@@ -57,6 +57,10 @@ export class Nav {
   get selection(): Selection | null { return this.selected }
   /** the TransformControls instance, for tests and console poking */
   get gizmo() { return this.tc }
+  /** pointer lock is unavailable (a host iframe without
+   * allow="pointer-lock" - Element Web today, like MIDI): walk mode
+   * falls back to drag-look on empty space */
+  lockBroken = false
   /** main wires this: true while a running script claims space + arrows */
   keysClaimedByScript: () => boolean = () => false
 
@@ -94,7 +98,10 @@ export class Nav {
     parent.appendChild(this.crosshair)
 
     document.addEventListener('pointerlockchange', () => {
+      const was = this.locked
       this.locked = document.pointerLockElement === this.view.renderer.domElement
+      if (this.locked) this.lockBroken = false
+      if (was && !this.locked) this.lastUnlockMs = performance.now()
       this.renderHud()
     })
     addEventListener('keydown', e => this.onKeyDown(e))
@@ -135,8 +142,25 @@ export class Nav {
     this.pitch = THREE.MathUtils.clamp(Math.asin(THREE.MathUtils.clamp(d.y, -1, 1)), -PITCH_MAX, PITCH_MAX)
   }
 
+  private lastUnlockMs = -Infinity
+
   requestLock() {
-    this.view.renderer.domElement.requestPointerLock()
+    if (this.lockBroken) return
+    // Chrome returns a promise; a rejection must not stay unhandled (a
+    // widget iframe without allow="pointer-lock" throws WrongDocumentError)
+    const p = this.view.renderer.domElement.requestPointerLock() as unknown as Promise<void> | undefined
+    p?.catch?.(() => this.lockFailed())
+  }
+
+  private lockFailed() {
+    // Esc-exiting lock starts a browser cooldown (~1.3s) during which a
+    // re-request legitimately fails: that is not a broken host, so only
+    // latch the fallback when no lock was recently held
+    if (performance.now() - this.lastUnlockMs < 2000 || this.lockBroken) return
+    this.lockBroken = true
+    console.warn('[worldsync] pointer lock unavailable '
+      + '(host iframe without allow="pointer-lock"?); walk mode falls back to drag-look')
+    this.renderHud()
   }
 
   /** pointer-lock mouselook, fed by Input's pointermove (movementX/Y) */
@@ -419,14 +443,20 @@ export class Nav {
     const forced = this.scriptMode !== null
     const mode = this.effective()
     btn(mode === 'walk' ? 'walk' : 'orbit', mode === 'walk',
-      () => this.setUserMode(this.userMode === 'walk' ? 'orbit' : 'walk'),
+      () => {
+        this.setUserMode(this.userMode === 'walk' ? 'orbit' : 'walk')
+        // the button click is a user gesture: enter mouselook right away
+        if (this.effective() === 'walk') this.requestLock()
+      },
       forced ? 'the world script pins the navigation mode'
         : 'toggle first-person walking (WASD / shift / space) vs orbit view')
     if (forced) (h.lastChild as HTMLButtonElement).disabled = true
     if (mode === 'walk') {
       hint(this.locked
         ? 'WASD move · shift run · space jump · drag box: carry · click box: select · esc: cursor'
-        : 'click the world to look around · WASD move · shift run · space jump')
+        : this.lockBroken
+          ? 'drag: look around · WASD move · shift run · space jump'
+          : 'click the world to look around · WASD move · shift run · space jump')
     } else {
       hint('drag box: move · click box: select · click ground: spawn · cmd/right-drag: orbit')
     }

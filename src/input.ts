@@ -78,6 +78,9 @@ export class Input {
   private captured = false
   private drag: Drag | null = null
   private pending: Pending | null = null
+  /** pointer-lock-less walk (nav.lockBroken): dragging empty space turns
+   * the view, street-view style (drag right = the world swings right) */
+  private lookDrag: { x: number; y: number } | null = null
   private ray = new THREE.Raycaster()
   private ndc = new THREE.Vector2()
 
@@ -111,7 +114,12 @@ export class Input {
     // the edit gizmo owns the pointer while an axis is hot
     if (this.nav.gizmoConsumes()) return
     // walking but not looking: the click's job is to capture the mouse
-    if (this.nav.effective() === 'walk' && !this.nav.locked) { this.nav.requestLock(); return }
+    // (unless this host cannot lock: then clicks act normally and empty
+    // drags become drag-look, so walk works inside Element Web's iframe)
+    if (this.nav.effective() === 'walk' && !this.nav.locked && !this.nav.lockBroken) {
+      this.nav.requestLock()
+      return
+    }
     // the world script gets first refusal (it consumes when a prop is hit)
     if (this.scriptPointer?.down(e)) { this.captured = true; return }
     const hit = this.pickBox(e)
@@ -166,6 +174,11 @@ export class Input {
     if (this.captured) { this.scriptPointer?.move(e); return }
     // pointer-lock mouselook, drag or not: carrying steers by looking
     if (this.nav.locked) this.nav.look(e.movementX, e.movementY)
+    if (this.lookDrag) {
+      this.nav.look(this.lookDrag.x - e.clientX, this.lookDrag.y - e.clientY)
+      this.lookDrag = { x: e.clientX, y: e.clientY }
+      return
+    }
     if (this.pending && this.nav.gizmoConsumes()) {
       // the gizmo won the gesture (its listener runs after ours, so a
       // fast click-on-handle can slip past onDown's check)
@@ -176,7 +189,15 @@ export class Input {
       const dist = this.nav.locked
         ? this.pending.moved
         : Math.hypot(e.clientX - this.pending.x, e.clientY - this.pending.y)
-      if (dist > CLICK_MAX_PX) this.beginDrag()
+      if (dist > CLICK_MAX_PX) {
+        // an empty-space drag while walking without pointer lock is the
+        // drag-look fallback; everything else becomes a real drag
+        if (this.pending.eid === null && this.nav.effective() === 'walk' && !this.nav.locked) {
+          this.pending = null
+          this.lookDrag = { x: e.clientX, y: e.clientY }
+          this.view.renderer.domElement.style.cursor = 'grabbing'
+        } else this.beginDrag()
+      }
     }
     if (!this.drag) {
       if (e.target === this.view.renderer.domElement) {
@@ -223,6 +244,11 @@ export class Input {
     if (this.captured) {
       this.captured = false
       this.scriptPointer?.up(e)
+      return
+    }
+    if (this.lookDrag) {
+      this.lookDrag = null
+      this.view.renderer.domElement.style.cursor = ''
       return
     }
     if (this.drag) {

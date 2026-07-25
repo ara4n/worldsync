@@ -202,6 +202,19 @@ const yaw1 = await b.evaluate(() => window.__jig.view.camera.rotation.y)
 if (Math.abs(yaw1 - yaw0) < 0.3) fail(`arrow look turned ${(yaw1 - yaw0).toFixed(2)}rad, expected ~0.7`)
 console.log(`arrow look turned ${(yaw1 - yaw0).toFixed(2)}rad`)
 
+// -- drag-look fallback: hosts whose iframe cannot pointer-lock (Element
+// Web today) still get mouselook by dragging empty space --
+await b.evaluate(() => { window.__jig.nav.lockBroken = true })
+const dl0 = await b.evaluate(() => window.__jig.view.camera.rotation.y)
+await b.mouse.move(250, 120) // sky: safely above the horizon, no boxes
+await b.mouse.down()
+await b.mouse.move(550, 120, { steps: 8 })
+await b.mouse.up()
+const dl1 = await b.evaluate(() => window.__jig.view.camera.rotation.y)
+if (Math.abs(dl1 - dl0) < 0.3) fail(`drag-look turned ${(dl1 - dl0).toFixed(2)}rad, expected ~0.66`)
+console.log(`drag-look turned ${(dl1 - dl0).toFixed(2)}rad`)
+await b.evaluate(() => { window.__jig.nav.lockBroken = false })
+
 await b.evaluate(() => window.__jig.nav.setUserMode('orbit'))
 await b.waitForFunction(() => window.__jig.view.controls.enabled, null, { timeout: 2000 })
 console.log('back to orbit')
