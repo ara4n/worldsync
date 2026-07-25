@@ -34,7 +34,6 @@ const LAST = 108 // C8
 // as hammering pianola keys rather than eased UI
 const keys = new Map()
 const held = {} // note -> { peer, color }
-let players = {} // peer id -> notes played (for the HUD tally)
 let lastNote = ''
 let clicked = null // key held down by our pointer
 
@@ -77,7 +76,6 @@ world.onmidi = (ev) => {
     press(ev.note, ev.velocity)
     const who = world.peers().find((p) => p.id === ev.peer)
     held[ev.note] = { peer: ev.peer, color: who ? who.color : 0xffffff }
-    players[ev.peer] = (players[ev.peer] || 0) + 1
     lastNote = noteName(ev.note)
     hud()
   } else if (ev.type === 'noteoff') {
@@ -132,13 +130,8 @@ function hud() {
   const notes = Object.keys(held).map(Number).sort((a, b) => a - b)
   const chord = notes.map((n) =>
     `<b style="color:${css(held[n].color)}">${noteName(n)}</b>`).join(' ')
-  const tally = world.peers()
-    .filter((p) => players[p.id])
-    .map((p) => `<span style="color:${css(p.color)}">${p.id.split(':')[0]}: ${players[p.id]}</span>`)
-    .join(' &middot; ')
   world.hud(
     '<h3 style="margin:0">pianola</h3>'
     + '<p style="margin:2px 0">plug in a MIDI keyboard or click a key - everyone sees and hears it</p>'
-    + `<p style="margin:2px 0;font-size:18px">${chord || (lastNote ? `last: ${lastNote}` : '&nbsp;')}</p>`
-    + (tally ? `<p style="margin:2px 0">${tally}</p>` : ''))
+    + `<p style="margin:2px 0;font-size:18px">${chord || (lastNote ? `last: ${lastNote}` : '&nbsp;')}</p>`)
 }
