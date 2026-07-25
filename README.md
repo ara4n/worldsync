@@ -34,6 +34,21 @@ Controls: click the ground to spawn a box, drag a box to move it (physics
 resumes on release, with throw velocity), cmd-drag or right-drag orbits,
 two-finger drag pans along the ground plane, pinch or ctrl-wheel zooms.
 
+Navigation (bottom HUD, thirdroom-style): the `walk` toggle (or `?nav=walk`)
+switches to a first-person avatar - click the world to capture the mouse and
+look around (or use the cursor keys), WASD moves, shift runs, space jumps,
+and dragging a box carries it on your view ray (steer it by looking, throw
+it by releasing mid-swing). The floor comes from the rendered scene, so you
+can climb a glTF world's stairs; the avatar is pure camera, never sim state.
+Single-click a box in either mode to select it (outlined): the view switches
+to orbit around it for precision work, and the HUD grows an `edit` button
+unlocking move/rotate/scale gizmos - drag an axis to transform along it, or
+the center section for all axes. Edits replicate live through the ordinary
+protocol (grab + pose stream + release; scale lands as one `resize` op).
+Click empty space or press esc to deselect and return to where you were.
+World scripts can pin the mode with `world.navigation('orbit'|'walk')` -
+the board worlds (dots, chess, tetrix...) pin orbit.
+
 Rendering: cascaded shadow maps (4 cascades, splits weighted hard toward
 the camera so contact shadows get millimetre texels), double-sided
 shadow casting with a tiny normal bias - the combination that finally
@@ -165,8 +180,11 @@ screen px, or world units for wire-like lines that scale with the
 camera); `shared` lines are broadcast latest-wins per (author, id)
 beside the protocol - never folded, never hashed - while local ones
 never leave the client (`world.me.color` is each peer's deterministic
-accent color for drawing in) - plus `world.env` (background/fog/ground)
-and `world.camera`. Prop motion is animated client-side (bounce drops,
+accent color for drawing in) - plus `world.env` (background/fog/ground),
+`world.camera` (a framing hint in orbit; the avatar's pose while walking)
+and `world.navigation('orbit'|'walk')`, which pins the navigation mode
+for worlds where one regime makes no sense (a dots board is no place for
+a first-person walker). Prop motion is animated client-side (bounce drops,
 fade-in spawns, pop-out despawns): the sim stores logical poses,
 renderers add the juice.
 

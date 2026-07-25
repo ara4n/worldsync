@@ -29,6 +29,11 @@ test mid-flight; finish edits first.
 - `node test/verify-motion.mjs`: single-page replay-vs-live check mid-fall.
 - `node test/persist.mjs`: world persistence under the mock host
   (default-off, inline + mxc checkpoint restore, clear on opt-out).
+- `node test/nav.mjs`: navigation/selection/edit e2e: click-select without
+  disturbing, deselect-vs-spawn clicks, gizmo center-drag converging
+  bit-exact across peers, resize + streamed-rotation replication, and the
+  walker (WASD/run/jump/arrow look). Pointer-lock carrying is manual-only:
+  CDP synthetic events carry no movementX/Y.
 
 ## File map (src/)
 
@@ -45,8 +50,14 @@ test mid-flight; finish edits first.
 - `render.ts`: Three scene, mesh sync from ECS, fixed-timestep interpolation
   (prev->curr by alpha), rubber-band error offsets (View.errors), cmd/ctrl
   toggles left-drag orbit; cosmetic layers (screens, labels, script glTF).
-- `input.ts`: click ground = spawn, drag box = grab/move@33ms/release with
-  throw velocity, presented-pose grab override.
+- `input.ts`: pointer gestures in both nav modes: click ground = spawn,
+  click box = select (grabs defer to the drag threshold so a click never
+  disturbs), drag box = grab/move@33ms/release with throw velocity
+  (presented-pose grab override); walk-locked drags carry on the view ray.
+- `nav.ts`: navigation modes (orbit vs thirdroom-style walk: pointer-lock
+  look, WASD/shift/space, floor raycast, pure camera - never sim state),
+  selection, the bottom HUD, and the edit gizmo (TransformControls ->
+  grab/pose-rot-stream/release, scale -> one 'resize' op).
 - `main.ts`: orchestration; frame loop = fold -> advance -> mirror -> render;
   hash exchange, staleness (opt-in), boot, worker ticker for hidden tabs,
   window.__jig test hooks, __divergence stash.
@@ -321,6 +332,44 @@ is the hide channel), clicking a slab HUDs its extras. Labels are
 flat ShapeGeometry text (extruded TextGeometry ballooned the glb 5x).
 Screenshot loop: scratchpad arch-shot script (mock.html upload +
 script upload + keyboard + png).
+
+## Navigation mode + edit gizmo (2026-07-25)
+
+Matthew asked for thirdroom-style navigation: walk mode (WASD / shift
+run / space jump, pointer-lock or cursor-key look) beside the classic
+orbit, with single-click selection switching to orbit-around-the-box
+for precision manipulation instead of carrying it around. Decisions:
+
+- Default stays ORBIT so the whole scripted-test estate (coordinate
+  clicks, plane drags) keeps working; walk is the HUD toggle, ?nav=walk,
+  or world.navigation('walk'). Flipping the default is one line in
+  nav.ts if wanted.
+- The avatar is PURE CAMERA (src/nav.ts): floor from a downward raycast
+  against the rendered scene (three's per-mesh AABB early-out keeps
+  many-mesh scenes cheap; one giant terrain mesh would want a BVH), no
+  wall collision, nothing enters the timeline. Walking through the arch
+  city works today; piano too (crosshair clicks reach scripts - scriptEv
+  and Input cast through screen center while locked).
+- Clicks SELECT now, so grabs defer until the 6px drag threshold - this
+  removed diverge.mjs's accidental "quick grab+release pairs" stress
+  input (its comment predates this; drags still plow). Its final "worst
+  pose delta" line can read tens of metres when a box was shoved off the
+  ledge: it free-falls forever and the two pages sample live poses at
+  different wall instants. The hash-map comparison right above it is the
+  truth (0 differing ticks = converged).
+- Gizmo edits ride the EXISTING protocol: grab + pose stream + release.
+  Rotation joins the pose plane (optional rot on samples, latest-wins <=
+  tick, applied via setNextKinematicRotation; release carries the final
+  rot so the pin is never a tick stale). Scale is a new 'resize' op whose
+  dims live ONLY in the physics world (colliders serialise into
+  snapshots - no side table to drift); they join the per-body hash, cross
+  boot seams/checkpoints when non-default, and render reads sim.boxDims
+  into mesh.scale each frame.
+- world.navigation('orbit') pins orbit in the board worlds (dots, chess,
+  four-in-a-row, snake, tetrix, videoconf); selection still borrows
+  orbit; the pin clears when the script stops.
+- Selection outline shares the OutlinePass with the inspector and
+  world.highlight: last caller wins, fine for a jig.
 
 ## Known gaps / next-step candidates
 
