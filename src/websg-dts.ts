@@ -166,6 +166,13 @@ declare const world: {
    * script hears the same stream (each tagged with its player) and can
    * animate a shared instrument identically everywhere. */
   onmidi: ((ev: WorldMidiEvent) => void) | null
+  /** perform: send a raw MIDI channel message as if a local device
+   * played it (0x90=noteon, 0x80=noteoff, 0xb0=control). It takes the
+   * exact hardware path - echoed into our own onmidi, played by the
+   * audio engine against the scene's KHR_audio samples, broadcast to
+   * every peer - so a clicked key or a script sequencer sounds and
+   * animates for the whole room. */
+  sendMidi(status: number, d1?: number, d2?: number): void
 
   /** who am I: peer id, bare Matrix user id (the peer id minus the
    * device; = id outside widget mode), whether this peer is the current

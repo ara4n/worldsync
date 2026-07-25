@@ -5,6 +5,7 @@ import { peerColor } from './color'
 import { cachedScene, cacheScene, configureGlbLoader, parseGlb, parseGltfJson } from './scene'
 import { fetchWorldAsset, mediaUploadLimit, SCRIPT_STATE_TYPES, uploadWorldAsset } from './matrix/world'
 import { Net } from './net'
+import { AudioEngine } from './audio'
 import { Session } from './session'
 import { View } from './render'
 import { Input, type Emitter } from './input'
@@ -47,6 +48,9 @@ async function main() {
   await sim.init()
   const view = new View(document.body, sim.ecs)
   configureGlbLoader(view.renderer)
+  // The world's own sound: plays the active scene's KHR_audio samples
+  // from the cosmetic midi plane (see the WebMIDI section below).
+  const audio = new AudioEngine()
   // In widget mode the transport is Matrix (identity from the host client,
   // MatrixRTC membership, LiveKit or mock data path); otherwise the classic
   // ws-signalled WebRTC mesh. The Session cannot tell them apart.
@@ -175,6 +179,7 @@ async function main() {
     if (detail) log(`homeserver said: ${JSON.stringify(detail)}`)
     console.error('[worldsync]', e)
   }
+  audio.onLog = log
   if (wp) console.log('[worldsync] widget mode', {
     userId: wp.userId, deviceId: wp.deviceId, roomId: wp.roomId,
     baseUrl: wp.baseUrl, mockTransport: wp.mockTransport,
@@ -251,8 +256,14 @@ async function main() {
   const sceneFetches = new Set<string>()
   const syncScene = () => {
     const url = sim.sceneUrl
-    view.setScene(url ? cachedScene(url)?.object ?? null : null)
+    const cached = url ? cachedScene(url) : null
+    view.setScene(cached?.object ?? null)
     view.setGroundVisible(!url)
+    // the scene's KHR_audio sound follows it; a scene whose samples are
+    // note-mapped is an instrument, which is a MIDI subscription just
+    // like a script defining world.onmidi
+    audio.setScene(cached?.audio ?? null)
+    if (audio.wantsMidi()) startMidi()
     if (!url || cachedScene(url) || !wp || sceneFetches.has(url)) return
     sceneFetches.add(url)
     const m = net as import('./matrix/net').MatrixNet
@@ -291,14 +302,17 @@ async function main() {
     e.preventDefault()
     script.key({ key: e.key })
   })
-  // --- WebMIDI -> world.onmidi ---
-  // Access is requested lazily, only once a running script defines
-  // world.onmidi (worlds that never use MIDI never prompt). Every parsed
-  // channel message from a local device is delivered to our own script AND
+  // --- WebMIDI -> world.onmidi + the audio engine ---
+  // Access is requested lazily, once a running script defines
+  // world.onmidi OR the scene carries note-mapped KHR_audio samples
+  // (worlds that never use MIDI never prompt). Every parsed channel
+  // message from a local device is delivered to our own script AND
   // broadcast as a cosmetic 'midi' message (never folded, never hashed),
   // so every peer's script hears every peer's device, tagged by peer -
   // which is what lets one world script animate a shared instrument
-  // identically on all clients.
+  // identically on all clients. The SAME plane, local and remote alike,
+  // drives the audio engine, so the instrument also sounds the same
+  // everywhere - script or no script.
   let midiAccess: MIDIAccess | null = null
   let midiRequested = false
   const midiEvent = (peer: string, d: number[]) => {
@@ -317,20 +331,23 @@ async function main() {
     }
   }
   const deliverMidi = (peer: string, d: number[]) => {
-    if (!script || !scriptMidiOn) return
     const ev = midiEvent(peer, d)
-    if (ev) script.midi(ev)
+    if (!ev) return
+    audio.midi(ev)
+    if (script && scriptMidiOn) script.midi(ev)
   }
-  // one entry point for hardware and the __jig test hook alike
+  // one entry point for hardware, scripts (world.sendMidi) and the __jig
+  // test hook alike
   const onMidiBytes = (d: number[]) => {
     if (d.length < 2 || d[0] < 0x80 || d[0] >= 0xf0) return // system/realtime chatter stays local
     deliverMidi(session.id, d)
     net.broadcast({ kind: 'midi', peer: session.id, d })
   }
+  const midiWanted = () => (!!script && scriptMidiOn) || audio.wantsMidi()
   const attachMidiInputs = () => {
     if (!midiAccess) return
     for (const input of midiAccess.inputs.values()) {
-      input.onmidimessage = script && scriptMidiOn
+      input.onmidimessage = midiWanted()
         ? e => { if (e.data) onMidiBytes([...e.data]) }
         : null
     }
@@ -340,7 +357,7 @@ async function main() {
     if (midiRequested) return // denied access stays denied; don't prompt-spam
     midiRequested = true
     if (!('requestMIDIAccess' in navigator)) {
-      log('world.onmidi defined, but this browser has no WebMIDI')
+      log('MIDI wanted (world.onmidi or an instrument scene), but this browser has no WebMIDI')
       return
     }
     navigator.requestMIDIAccess()
@@ -788,6 +805,14 @@ async function main() {
     },
     setEnv: json => view.setEnvironment(JSON.parse(json)),
     setCamera: (x, y, z, tx, ty, tz) => view.setCameraPose({ x, y, z }, { x: tx, y: ty, z: tz }),
+    // world.sendMidi: the script PERFORMS - its bytes take the exact
+    // hardware path (own script + audio engine + broadcast), so a clicked
+    // piano key sounds and moves on every peer. Deferred a microtask so
+    // the echo into world.onmidi never re-enters the sandbox mid-dispatch.
+    sendMidi: (status, d1, d2) => {
+      const d = [status, d1, d2].map(b => Math.max(0, Math.min(255, Math.floor(b))))
+      queueMicrotask(() => onMidiBytes(d))
+    },
   }
 
   // Pointer events for the script: raycast the prop layer, hand the script
@@ -843,7 +868,7 @@ async function main() {
     scriptPointerOn = false
     scriptKeysOn = false
     scriptMidiOn = false
-    attachMidiInputs() // detaches: no script is listening anymore
+    attachMidiInputs() // detaches, unless an instrument scene still listens
     for (const name of [...scriptGltf.keys()]) scriptHost.unloadGltf(name) // its glTF goes with it
     for (const id of [...scriptScreens]) scriptHost.removeScreen(id) // and its screens
     for (const id of [...scriptLabels]) scriptHost.removeLabel(id) // and its labels
@@ -1046,6 +1071,7 @@ async function main() {
       ? Math.min(Math.max(session.tickTimeNow(now) - sim.tick, 0), 1)
       : 0
     view.frame(now, alpha)
+    audio.frame(view.camera) // the listener rides the camera, panners their nodes
     ui.maybe(now, () => ({
       room, id: session.id, order: session.order,
       mic: audioNet.hasAudio?.() ? (micLive ? 'live - M mutes' : 'muted - M unmutes') : 'n/a',
@@ -1115,9 +1141,10 @@ async function main() {
     verify: (depth?: number) => sim.verifyReplay(depth ?? 60),
     roundTrip: () => sim.roundTrip(),
     // inject a MIDI channel message as if a local device sent it (tests
-    // and consoles have no hardware): delivered to our script and
-    // broadcast to peers exactly like the real thing
+    // and consoles have no hardware): delivered to our script and the
+    // audio engine, and broadcast to peers exactly like the real thing
     midi: (status: number, d1?: number, d2?: number) => onMidiBytes([status, d1 ?? 0, d2 ?? 0]),
+    audio: () => audio.stats(),
   }
 }
 

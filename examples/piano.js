@@ -11,12 +11,18 @@
 // solid on every peer: no collider seeding, nothing folded at all.
 //
 // Keys are also selectable: each is addInteractable()d, so clicking one
-// reports it as ev.entity and plays it (locally - the pointer is not a
-// shared input plane; plug in MIDI to perform for the room).
+// reports it as ev.entity and PERFORMS it - the click becomes a real
+// MIDI note via world.sendMidi, taking the exact hardware path (echoed
+// into our own onmidi, played by the audio engine, broadcast to peers).
+//
+// Sound comes from the world itself: piano.glb carries the Salamander
+// grand samples as KHR_audio sources on a positional emitter riding the
+// soundboard, and the app's MIDI engine plays them for every noteon on
+// the midi plane - local device, remote peer, or a clicked key alike.
+// This script only animates the keys; it never touches audio.
 //
 // Load examples/piano.glb with "load glTF scene (.glb)", then upload
-// this with "load world script (.js)". No audio yet: the room's voice
-// channel is the sound stage.
+// this with "load world script (.js)".
 
 const FIRST = 21 // A0
 const LAST = 108 // C8
@@ -77,24 +83,21 @@ world.onmidi = (ev) => {
     delete held[ev.note]
     hud()
   }
-  // control 64 is the sustain pedal, pitchbend etc. also arrive here -
-  // nothing to animate for them (yet)
+  // control 64 (sustain) is the audio engine's business; pitchbend etc.
+  // also arrive here - nothing to animate for them (yet)
 }
 
-// clicking a key plays it while the button is down (local preview)
+// clicking a key performs it while the button is down: the note goes out
+// as real MIDI, and the echo into our own onmidi above does the animating
 world.onpointerdown = (ev) => {
   if (!ev.entity || !ev.entity.startsWith('key_')) return
-  const note = Number(ev.entity.slice(4))
-  clicked = note
-  press(note, 100)
-  lastNote = noteName(note)
-  hud()
+  clicked = Number(ev.entity.slice(4))
+  world.sendMidi(0x90, clicked, 100)
 }
 world.onpointerup = () => {
   if (clicked === null) return
-  release(clicked)
+  world.sendMidi(0x80, clicked, 0)
   clicked = null
-  hud()
 }
 
 world.onupdate = (dt) => {
@@ -120,7 +123,7 @@ function hud() {
     .join(' &middot; ')
   world.hud(
     '<h3 style="margin:0">pianola</h3>'
-    + '<p style="margin:2px 0">plug in a MIDI keyboard and play - everyone sees the keys move (or click a key)</p>'
+    + '<p style="margin:2px 0">plug in a MIDI keyboard or click a key - everyone sees and hears it</p>'
     + `<p style="margin:2px 0;font-size:18px">${chord || (lastNote ? `last: ${lastNote}` : '&nbsp;')}</p>`
     + (tally ? `<p style="margin:2px 0">${tally}</p>` : ''))
 }

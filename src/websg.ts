@@ -160,6 +160,11 @@ export interface ScriptHost {
   removeLabel(id: string): void
   setEnv(json: string): void
   setCamera(x: number, y: number, z: number, tx: number, ty: number, tz: number): void
+  /** send a raw MIDI channel message as if a local device played it:
+   * echoed into our own world.onmidi and the audio engine, and broadcast
+   * on the cosmetic midi plane, so a script-driven note (clicked piano
+   * key, sequencer) sounds and animates on every peer */
+  sendMidi(status: number, d1: number, d2: number): void
 }
 
 const MEMORY_LIMIT = 32 * 1024 * 1024
@@ -443,6 +448,9 @@ const PRELUDE = `
       H.setStateEvent(String(type), JSON.stringify(content ?? {}),
         stateKey === undefined ? globalThis.world.me.user : String(stateKey))
     },
+    // perform: a raw MIDI channel message down the exact hardware path
+    // (world.sendMidi(0x90, note, velocity) is a noteon; 0x80 noteoff)
+    sendMidi(status, d1, d2) { H.sendMidi(Number(status) || 0, Number(d1) || 0, Number(d2) || 0) },
     env(opts) { H.setEnv(JSON.stringify(opts ?? {})) },
     camera(pos, target) {
       const p = vec(pos), t = vec(target)
@@ -622,6 +630,10 @@ export class WorldScript {
       return ctx.undefined
     })
     fn('removeLabel', (id) => { host.removeLabel(ctx.getString(id)); return ctx.undefined })
+    fn('sendMidi', (s, d1, d2) => {
+      host.sendMidi(ctx.getNumber(s), ctx.getNumber(d1), ctx.getNumber(d2))
+      return ctx.undefined
+    })
     fn('setEnv', (j) => { host.setEnv(ctx.getString(j)); return ctx.undefined })
     fn('setCamera', (x, y, z, tx, ty, tz) => {
       host.setCamera(ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z),
