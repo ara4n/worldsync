@@ -48,6 +48,7 @@ async function main() {
   if (cad >= 1) sim.cadence = cad
   await sim.init()
   const view = new View(document.body, sim.ecs)
+  view.dimsFor = id => sim.boxDims(id)
   configureGlbLoader(view.renderer)
   // The world's own sound: plays the active scene's KHR_audio samples
   // from the cosmetic midi plane (see the WebMIDI section below).
@@ -1042,7 +1043,8 @@ async function main() {
         const seamTick = sim.tick + BOOT_LEAD_TICKS
         for (const e of cp.entities) {
           session.emit('boot', e.netId,
-            { pos: e.pos, rot: e.rot, vel: e.linvel, angvel: e.angvel, color: e.color, prop: e.prop, data: e.data },
+            { pos: e.pos, rot: e.rot, vel: e.linvel, angvel: e.angvel, color: e.color,
+              dims: e.dims, prop: e.prop, data: e.data },
             seamTick, sim.tick)
         }
         log(`world restored from checkpoint (${cp.entities.length} entities, saved at tick ${cp.tick})`)

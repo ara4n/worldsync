@@ -33,9 +33,12 @@ export interface Quat { x: number; y: number; z: number; w: number }
 // prop: last write wins in timeline order, hashed for convergence,
 // booted across seams - the home for game state that no prop naturally
 // carries (chess castling rights, a match score, whose turn a round is).
+// 'resize' reshapes a box's cuboid collider (dims = full extents): folded
+// state like everything else, read back out of the physics world itself
+// (snapshots serialise colliders), so no side table exists to drift.
 export type InteractionType =
   'spawn' | 'grab' | 'release' | 'boot' | 'scene'
-  | 'prop' | 'despawn' | 'claim' | 'unclaim' | 'move' | 'paint' | 'data'
+  | 'prop' | 'despawn' | 'claim' | 'unclaim' | 'move' | 'paint' | 'data' | 'resize'
 
 /** prop state carried by boot seams (and 'prop' spawns, minus claim) */
 export interface PropInfo {
@@ -73,7 +76,7 @@ export interface Interaction {
   pop?: boolean   // prop only: false = no spawn fade-in / despawn pop
   opacity?: number // prop only: < 1 renders translucent (ghost previews)
   yaw?: number    // prop only, solid: rotation about Y
-  dims?: Vec3     // prop only, solid: cuboid extents
+  dims?: Vec3     // solid prop / box resize / boot: cuboid full extents
   solid?: boolean // prop only: create a fixed collider in the physics world
   force?: boolean // unclaim only: clear someone else's claim (ghost cleanup)
   prop?: PropInfo // boot only: this entity is a prop, not a rigid body
@@ -89,6 +92,7 @@ export interface BootEntity {
   linvel: Vec3
   angvel: Vec3
   grab?: { holder: string; order: number; target: Vec3 }
+  dims?: Vec3 // resized boxes only: cuboid full extents (default 1,1,1)
   prop?: PropInfo
   data?: string // this entity is a kv entry (netId = key)
 }
@@ -109,7 +113,8 @@ export type DcMessage =
   | { kind: 'i'; i: Interaction }
   // The pose plane: latest-wins continuous motion for a held entity.
   // Never rolls anyone back; recorded per author and read by replays.
-  | { kind: 'pose'; tick: number; peer: string; netId: string; pos: Vec3 }
+  // rot rides along when the holder is precision-rotating (edit gizmo).
+  | { kind: 'pose'; tick: number; peer: string; netId: string; pos: Vec3; rot?: Quat }
   // Ephemeral cosmetic line entity: latest-wins full state per (author,
   // id), purely cosmetic, never folded and never in the hash. Fewer than 2
   // points removes the line; a departed peer's lines go with it.

@@ -28,6 +28,7 @@ export interface InputLogEntry {
   rot?: Quat
   angvel?: Vec3
   color?: number
+  dims?: Vec3
 }
 const ZERO: Vec3 = { x: 0, y: 0, z: 0 }
 
@@ -103,6 +104,13 @@ function hashCtx(ctx: Ctx): number {
     hashF64[7] = lv.x; hashF64[8] = lv.y; hashF64[9] = lv.z
     hashF64[10] = av.x; hashF64[11] = av.y; hashF64[12] = av.z
     for (let i = 0; i < 104; i++) h = Math.imul(h ^ hashBytes[i], 0x01000193)
+    // collider shape is folded state too ('resize' ops): a peer whose box
+    // is a different size must read as diverged
+    const he = b.collider(0)?.halfExtents()
+    if (he) {
+      hashF64[0] = he.x; hashF64[1] = he.y; hashF64[2] = he.z
+      for (let i = 0; i < 24; i++) h = Math.imul(h ^ hashBytes[i], 0x01000193)
+    }
     h = Math.imul(h ^ (b.isSleeping() ? 1 : 0), 0x01000193)
   }
   // Props are folded state too: position, color, size and claim all matter
@@ -154,8 +162,16 @@ function cloneProps(m: Map<string, Prop>): Map<string, Prop> {
   return out
 }
 
-function boxCollider() {
-  return RAPIER.ColliderDesc.cuboid(BOX_HALF, BOX_HALF, BOX_HALF).setRestitution(0.3).setFriction(0.8)
+// Resizes clamp identically on every peer (pure function of the op), so a
+// hostile or buggy sender cannot make peers disagree by sending garbage.
+export const DIMS_MIN = 0.1
+export const DIMS_MAX = 8
+
+function boxCollider(dims?: Vec3) {
+  const clamp = (n: number) => Math.min(DIMS_MAX, Math.max(DIMS_MIN, n)) / 2
+  return RAPIER.ColliderDesc
+    .cuboid(clamp(dims?.x ?? 1), clamp(dims?.y ?? 1), clamp(dims?.z ?? 1))
+    .setRestitution(0.3).setFriction(0.8)
 }
 
 const vec = (v: { x: number; y: number; z: number }): Vec3 => ({ x: v.x, y: v.y, z: v.z })
@@ -289,16 +305,16 @@ export class Sim {
    * however late they arrived. Deliberately NOT snapshotted: tracks are
    * append-only observations, not simulated state.
    */
-  private tracks = new Map<string, Map<string, { tick: number; pos: Vec3 }[]>>()
+  private tracks = new Map<string, Map<string, { tick: number; pos: Vec3; rot?: Quat }[]>>()
 
-  addPose(netId: string, peer: string, tick: number, pos: Vec3) {
+  addPose(netId: string, peer: string, tick: number, pos: Vec3, rot?: Quat) {
     let byPeer = this.tracks.get(netId)
     if (!byPeer) this.tracks.set(netId, (byPeer = new Map()))
     let arr = byPeer.get(peer)
     if (!arr) byPeer.set(peer, (arr = []))
     let i = arr.length
     while (i > 0 && arr[i - 1].tick > tick) i--
-    arr.splice(i, 0, { tick, pos })
+    arr.splice(i, 0, { tick, pos, rot })
   }
 
   /**
@@ -359,6 +375,24 @@ export class Sim {
     const d = Math.hypot(sa.pos.x - g.target.x, sa.pos.y - g.target.y, sa.pos.z - g.target.z)
     if (d <= rate || rate === 0) return sa.pos
     return mix(g.target, sa.pos, rate / d)
+  }
+
+  /** The rotation pin for a held body at `tick`: the newest sample at or
+   * before `tick` that carries one (the edit gizmo streams rot beside pos).
+   * Latest-wins with no rate limit - a spinning kinematic box is far less
+   * violent than a ramming one - and, like pinTarget, it reads only samples
+   * <= tick so live stepping and replays compute identical values. null
+   * leaves the body's rotation alone (plain drags never rotate). */
+  private pinRot(g: Grab, netId: string, tick: number): Quat | null {
+    const arr = this.tracks.get(netId)?.get(g.holder)
+    if (!arr) return null
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const s = arr[i]
+      if (s.tick < g.since) break
+      if (s.tick > tick) continue
+      if (s.rot) return s.rot
+    }
+    return null
   }
 
   /** did `peer` stream any pose in (from, to]? The beat-fold guard: no
@@ -475,6 +509,13 @@ export class Sim {
     return this.world.getRigidBody(h) ?? null
   }
 
+  /** A box's cuboid full extents, read straight from its collider (the
+   * physics world is the only home 'resize' state has). */
+  boxDims(netId: string): Vec3 | null {
+    const he = this.body(netId)?.collider(0)?.halfExtents()
+    return he ? { x: he.x * 2, y: he.y * 2, z: he.z * 2 } : null
+  }
+
   /**
    * Queue an interaction at its author-stamped tick. A past tick schedules a
    * rollback; the current (not yet simulated) tick and claimed-future ticks
@@ -508,6 +549,7 @@ export class Sim {
       this.inputLog.push({
         tick: k, claimedTick, peer: i.peer, order: i.order, seq: i.seq,
         type: i.type, netId: i.netId, pos: i.pos, vel: i.vel, rot: i.rot, angvel: i.angvel, color: i.color,
+        dims: i.dims,
       })
     }
     const entry: Entry = { tick: k, order: i.order, seq: i.seq, i }
@@ -660,6 +702,8 @@ export class Sim {
       const t = this.pinTarget(g, netId, tick)
       g.target = { x: t.x, y: t.y, z: t.z } // persist: next tick approaches from here
       b.setNextKinematicTranslation(g.target)
+      const r = this.pinRot(g, netId, tick)
+      if (r) b.setNextKinematicRotation(r)
     }
     ctx.world.step()
   }
@@ -973,6 +1017,18 @@ export class Sim {
         else ctx.data.set(i.netId, i.data)
         return
       }
+      case 'resize': {
+        // Swap the box's cuboid collider for one with the op's extents.
+        // Remove + recreate (rather than setHalfExtents) so the parent
+        // body's mass properties are recomputed unambiguously; handle
+        // allocation order stays timeline order, like body creation.
+        const b = bodyOf(ctx, i.netId)
+        if (!b || !i.dims) return
+        const old = b.collider(0)
+        if (old) ctx.world.removeCollider(old, false)
+        ctx.world.createCollider(boxCollider(i.dims), b)
+        return
+      }
       case 'boot': {
         // An empty netId is the seam marker for an empty dump: it exists so
         // the seam (rebuild + raced-op replay) happens even in a room with
@@ -1018,7 +1074,7 @@ export class Sim {
           .setLinvel(i.vel?.x ?? 0, i.vel?.y ?? 0, i.vel?.z ?? 0)
           .setAngvel(i.angvel ?? ZERO)
         const body = ctx.world.createRigidBody(desc)
-        ctx.world.createCollider(boxCollider(), body)
+        ctx.world.createCollider(boxCollider(i.dims), body)
         ctx.bodies.set(i.netId, body.handle)
         this.ecs.ensureEntity(i.netId, i.color ?? 0xffffff)
         return
@@ -1093,6 +1149,10 @@ export class Sim {
       if (!b || eid === undefined) continue
       const q = b.rotation()
       const g = grabs ? rec.grabs.get(netId) : undefined
+      // dims cross the seam only when a resize changed them (the default
+      // 1,1,1 is exact: extents only ever come from clamped op floats)
+      const he = b.collider(0)?.halfExtents()
+      const resized = he && (he.x !== BOX_HALF || he.y !== BOX_HALF || he.z !== BOX_HALF)
       out.push({
         netId,
         color: this.ecs.Tint.value[eid],
@@ -1101,6 +1161,7 @@ export class Sim {
         linvel: vec(b.linvel()),
         angvel: vec(b.angvel()),
         grab: g && { holder: g.holder, order: g.order, target: { ...g.target } },
+        dims: resized ? { x: he.x * 2, y: he.y * 2, z: he.z * 2 } : undefined,
       })
     }
     world.free()

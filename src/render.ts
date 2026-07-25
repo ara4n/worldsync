@@ -18,6 +18,8 @@ const currQ = new THREE.Quaternion()
 
 export interface Presented { p: THREE.Vector3; q: THREE.Quaternion }
 
+export interface Vec3Like { x: number; y: number; z: number }
+
 export class View {
   renderer = new THREE.WebGLRenderer({ antialias: true })
   scene = new THREE.Scene()
@@ -27,6 +29,12 @@ export class View {
   // Rubber-band state: presented pose = sim pose + err decayed to zero over rubberMs.
   errors = new Map<number, { p: THREE.Vector3; q: THREE.Quaternion; t0: number }>()
   rubberMs = 100
+  /** box extents live in the sim's colliders ('resize' ops); main wires
+   * this to sim.boxDims so meshes track them */
+  dimsFor: ((netId: string) => Vec3Like | null) | null = null
+  /** while the edit gizmo drags a box, its TransformControls own that
+   * mesh's TRS: frame() must not overwrite them from the sim */
+  poseAuthorityEid: number | null = null
   props: PropLayer
   private geo = new THREE.BoxGeometry(1, 1, 1)
   private mats = new Map<number, THREE.MeshStandardMaterial>()
@@ -588,6 +596,9 @@ export class View {
   frame(now: number, alpha: number) {
     const { Position, Rotation, PrevPosition, PrevRotation } = this.ecs
     for (const [eid, mesh] of this.meshes) {
+      if (eid === this.poseAuthorityEid) continue
+      const dims = this.dimsFor?.(mesh.name)
+      if (dims) mesh.scale.set(dims.x, dims.y, dims.z)
       mesh.position.set(
         PrevPosition.x[eid] + (Position.x[eid] - PrevPosition.x[eid]) * alpha,
         PrevPosition.y[eid] + (Position.y[eid] - PrevPosition.y[eid]) * alpha,

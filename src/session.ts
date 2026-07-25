@@ -299,12 +299,14 @@ export class Session {
   }
 
   /** Continuous motion for a held entity: latest-wins, never rolls anyone
-   * back; heartbeat folds heal its contact consequences. */
-  streamPose(netId: string, pos: Vec3) {
+   * back; heartbeat folds heal its contact consequences. rot rides along
+   * while the holder is precision-rotating (the edit gizmo). */
+  streamPose(netId: string, pos: Vec3, rot?: Quat) {
     if (!this.started) return
     const p = this.zv(pos)
-    this.sim.addPose(netId, this.id, this.sim.tick, p)
-    this.sendRaw(null, { kind: 'pose', tick: this.sim.tick, peer: this.id, netId, pos: p })
+    const r = rot && this.zq(rot)
+    this.sim.addPose(netId, this.id, this.sim.tick, p, r)
+    this.sendRaw(null, { kind: 'pose', tick: this.sim.tick, peer: this.id, netId, pos: p, rot: r })
   }
 
   receive(fromId: string, msg: DcMessage) {
@@ -381,7 +383,7 @@ export class Session {
         if (!this.admissible(peer, msg.tick)) return
         // Recorded, not folded: the next beat from this author re-simulates
         // the interval against the completed track.
-        this.sim.addPose(msg.netId, msg.peer, msg.tick, msg.pos)
+        this.sim.addPose(msg.netId, msg.peer, msg.tick, msg.pos, msg.rot)
         break
       }
       case 'beat': {
@@ -413,8 +415,8 @@ export class Session {
         }
         for (const e of entities) {
           this.emit('boot', e.netId,
-            { pos: e.pos, rot: e.rot, vel: e.linvel, angvel: e.angvel, grab: e.grab, color: e.color, prop: e.prop,
-              data: e.data },
+            { pos: e.pos, rot: e.rot, vel: e.linvel, angvel: e.angvel, grab: e.grab, color: e.color,
+              dims: e.dims, prop: e.prop, data: e.data },
             seamTick, from)
         }
         break
