@@ -203,19 +203,26 @@ async function main() {
     }
   }
 
-  // The cosmetic midi plane rides beside the session protocol, so it is
-  // intercepted before receive().
+  // The cosmetic planes (midi, shared lines) ride beside the session
+  // protocol, so they are intercepted before receive(). Shared lines are
+  // latest-wins full state per (author, id).
   const onMsg = (from: string, msg: DcMessage) => {
     if (msg.kind === 'midi') {
       deliverMidi(msg.peer, msg.d)
       return
     }
+    if (msg.kind === 'line') {
+      view.setLine(`${msg.peer}/${msg.id}`, msg.points.length ? msg.points : null,
+        msg.color, msg.opacity, msg.width, msg.worldUnits)
+      return
+    }
     session.receive(from, msg)
   }
-  // A departed peer's claims are cleared by the primary (its own session
-  // can no longer unclaim them).
+  // A departed peer takes its shared lines with it, and the primary clears
+  // any claims it left behind (its own session can no longer unclaim them).
   const onLeft = (id: string) => {
     session.peerLeft(id)
+    view.removeLines(`${id}/`)
     if (isRoot()) {
       for (const [pid, p] of sim.props) {
         if (p.claim === id) session.emit('unclaim', pid, { pos: { x: 0, y: 0, z: 0 }, force: true })
@@ -396,6 +403,9 @@ async function main() {
     id, x: p.pos.x, y: p.pos.y, z: p.pos.z, color: p.color, size: p.size, kind: p.kind,
     claimedBy: p.claim ?? '', mine: p.claim === session.id,
   })
+  // The script's line entities: rendered locally under our author key, and
+  // (when shared) broadcast as full latest-wins state per (author, id).
+  const scriptLines = new Map<string, boolean>() // id -> shared
   // Script-instantiated glTF (world.loadGltf): local cosmetics parsed
   // from script-supplied glTF JSON, mounted under view.scriptRoot; their
   // nodes join the scene-node namespace below. Parsing is async: the
@@ -764,6 +774,25 @@ async function main() {
       session.emit('data', key, { pos: { x: 0, y: 0, z: 0 }, data: json })
       return true
     },
+    line: (id, pointsJson, color, opacity, width, worldUnits, shared) => {
+      const points = pointsJson ? JSON.parse(pointsJson) as { x: number; y: number; z: number }[] : []
+      scriptLines.set(id, shared)
+      view.setLine(`${session.id}/${id}`, points, color, opacity, width, worldUnits)
+      if (shared) {
+        net.broadcast({ kind: 'line', peer: session.id, id, points, color, opacity, width, worldUnits })
+      }
+    },
+    removeLine: id => {
+      const shared = scriptLines.get(id)
+      if (shared === undefined) return
+      scriptLines.delete(id)
+      view.setLine(`${session.id}/${id}`, null, 0, 0, 0, false)
+      if (shared) {
+        net.broadcast({
+          kind: 'line', peer: session.id, id, points: [], color: 0, opacity: 0, width: 0, worldUnits: false,
+        })
+      }
+    },
     loadGltf: (name, json) => {
       if (scriptGltf.has(name)) return false
       const entry: { obj: import('three').Object3D | null } = { obj: null }
@@ -883,6 +912,7 @@ async function main() {
     scriptKeysOn = false
     scriptMidiOn = false
     attachMidiInputs() // detaches, unless an instrument scene still listens
+    for (const id of [...scriptLines.keys()]) scriptHost.removeLine(id) // its lines go with it
     for (const name of [...scriptGltf.keys()]) scriptHost.unloadGltf(name) // its glTF goes with it
     for (const id of [...scriptScreens]) scriptHost.removeScreen(id) // and its screens
     for (const id of [...scriptLabels]) scriptHost.removeLabel(id) // and its labels

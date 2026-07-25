@@ -91,6 +91,18 @@ interface WorldProp {
   mine: boolean
 }
 
+/** Cosmetic line entity: the script owns and animates it (fewer than 2
+ * points hides it). Shared lines broadcast latest-wins per (author, id);
+ * animate those sparingly, each mutation is a network message. */
+interface WorldLine {
+  points: WebSG.Vector3[]
+  color: number
+  opacity: number
+  /** screen px by default, world units with worldUnits:true at creation */
+  width: number
+  despawn(): void
+}
+
 /** Cosmetic video screen: a plane showing a peer's camera stream (dark
  * placeholder until they share). Local-only; creating one reveals the
  * camera toggle. */
@@ -271,14 +283,13 @@ declare const world: {
   /** every present key, sorted */
   dataKeys(): string[]
 
-  // -- cosmetics: local-only unless noted, never folded, never hashed.
-  // There are deliberately NO drawing primitives: the WebSG API
-  // manipulates glTF data. A script that wants geometry instantiates
-  // its own glTF and animates the nodes (see the polyline helper in the
-  // example worlds). --
+  // -- cosmetics: local-only unless noted, never folded, never hashed --
+  createLine(props?: { points?: Vec3Like[]; color?: number; opacity?: number; width?: number
+    worldUnits?: boolean; shared?: boolean }): WorldLine
   /** parse glTF (a JSON string or plain object; buffers as data URIs)
    * and mount it as a named local cosmetic. Async: its nodes join
-   * findNodeByName once parsed. False when the name is taken. */
+   * findNodeByName once parsed. False when the name is taken. Real glTF
+   * data only - for simple geometry use the primitives above. */
   loadGltf(name: string, gltf: string | object): boolean
   /** unmount and dispose a loadGltf instance */
   unloadGltf(name: string): void

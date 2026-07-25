@@ -304,8 +304,12 @@ const hostFor = (p: HubPeer): ScriptHost => ({
     p.session.emit('data', key, { pos: { x: 0, y: 0, z: 0 }, data: json })
     return true
   },
+  line: () => {},
+  removeLine: () => {},
   loadGltf: () => false,
   unloadGltf: () => {},
+  sendMidi: () => {},
+  highlight: () => {},
   setEnv: () => {},
   setCamera: () => {},
   boxes: () => [...p.sim.bodies.keys()].map(id => {

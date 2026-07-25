@@ -249,26 +249,22 @@ the onmidi echo cannot re-enter QuickJS mid-dispatch); piano.js clicks
 use it, so a clicked key sounds and dips everywhere. __jig.audio()
 exposes {context, emitters, samples, voices, sounding} for tests.
 
-## WebSG = glTF manipulation, not drawing (2026-07-25)
+## Line primitive: removed, then RESTORED (2026-07-25)
 
-API design rule from Matthew: the WebSG surface is for MANIPULATING
-glTF DATA, never for procedurally drawing primitives - do not add
-further high-level cosmetic entities (screens and labels predate the
-rule and are grandfathered until they can be glTF too). The line
-entity (and its 'line' DcMessage plane) was REMOVED under this rule.
-Scripts that want geometry call world.loadGltf(name, gltfJson) - glTF
-JSON with data-URI buffers, parsed async, mounted as a local cosmetic
-whose nodes join the scene-node namespace (findNodeByName / writable
-TRS / extras / addInteractable picking) - and the example worlds share
-a byte-identical createPolyline helper (unit cubes stretched per
-segment; polyTick() each update catches late parses; fades animate
-node SCALE, since color/opacity changes reload the batch). Anything
-shared rides real data, not cosmetic broadcasts: dots chains are chain
-order + colour in the kv table plus a "tip" bead prop (radius 0.05)
-the dragger streams world.move ops at (~20Hz), every peer drawing all
-chains locally from that. test/snake.mjs was flaky before and after
-this change (focus-sensitive keyboard game; fails identically on the
-prior commit) - not a regression.
+History, so you don't re-litigate: a "WebSG manipulates glTF data,
+never draws primitives" rule (d98c121) removed world.createLine and
+the 'line' DcMessage plane; example worlds drew wires by loadGltf-ing
+unit cubes via a shared createPolyline helper, and dots moved its
+chains to kv-table data + a tip bead. Matthew REVERSED this the same
+day (drawing lines via glTF instantiation is too clunky): lines are an
+ENGINE PRIMITIVE again alongside boxes/spheres - world.createLine,
+the render-side fat-line layer (Line2, screen-px or worldUnits
+widths), the 'line' latest-wins cosmetic broadcast plane, departed
+peers taking their shared lines with them - and the example worlds are
+back on their pre-d98c121 createLine versions (dots chains ride shared
+lines again). world.loadGltf STAYS for instantiating real glTF data;
+it is just not the mandatory path for simple geometry. test/snake.mjs
+remains a focus-sensitive flake either side of all this.
 
 ## Architecture world (2026-07-25)
 

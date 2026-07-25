@@ -1,6 +1,9 @@
 import * as THREE from 'three'
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js'
 import { CSM } from 'three/addons/csm/CSM.js'
+import { Line2 } from 'three/addons/lines/Line2.js'
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js'
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { OutlinePass } from 'three/addons/postprocessing/OutlinePass.js'
@@ -27,6 +30,11 @@ export class View {
   props: PropLayer
   private geo = new THREE.BoxGeometry(1, 1, 1)
   private mats = new Map<number, THREE.MeshStandardMaterial>()
+  /** cosmetic line entities keyed "author/lineId"; scripts animate them.
+   * Line2 "fat lines", because WebGL clamps core line rasterisation to
+   * 1px: width is real - screen px, or world units for wire-like lines
+   * that should scale with the camera. */
+  private lines = new Map<string, { obj: Line2; pointsKey: string }>()
   private defaultBackground = new THREE.Color(0x0e1116)
 
   constructor(parent: HTMLElement, public ecs: EcsStore) {
@@ -160,7 +168,66 @@ export class View {
       this.renderer.setSize(innerWidth, innerHeight)
       this.composer?.setSize(innerWidth, innerHeight)
       this.csm.updateFrustums()
+      // fat-line widths are screen-space: their materials carry the viewport
+      for (const l of this.lines.values()) l.obj.material.resolution.set(innerWidth, innerHeight)
     })
+  }
+
+  /** Cosmetic line entity, keyed "author/lineId": full state per call,
+   * latest wins; null or fewer than 2 points removes it. Geometry rebuilds
+   * only when the points actually change, so per-frame color/opacity/width
+   * animation from a script stays a material-only update. */
+  setLine(key: string, points: { x: number; y: number; z: number }[] | null, color: number, opacity: number,
+    width: number, worldUnits: boolean) {
+    const existing = this.lines.get(key)
+    if (!points || points.length < 2) {
+      if (existing) {
+        this.scene.remove(existing.obj)
+        existing.obj.geometry.dispose()
+        existing.obj.material.dispose()
+        this.lines.delete(key)
+      }
+      return
+    }
+    const lineGeo = () => {
+      const g = new LineGeometry()
+      g.setPositions(points.flatMap(p => [p.x, p.y, p.z]))
+      return g
+    }
+    const pointsKey = JSON.stringify(points)
+    if (existing) {
+      if (existing.pointsKey !== pointsKey) {
+        existing.obj.geometry.dispose()
+        existing.obj.geometry = lineGeo()
+        existing.obj.computeLineDistances()
+        existing.pointsKey = pointsKey
+      }
+      const m = existing.obj.material
+      m.color.setHex(color)
+      m.opacity = opacity
+      m.linewidth = width
+      if (m.worldUnits !== worldUnits) { m.worldUnits = worldUnits; m.needsUpdate = true }
+      // fully transparent still writes depth, which carves invisible
+      // notches out of lines it coincides with - skip rendering instead
+      existing.obj.visible = opacity > 0
+      return
+    }
+    const mat = new LineMaterial({ color, transparent: true, opacity, linewidth: width, worldUnits })
+    mat.resolution.set(innerWidth, innerHeight)
+    const obj = new Line2(lineGeo(), mat)
+    obj.name = key // "author/lineId", for the inspector
+    obj.visible = opacity > 0
+    obj.computeLineDistances()
+    obj.renderOrder = 999 // never buried by the props it threads through
+    this.scene.add(obj)
+    this.lines.set(key, { obj, pointsKey })
+  }
+
+  /** Remove every line whose key starts with prefix (an author's "id/"). */
+  removeLines(prefix: string) {
+    for (const key of [...this.lines.keys()]) {
+      if (key.startsWith(prefix)) this.setLine(key, null, 0, 0, 0, false)
+    }
   }
 
   // Selection outline (the inspector's): a post silhouette like thirdroom's,

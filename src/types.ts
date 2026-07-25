@@ -110,8 +110,13 @@ export type DcMessage =
   // The pose plane: latest-wins continuous motion for a held entity.
   // Never rolls anyone back; recorded per author and read by replays.
   | { kind: 'pose'; tick: number; peer: string; netId: string; pos: Vec3 }
+  // Ephemeral cosmetic line entity: latest-wins full state per (author,
+  // id), purely cosmetic, never folded and never in the hash. Fewer than 2
+  // points removes the line; a departed peer's lines go with it.
+  | { kind: 'line'; peer: string; id: string; points: Vec3[]; color: number; opacity: number; width: number
+      worldUnits: boolean }
   // Ephemeral MIDI event from a peer's connected device (world.onmidi):
-  // a cosmetic plane - never folded, never hashed. d is the raw 2-3 byte
+  // cosmetic like lines - never folded, never hashed. d is the raw 2-3 byte
   // channel message [status, data1, data2]; every peer's script hears every
   // peer's device, so worlds can animate instruments (or jam) together.
   | { kind: 'midi'; peer: string; d: number[] }
