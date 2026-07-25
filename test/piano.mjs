@@ -3,17 +3,25 @@
 // find the key nodes in the scene. MIDI injected on a (__jig.midi, the
 // hardware-free path through the exact hardware pipe) must dip the
 // matching key NODES on both tabs - locally via direct delivery, on b
-// via the cosmetic 'midi' broadcast - and note-off must release them.
-// Clicking a key must play it through interactable scene-node picking,
-// capturing the gesture away from box spawning. Nothing folds: the world
-// needs no script-seeded collider (the scene trimesh is the case).
+// via the cosmetic 'midi' broadcast - and SOUND on both: the glb
+// carries the Salamander samples as KHR_audio, so the engine must
+// decode all 30 and hold voices while the chord is down. Clicking a
+// key must perform it (world.sendMidi): dip + sound on BOTH tabs,
+// still capturing the gesture away from box spawning. Nothing folds:
+// the world needs no script-seeded collider (the scene trimesh is the
+// case).
 // Run the dev server first: npm run dev
 import { chromium } from 'playwright'
 import { readFileSync } from 'node:fs'
 
 const base = process.env.URL ?? 'http://localhost:5173'
 const room = 'pn' + Math.random().toString(36).slice(2, 8)
-const browser = await chromium.launch({ headless: false })
+const browser = await chromium.launch({
+  headless: false,
+  // let AudioContext run without a user gesture: the audio assertions
+  // must hear the injected chord before any click happens
+  args: ['--autoplay-policy=no-user-gesture-required'],
+})
 const ctx = await browser.newContext()
 
 function fail(msg) {
@@ -63,7 +71,16 @@ for (const [t, name] of [[a, 'a'], [b, 'b']]) {
     !!window.__jig.view.scene.getObjectByName('key_60'), null, { timeout: 20000 })
     .catch(() => fail(`${name}: scene never showed the key rig`))
 }
-console.log('piano.glb world up on both tabs; uploading pianola script...')
+// the scene's KHR_audio samples must all decode before notes can sound
+for (const [t, name] of [[a, 'a'], [b, 'b']]) {
+  await t.frame.waitForFunction(() => {
+    const s = window.__jig.audio()
+    return s.context === 'running' && s.samples === 30
+  }, null, { timeout: 20000 })
+    .catch(async () => fail(`${name}: scene audio never came up `
+      + `(${JSON.stringify(await t.frame.evaluate(() => window.__jig.audio()))})`))
+}
+console.log('piano.glb world up on both tabs (30 samples decoded); uploading pianola script...')
 await a.frame.setInputFiles('#scriptfile', {
   name: 'piano.js', mimeType: 'text/javascript', buffer: readFileSync('examples/piano.js'),
 })
@@ -85,6 +102,12 @@ for (const n of [60, 64, 67]) {
   await waitDown(a.frame, n, 'a chord down (local delivery)')
   await waitDown(b.frame, n, 'b chord down (midi broadcast)')
 }
+// ...and sound on both: three voices sounding while the chord is held
+for (const [t, name] of [[a, 'a'], [b, 'b']]) {
+  await t.frame.waitForFunction(() => window.__jig.audio().sounding >= 3, null, { timeout: 5000 })
+    .catch(async () => fail(`${name}: chord never sounded `
+      + `(${JSON.stringify(await t.frame.evaluate(() => window.__jig.audio()))})`))
+}
 
 // release two ways: explicit noteoff and the noteon-velocity-0 idiom
 await a.frame.evaluate(() => {
@@ -96,9 +119,15 @@ for (const n of [60, 64, 67]) {
   await waitUp(a.frame, n, 'a chord up')
   await waitUp(b.frame, n, 'b chord up')
 }
+// released voices ramp out and end; nothing may keep sounding
+for (const [t, name] of [[a, 'a'], [b, 'b']]) {
+  await t.frame.waitForFunction(() => window.__jig.audio().sounding === 0, null, { timeout: 5000 })
+    .catch(() => fail(`${name}: voices kept sounding after noteoff`))
+}
 
-// clicking a key plays it: interactable scene-node picking must capture
-// the gesture (no box spawns) and dip the clicked key while held
+// clicking a key performs it (world.sendMidi): interactable scene-node
+// picking must capture the gesture (no box spawns), dip the clicked key
+// while held, and sound + dip on b too via the broadcast
 console.log('clicking key_84 on a...')
 await a.frame.evaluate(() => {
   const v = window.__jig.view
@@ -116,8 +145,14 @@ const s = await a.frame.evaluate(() => {
 await a.page.mouse.move(off.x + s.x, off.y + s.y)
 await a.page.mouse.down()
 await waitDown(a.frame, 84, 'a clicked key down')
+await waitDown(b.frame, 84, 'b clicked key down (sendMidi broadcast)')
+for (const [t, name] of [[a, 'a'], [b, 'b']]) {
+  await t.frame.waitForFunction(() => window.__jig.audio().sounding >= 1, null, { timeout: 5000 })
+    .catch(() => fail(`${name}: clicked key never sounded`))
+}
 await a.page.mouse.up()
 await waitUp(a.frame, 84, 'a clicked key up')
+await waitUp(b.frame, 84, 'b clicked key up')
 const spawned = await a.frame.evaluate(() => window.__jig.sim.bodies.size)
 if (spawned !== 0) fail(`click was not captured: ${spawned} box(es) spawned`)
 
