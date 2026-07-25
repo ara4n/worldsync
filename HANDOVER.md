@@ -270,6 +270,28 @@ chains locally from that. test/snake.mjs was flaky before and after
 this change (focus-sensitive keyboard game; fails identically on the
 prior commit) - not a regression.
 
+## Architecture world (2026-07-25)
+
+tools/arch-glb.mjs builds examples/arch.glb: the codebase as a 3D
+machine world, at MEMBER granularity, analyzed (not curated) with the
+TypeScript compiler API. Modules are district slabs (core north,
+render east, scripting south, transports west; vendors one layer deep
+in graphite at each district's edge) carrying blocks for their major
+members - when one class/function dominates a file (Sim, main()) the
+tool descends into it. Footprint ~ lines, height ~ consumer count
+(load-bearing = towers; main = the flat central manifold). Pipes =
+imports, symbol-accurate: a trunk drops onto the provider's slab and
+thin traces fan out to exactly the member blocks that edge imports;
+dynamic import() seams are thin pale pipes; net->vite /signal is the
+one runtime wire. Every slab/member/pipe is a named node (mod_sim,
+mod_sim__rollback, dep_three__Mesh, pipe_main__sim) with
+{module, member, kind, loc, consumers, symbols} extras - piano-rig
+style, so telemetry can later be overlaid by a world script scaling
+blocks from profiling data. Slab positions relax to avoid overlap from
+hand-placed district anchors; labels are flat ShapeGeometry text
+(extruded TextGeometry ballooned the glb 5x). Screenshot loop:
+scratchpad arch-shot script (mock.html upload + camera + png).
+
 ## Known gaps / next-step candidates
 
 - Cross-machine wall-clock skew shifts tick binning (same-machine tabs are
