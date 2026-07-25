@@ -127,9 +127,17 @@ world.onupdate = (dt) => {
 
 function hud() {
   const css = (c) => '#' + c.toString(16).padStart(6, '0')
-  const notes = Object.keys(held).map(Number).sort((a, b) => a - b)
-  const chord = notes.map((n) =>
-    `<b style="color:${css(held[n].color)}">${noteName(n)}</b>`).join(' ')
+  // who is pressing which notes: held notes grouped per performer, each
+  // group in the player's accent color
+  const byPeer = new Map()
+  for (const n of Object.keys(held).map(Number).sort((a, b) => a - b)) {
+    const h = held[n]
+    if (!byPeer.has(h.peer)) byPeer.set(h.peer, { color: h.color, notes: [] })
+    byPeer.get(h.peer).notes.push(noteName(n))
+  }
+  const chord = [...byPeer.entries()].map(([peer, g]) =>
+    `<span style="color:${css(g.color)}">${peer.split(':')[0]}: <b>${g.notes.join(' ')}</b></span>`)
+    .join(' &middot; ')
   world.hud(
     '<h3 style="margin:0">pianola</h3>'
     + '<p style="margin:2px 0">plug in a MIDI keyboard or click a key - everyone sees and hears it</p>'
