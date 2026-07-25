@@ -117,7 +117,8 @@ function hud() {
       + `<br>imports: ${deps}</p>`
   }
   world.hud(
-    '<h3 style="margin:0">worldsync architecture</h3>'
+    '<h3 style="margin:0">worldsync architecture '
+    + `<span style="font-size:11px;opacity:0.6">script v3 / glb v${(manifest && manifest.version) || '?'}</span></h3>`
     + `<p style="margin:2px 0">SPACE: ${mode === 'full' ? 'collapse to module skeleton' : 'expand member detail'}`
     + (queue.length ? ' (sweeping...)' : '')
     + '<br>slab = module (rim-framed = external pkg), blocks = its functions/state/types'
