@@ -185,6 +185,42 @@ export class View {
       this.composer.addPass(new OutputPass())
     }
     if (this.outlinePass) this.outlinePass.selectedObjects = objects
+    // Beyond the silhouette, the selection itself glows: every mesh under
+    // a selected object swaps to an emissive clone of its material for
+    // the duration. Clones (not mutation) because materials are shared -
+    // brightening one pipe's material in place would light every pipe
+    // drawn with it. Restored on the next selection change.
+    for (const [mesh, orig] of this.lit) mesh.material = orig
+    this.lit.clear()
+    for (const root of objects) {
+      root.traverse(node => {
+        const mesh = node as THREE.Mesh
+        if (!mesh.isMesh || this.lit.has(mesh)) return
+        this.lit.set(mesh, mesh.material)
+        mesh.material = Array.isArray(mesh.material)
+          ? mesh.material.map(m => this.brightened(m))
+          : this.brightened(mesh.material)
+      })
+    }
+  }
+  private lit = new Map<THREE.Mesh, THREE.Material | THREE.Material[]>()
+  private brightClones = new Map<THREE.Material, THREE.Material>()
+  private brightened(m: THREE.Material): THREE.Material {
+    let b = this.brightClones.get(m)
+    if (!b) {
+      b = m.clone()
+      const std = b as THREE.MeshStandardMaterial
+      if (std.isMeshStandardMaterial) {
+        // bright but still hued: full emissive saturates to white under
+        // the ACES curve
+        std.emissive = std.color.clone()
+        std.emissiveIntensity = 0.55
+      } else if ((b as THREE.MeshBasicMaterial).isMeshBasicMaterial) {
+        (b as THREE.MeshBasicMaterial).color.multiplyScalar(1.6)
+      }
+      this.brightClones.set(m, b)
+    }
+    return b
   }
 
   private sceneRoot: THREE.Object3D | null = null
