@@ -27,11 +27,14 @@ export interface Emitter {
 
 /** A world script's claim on pointer interactions: down() returning true
  * captures the gesture (props were hit), routing move/up to the script and
- * away from box spawning/grabbing until release. */
+ * away from box spawning/grabbing until release. hover() sees uncaptured
+ * moves too, when the script wants them (world.onpointermove hover
+ * effects); the host no-ops it while a handler is absent. */
 export interface ScriptPointer {
   down(e: PointerEvent): boolean
   move(e: PointerEvent): void
   up(e: PointerEvent): void
+  hover(e: PointerEvent): void
 }
 
 interface Drag {
@@ -106,6 +109,7 @@ export class Input {
     if (!this.drag) {
       if (e.target === this.view.renderer.domElement) {
         this.view.renderer.domElement.style.cursor = this.pickBox(e) ? 'grab' : ''
+        this.scriptPointer?.hover(e) // idle hover, for script highlight effects
       }
       return
     }

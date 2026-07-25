@@ -173,6 +173,10 @@ declare const world: {
    * every peer - so a clicked key or a script sequencer sounds and
    * animates for the whole room. */
   sendMidi(status: number, d1?: number, d2?: number): void
+  /** outline the named scene nodes (the inspector's selection glow);
+   * pass [] to clear. Local-only cosmetic - each peer's script drives
+   * its own highlight. */
+  highlight(names: string[]): void
 
   /** who am I: peer id, bare Matrix user id (the peer id minus the
    * device; = id outside widget mode), whether this peer is the current

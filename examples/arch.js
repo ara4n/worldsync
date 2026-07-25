@@ -6,6 +6,9 @@
 //  - SPACE toggles between full member detail and the module-dependency
 //    skeleton (slabs + pipes + buses only), collapsing detail in a wave
 //    that sweeps across the city (scale is the safe cosmetic channel).
+//  - Hovering a pipe lights it up (world.highlight) along with the two
+//    modules it connects; hovering a module lights the module and its
+//    whole loom of pipes, in and out.
 //  - Clicking a module slab reads its glTF extras and shows the module,
 //    its size, district, dependencies and dependents on the HUD.
 // Everything here is local cosmetics: nothing folds, nothing syncs.
@@ -15,6 +18,8 @@ let mode = 'full' // 'full' | 'skeleton'
 let queue = [] // node names still to (un)collapse this sweep
 let target = 1
 let selected = null
+let hovered = null // entity name under the pointer
+let hoverInfo = ''
 const PER_UPDATE = 60
 
 function rig() {
@@ -26,8 +31,48 @@ function rig() {
     const n = world.findNodeByName(name)
     if (n) n.addInteractable()
   }
+  for (const name of manifest.pipes || []) {
+    const n = world.findNodeByName(name)
+    if (n) n.addInteractable()
+  }
   hud()
   return true
+}
+
+// 'sim' -> 'mod_sim' or 'dep_three', whichever exists
+function moduleNode(id) {
+  if (world.findNodeByName('mod_' + id)) return 'mod_' + id
+  if (world.findNodeByName('dep_' + id)) return 'dep_' + id
+  return null
+}
+
+world.onpointermove = (ev) => {
+  if (!rig()) return
+  const ent = ev.entity && (ev.entity.startsWith('pipe_') || ev.entity.startsWith('mod_')
+    || ev.entity.startsWith('dep_')) ? ev.entity : null
+  if (ent === hovered) return
+  hovered = ent
+  if (!ent) {
+    world.highlight([])
+    hoverInfo = ''
+  } else if (ent.startsWith('pipe_')) {
+    const [from, to] = ent.slice(5).split('__')
+    world.highlight([ent, moduleNode(from), moduleNode(to)].filter(Boolean))
+    const x = world.findNodeByName(ent)
+    const syms = (x && x.extras && x.extras.symbols) || []
+    hoverInfo = `<b>${from}</b> imports <b>${to}</b>`
+      + (syms.length ? `: ${syms.slice(0, 8).join(', ')}${syms.length > 8 ? ', ...' : ''}` : '')
+  } else {
+    // a module: light it plus its whole loom, both directions
+    const id = ent.replace(/^(mod|dep)_/, '')
+    const loom = (manifest.pipes || []).filter((p) => {
+      const [from, to] = p.slice(5).split('__')
+      return from === id || to === id
+    })
+    world.highlight([ent, ...loom])
+    hoverInfo = `<b>${id}</b>: ${loom.length} pipe(s)`
+  }
+  hud()
 }
 
 world.onload = () => {
@@ -76,6 +121,8 @@ function hud() {
     + `<p style="margin:2px 0">SPACE: ${mode === 'full' ? 'collapse to module skeleton' : 'expand member detail'}`
     + (queue.length ? ' (sweeping...)' : '')
     + '<br>slab = module (rim-framed = external pkg), blocks = its functions/state/types'
-    + '<br>pipes = imports between modules, cones point at the dependency; click a slab for info</p>'
+    + '<br>pipes = imports between modules, cones point at the dependency'
+    + '<br>hover a pipe or module to light it up; click a slab for info</p>'
+    + (hoverInfo ? `<p style="margin:2px 0">${hoverInfo}</p>` : '')
     + sel)
 }

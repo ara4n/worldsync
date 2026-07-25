@@ -295,7 +295,17 @@ judged it no clearer - it lives at commit 972d836 if wanted); a cone
 mid-ribbon plus a down-cone at the socket give direction (pipes point
 at what they depend on); traces fan from the socket to the exact
 imported member blocks; dynamic import() thin and pale; net->vite
-/signal the one runtime wire. Every slab/member/pipe
+/signal the one runtime wire. Endpoints are semantic: each module has
+ONE labeled import port (breakout block on its slab edge) that all its
+outgoing pipes leave from, and each arriving pipe's socket rides a
+small mast hoisted above the provider's member skyline at the centroid
+of the symbols it imports, traces arcing DOWN onto each symbol's roof
+(they were invisible between the boxes at slab level). world.highlight
+(new WebSG API -> view.setOutline) powers arch.js hover: pointing at a
+pipe lights it + both endpoint modules and HUDs the symbol list;
+pointing at a module lights its whole loom. Hover needed a host
+change: input.ts forwards UNCAPTURED pointermoves to scripts as
+ScriptPointer.hover, gated on the script defining onpointermove. Every slab/member/pipe
 is a named node (mod_sim, mod_sim__rollback, dep_three__Mesh,
 pipe_main__sim) with {module, member, kind, district, loc, consumers,
 symbols} extras, and an arch_index node carries a manifest -

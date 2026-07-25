@@ -290,6 +290,7 @@ async function main() {
   let scriptFor: string | null = null
   let scriptStarting = false
   let scriptPointerOn = false
+  let scriptMoveOn = false
   let scriptKeysOn = false
   let scriptMidiOn = false
   // Arrow keys go to the script while it defines world.onkeydown; typing
@@ -813,6 +814,15 @@ async function main() {
       const d = [status, d1, d2].map(b => Math.max(0, Math.min(255, Math.floor(b))))
       queueMicrotask(() => onMidiBytes(d))
     },
+    // world.highlight: outline named scene nodes through the view's
+    // OutlinePass (the inspector's selection glow). Local cosmetic;
+    // cleared when the script stops.
+    highlight: namesJson => {
+      const names = JSON.parse(namesJson) as string[]
+      view.setOutline(names.slice(0, 64)
+        .map(n => sceneNodeFor(n).obj)
+        .filter((o): o is NonNullable<typeof o> => !!o))
+    },
   }
 
   // Pointer events for the script: raycast the prop layer, hand the script
@@ -860,12 +870,16 @@ async function main() {
     },
     move: e => script?.pointer('onpointermove', scriptEv(e)),
     up: e => script?.pointer('onpointerup', scriptEv(e)),
+    // uncaptured moves: only raycast + cross the sandbox when the script
+    // actually defines onpointermove (hover highlights)
+    hover: e => { if (script && scriptMoveOn) script.pointer('onpointermove', scriptEv(e)) },
   }
   const stopScript = (why: string) => {
     if (!script) return
     script.dispose()
     script = null
     scriptPointerOn = false
+    scriptMoveOn = false
     scriptKeysOn = false
     scriptMidiOn = false
     attachMidiInputs() // detaches, unless an instrument scene still listens
@@ -874,6 +888,7 @@ async function main() {
     for (const id of [...scriptLabels]) scriptHost.removeLabel(id) // and its labels
     restoreSceneNodes() // scene nodes it moved go back where the glb put them
     scriptInteractables.clear()
+    view.setOutline([]) // its hover/selection glow goes with it
     if (videoWanted) {
       videoWanted = false
       stopCam() // no world is asking for video anymore: stop publishing
@@ -914,6 +929,7 @@ async function main() {
           script = s
           scriptFor = url
           scriptPointerOn = s.handles('onpointerdown')
+          scriptMoveOn = s.handles('onpointermove')
           scriptKeysOn = s.handles('onkeydown')
           scriptMidiOn = s.handles('onmidi')
           if (scriptMidiOn) startMidi()

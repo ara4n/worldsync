@@ -165,6 +165,10 @@ export interface ScriptHost {
    * on the cosmetic midi plane, so a script-driven note (clicked piano
    * key, sequencer) sounds and animates on every peer */
   sendMidi(status: number, d1: number, d2: number): void
+  /** outline the named scene nodes (hover/selection glow via the view's
+   * OutlinePass). JSON array of node names; [] clears. Local cosmetic:
+   * each peer's script drives its own highlight. */
+  highlight(namesJson: string): void
 }
 
 const MEMORY_LIMIT = 32 * 1024 * 1024
@@ -451,6 +455,8 @@ const PRELUDE = `
     // perform: a raw MIDI channel message down the exact hardware path
     // (world.sendMidi(0x90, note, velocity) is a noteon; 0x80 noteoff)
     sendMidi(status, d1, d2) { H.sendMidi(Number(status) || 0, Number(d1) || 0, Number(d2) || 0) },
+    // outline scene nodes by name ([] or no arg clears); local cosmetic
+    highlight(names) { H.highlight(JSON.stringify(Array.isArray(names) ? names.map(String) : [])) },
     env(opts) { H.setEnv(JSON.stringify(opts ?? {})) },
     camera(pos, target) {
       const p = vec(pos), t = vec(target)
@@ -634,6 +640,7 @@ export class WorldScript {
       host.sendMidi(ctx.getNumber(s), ctx.getNumber(d1), ctx.getNumber(d2))
       return ctx.undefined
     })
+    fn('highlight', (j) => { host.highlight(ctx.getString(j)); return ctx.undefined })
     fn('setEnv', (j) => { host.setEnv(ctx.getString(j)); return ctx.undefined })
     fn('setCamera', (x, y, z, tx, ty, tz) => {
       host.setCamera(ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z),

@@ -646,7 +646,9 @@ const socketFor = (fromId, B, symbols) => {
   return { x: B.x + sx, z: B.z + sz }
 }
 const pairs = [...new Set(allEdges.filter(x => x.pair).map(x => x.pair))].sort()
-const busHeight = Object.fromEntries(pairs.map((p, i) => [p, 2.8 + 0.5 * i]))
+// base clears the tallest possible socket mast (tallest member 2.6 +
+// slab + hoist), so ribbons always descend into sockets
+const busHeight = Object.fromEntries(pairs.map((p, i) => [p, 3.7 + 0.5 * i]))
 const slots = {}
 for (const p of pairs) {
   const es = allEdges.filter(x => x.pair === p).sort((a, b) =>
@@ -673,6 +675,12 @@ for (const { from, to, e, local, pair } of allEdges) {
   const socket = socketFor(from, B, e.symbols)
   const jx = socket.x, jz = socket.z
   const aTop = SLAB_H + 0.02 // pipes leave from the import port at slab level
+  // the socket rides a small mast hoisted above the provider's tallest
+  // member (slight per-edge stagger), so the traces fanning out to the
+  // imported symbols arc DOWN in the open instead of vanishing between
+  // the boxes
+  const bTop = Math.max(...B.items.map(i => i.h)) + SLAB_H
+  const socketH = bTop + 0.4 + 0.3 * hash01(name + 's')
   const r = e.dynamic ? 0.03 : e.runtime ? 0.033 : TRUNKS.has(`${from} ${to}`) ? 0.075 : 0.045
   const color = e.dynamic ? 0xaab2bc : e.runtime ? 0xd8dce2 : districtColor[districtOf[from]]
   const mat = matFor(color, { roughness: 0.35, metalness: 0.6 })
@@ -685,11 +693,11 @@ for (const { from, to, e, local, pair } of allEdges) {
   if (local) {
     const dist = Math.hypot(jx - ax, jz - az)
     const clear = Math.max(...A.items.map(i => i.h), ...B.items.map(i => i.h)) + SLAB_H
-    const H = Math.max(0.7 + 0.6 * j + dist * 0.04, clear + 0.35)
+    const H = Math.max(0.7 + 0.6 * j + dist * 0.04, clear + 0.35, socketH + 0.4)
     pts = [
       P(ax, aTop, az), P(ax, H, az),
       P((ax + jx) / 2, H + dist * 0.02, (az + jz) / 2),
-      P(jx, H * 0.55, jz), P(jx, SLAB_H + 0.1, jz),
+      P(jx, (H + socketH) / 2, jz), P(jx, socketH + 0.02, jz),
     ]
   } else {
     const [pa, pb] = pair.split('|')
@@ -707,28 +715,34 @@ for (const { from, to, e, local, pair } of allEdges) {
       P(ax * 0.35 + m1.x * 0.65 + ox, H * 0.55, az * 0.35 + m1.z * 0.65 + oz),
       P(m1.x + ox, H, m1.z + oz),
       P(m2.x + ox, H, m2.z + oz),
-      P(jx * 0.35 + m2.x * 0.65 + ox, H * 0.55, jz * 0.35 + m2.z * 0.65 + oz),
-      P(jx, SLAB_H + 0.1, jz),
+      P(jx * 0.35 + m2.x * 0.65 + ox, Math.max(H * 0.55, socketH + 0.6), jz * 0.35 + m2.z * 0.65 + oz),
+      P(jx, socketH + 0.02, jz),
     ]
   }
   const curve = new THREE.CatmullRomCurve3(pts)
   group.add(new THREE.Mesh(new THREE.TubeGeometry(curve, local ? 40 : 72, r, 10), mat))
   // flow cones: mid-ribbon along the travel direction, and down into
-  // the socket
+  // the socket at the mast top
   flowCone(group, curve.getPointAt(0.5), curve.getTangentAt(0.5), r, mat)
-  flowCone(group, P(jx, SLAB_H + 0.42, jz), P(0, -1, 0), r, mat)
+  flowCone(group, P(jx, socketH + 0.3, jz), P(0, -1, 0), r, mat)
+  // the socket mast: hoists the collar above the member skyline
+  const mastCyl = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.026, 0.026, socketH - SLAB_H, 8), mat)
+  mastCyl.position.set(jx, SLAB_H + (socketH - SLAB_H) / 2, jz)
+  group.add(mastCyl)
   const collar = new THREE.Mesh(new THREE.CylinderGeometry(r * 2.0, r * 2.5, 0.1, 12), mat)
   collar.name = name + '_socket'
-  collar.position.set(jx, SLAB_H + 0.05, jz)
+  collar.position.set(jx, socketH, jz)
   group.add(collar)
+  // traces arc DOWN from the mast top onto each imported symbol's roof
   const traceMat = matFor(dim(color, 0.85), { roughness: 0.4, metalness: 0.5 })
   for (const it of B.items) {
     if (!e.symbols.has(it.name)) continue
     const mx = B.x + it.x, mz = B.z + it.z
     const tc = new THREE.CatmullRomCurve3([
-      P(jx, SLAB_H + 0.02, jz),
-      P((jx + mx) / 2, SLAB_H + 0.22, (jz + mz) / 2),
-      P(mx, SLAB_H + Math.min(0.3, it.h * 0.55), mz),
+      P(jx, socketH - 0.03, jz),
+      P((jx + mx) / 2, socketH + 0.14, (jz + mz) / 2),
+      P(mx, SLAB_H + it.h + 0.02, mz),
     ])
     const trace = new THREE.Mesh(new THREE.TubeGeometry(tc, 12, 0.018, 8), traceMat)
     trace.name = `${name}__${it.name.replace(/[^\w+]/g, '_')}`
@@ -778,8 +792,9 @@ for (const [d, m] of Object.entries(mastPos)) {
 const index = new THREE.Object3D()
 index.name = 'arch_index'
 index.userData = {
-  version: 2,
+  version: 3,
   modules: Object.values(layout).map(L => (L.kind === 'vendor' ? 'dep_' : 'mod_') + L.id),
+  pipes: allEdges.map(e => `pipe_${e.from}__${e.to}`),
   collapse: collapsibles.sort((a, b) => a[1] - b[1]).map(([n]) => n),
 }
 world.add(index)
