@@ -139,19 +139,28 @@ pipeline); props - kinematic, physics-free entities whose position /
 color / size / claim are folded sim state - via `world.createSphere`,
 `world.props()/prop(id)`, `world.claim/unclaim/move/paint/despawn`;
 pointer input via `world.onpointerdown/move/up(ev)` where `ev` carries
-the hit prop plus the raw ray (`WebSG.rayPlane` does plane math for drag
-previews) and a prop hit captures the gesture away from box spawning;
-cosmetics via generic line entities - `world.createLine({points, color,
-opacity, width, worldUnits, shared})` returns a handle whose
-points/color/opacity/width the script mutates (and animates) itself,
-drawn as fat lines (width in screen px, or world units for wire-like
-lines that scale with the camera); `shared` lines are broadcast
-latest-wins per (author, id) beside the protocol - never folded, never
-hashed - while local ones never leave the client (`world.me.color` is
-each peer's deterministic accent color for drawing in) - plus
-`world.env` (background/fog/ground) and `world.camera`. Prop motion is
-animated client-side (bounce drops, fade-in spawns, pop-out despawns):
-the sim stores logical poses, renderers add the juice.
+the hit prop - or the nearest `addInteractable()`d scene node - plus
+the raw ray (`WebSG.rayPlane` does plane math for drag previews), and a
+hit captures the gesture away from box spawning; plus `world.env`
+(background/fog/ground) and `world.camera`. Prop motion is animated
+client-side (bounce drops, fade-in spawns, pop-out despawns): the sim
+stores logical poses, renderers add the juice.
+
+**There are deliberately no drawing primitives.** The WebSG API
+manipulates glTF data; it does not procedurally draw (the old line
+entity was removed for this reason, and no further high-level cosmetic
+primitives should be added - screens and labels predate the rule and
+are grandfathered until they can be glTF too). A script that wants
+geometry loads its own: `world.loadGltf(name, gltf)` parses glTF JSON
+(buffers as data URIs) and mounts it as a named local cosmetic whose
+nodes join the scene-node namespace - findNodeByName, writable TRS,
+extras, interactables - and `world.unloadGltf(name)` (or the script
+stopping) removes it. The example worlds share a ~90-line
+`createPolyline` helper that instantiates a batch of unit cubes this
+way and stretches them segment by segment; anything shared rides real
+data (props, claims, the kv table), never a cosmetic broadcast -
+`world.me.color` is each peer's deterministic accent color for drawing
+in.
 
 **MIDI is a cosmetic input plane.** Defining `world.onmidi` *is* the
 subscription: only then does the host request WebMIDI access (so worlds
@@ -159,7 +168,7 @@ that never use it never prompt), and every parsed channel message
 (noteon/noteoff/control/pitchbend) from any peer's connected device is
 delivered to every peer's script instance, tagged with its player - the
 local ones directly, the rest over a `midi` broadcast that rides beside
-the protocol like shared lines: never folded, never hashed. Physics
+the protocol: never folded, never hashed. Physics
 never reads a note, so determinism is untouched; a world that folded
 each keypress as an op would instead buy a rollback per note on every
 peer at piano rates.
@@ -187,8 +196,12 @@ trimesh already makes the case and floor solid on every peer.
 proving example for all of the above. The 3x3x3 board is props; players
 race to claim dots as they drag chains (you cannot claim a dot someone
 holds - rival chains contest the board dot-by-dot and the timeline
-arbitrates); everyone watches everyone else's chain line wave around
-live; on release the acting peer computes the outcome (clears, column
+arbitrates); everyone watches everyone else's chain wave around live,
+drawn locally by each script from shared data alone - chain order and
+colour in the kv table, the live endpoint as a tiny "tip" bead prop the
+dragger streams `world.move` ops at, stretched into glTF cube wires by
+the polyline helper; on release the acting peer computes the outcome
+(clears, column
 drops, refills, stalemate reshuffle) with its own local `Math.random`
 and ships it as ops, so no shared randomness or seed sync exists
 anywhere. Rollback races are handled in ~15 lines of script
@@ -223,8 +236,8 @@ asserts only the primary emits ops (with no divergence), then closes the
 primary's tab and asserts the survivor's instance takes over; `node
 test/dots.mjs` plays dots for real - uploads `examples/dots.js`, waits
 for the board, drags a chain with the mouse, asserts the second tab sees
-the claims and the chain line mid-drag, then the clear + refills, all
-hash-clean; `node test/piano.mjs` uploads the rigged `piano.glb` world
+the claims and the shared chain record (order + tip bead) mid-drag, then
+the clear + refills, all hash-clean; `node test/piano.mjs` uploads the rigged `piano.glb` world
 plus `examples/piano.js`, injects MIDI via the hardware-free
 `__jig.midi` hook asserting both tabs dip (and release) the same key
 nodes, and clicks a key to prove interactable scene-node picking.

@@ -26,6 +26,14 @@ import variant from '@jitl/quickjs-singlefile-browser-release-sync'
  * stack, and an interrupt-handler deadline per dispatch so a runaway
  * onupdate cannot stall the tick loop. The script sees only what the
  * prelude exposes; there is no ambient authority, no timers, no network.
+ *
+ * API DESIGN RULE (Matthew, 2026-07-25): the WebSG surface is for
+ * MANIPULATING glTF DATA, not for procedurally drawing primitives. Do
+ * not add further high-level cosmetic entities (the line primitive was
+ * removed for this reason; screens and labels predate the rule and are
+ * grandfathered until they can be glTF too). A script that wants to
+ * draw instantiates glTF of its own via world.loadGltf and animates the
+ * resulting nodes' TRS - see the polyline helper in the example worlds.
  */
 
 /** A prop as the script sees it; claimedBy '' means unclaimed. */
@@ -127,15 +135,15 @@ export interface ScriptHost {
   getData(key: string): string | null
   dataKeys(): string[]
   setData(key: string, json: string): boolean
-  // -- cosmetics: generic line entities, animated by the script itself --
-  /** create/update a cosmetic line entity's full state (fewer than 2
-   * points hides it). Shared lines are additionally broadcast latest-wins
-   * per (author, id) so every peer draws them; local ones never leave the
-   * client. Never folded, never hashed. */
-  line(id: string, pointsJson: string, color: number, opacity: number, width: number, worldUnits: boolean,
-    shared: boolean): void
-  /** remove a line entity (broadcast to everyone if it was shared) */
-  removeLine(id: string): void
+  // -- script-instantiated glTF: how scripts draw. No procedural
+  // primitives here by design (see the header rule). --
+  /** parse glTF JSON (embedded data-URI buffers only) and mount it as a
+   * named local cosmetic; its nodes join the scene-node namespace
+   * (findNodeByName / TRS / extras / interactable). Async: nodes appear
+   * once parsed. False when the name is already taken. */
+  loadGltf(name: string, json: string): boolean
+  /** unmount and dispose a loadGltf instance */
+  unloadGltf(name: string): void
   /** create/update a cosmetic video screen: a plane at (x,y,z), yawed
    * about Y, w x h world units, showing the given peer's camera when one
    * is live. Local-only (every peer's script builds its own view); the
@@ -256,42 +264,6 @@ const PRELUDE = `
     let n = nodes.get(id)
     if (!n) { n = new Node(id, scene); nodes.set(id, n) }
     return n
-  }
-  // Cosmetic line entity: the script owns and animates it (points, color,
-  // opacity, width - screen px by default, world units with
-  // worldUnits:true); every mutation ships the full state. shared:true
-  // makes it visible to every peer (latest-wins broadcast); animate those
-  // sparingly, since each mutation is a network message.
-  let lineSeq = 0
-  class Line {
-    constructor(opts = {}) {
-      this._id = 'l' + (++lineSeq)
-      this._shared = !!opts.shared
-      this._points = (opts.points ?? []).map((p) => { const v = vec(p); return { x: v.x, y: v.y, z: v.z } })
-      this._color = typeof opts.color === 'number' ? opts.color : 0xffffff
-      this._opacity = typeof opts.opacity === 'number' ? opts.opacity : 1
-      this._width = typeof opts.width === 'number' ? opts.width : 2
-      this._worldUnits = !!opts.worldUnits
-      this._dead = false
-      this._sync()
-    }
-    _sync() {
-      if (this._dead) return
-      H.line(this._id, JSON.stringify(this._points), this._color, this._opacity, this._width,
-        this._worldUnits, this._shared)
-    }
-    get points() { return this._points.map((p) => new Vector3(p.x, p.y, p.z)) }
-    set points(ps) {
-      this._points = (ps ?? []).map((p) => { const v = vec(p); return { x: v.x, y: v.y, z: v.z } })
-      this._sync()
-    }
-    get color() { return this._color }
-    set color(c) { this._color = c; this._sync() }
-    get opacity() { return this._opacity }
-    set opacity(o) { this._opacity = o; this._sync() }
-    get width() { return this._width }
-    set width(w) { this._width = w; this._sync() }
-    despawn() { if (!this._dead) { this._dead = true; H.removeLine(this._id) } }
   }
   // Cosmetic video screen: a plane showing a peer's camera stream (dark
   // placeholder until they unmute). Local-only: every peer's script
@@ -442,7 +414,12 @@ const PRELUDE = `
     },
     deleteData(key) { return H.setData(String(key), '') },
     dataKeys() { return JSON.parse(H.dataKeys()) },
-    createLine(props) { return new Line(props) },
+    // scripts draw by instantiating glTF data and animating its nodes:
+    // gltf may be a JSON string or a plain object (buffers as data URIs)
+    loadGltf(name, gltf) {
+      return H.loadGltf(String(name), typeof gltf === 'string' ? gltf : JSON.stringify(gltf))
+    },
+    unloadGltf(name) { H.unloadGltf(String(name)) },
     createScreen(props) { return new Screen(props) },
     createLabel(props) { return new Label(props) },
     // a solid invisible cuboid collider: sim state, so despawn/move it via
@@ -625,12 +602,8 @@ export class WorldScript {
     })
     fn('dataKeys', () => ctx.newString(JSON.stringify(host.dataKeys())))
     fn('setData', (k, j) => bool(host.setData(ctx.getString(k), ctx.getString(j))))
-    fn('line', (id, pts, c, op, w, wu, shared) => {
-      host.line(ctx.getString(id), ctx.getString(pts), ctx.getNumber(c), ctx.getNumber(op),
-        ctx.getNumber(w), ctx.dump(wu) === true, ctx.dump(shared) === true)
-      return ctx.undefined
-    })
-    fn('removeLine', (id) => { host.removeLine(ctx.getString(id)); return ctx.undefined })
+    fn('loadGltf', (n, j) => bool(host.loadGltf(ctx.getString(n), ctx.getString(j))))
+    fn('unloadGltf', (n) => { host.unloadGltf(ctx.getString(n)); return ctx.undefined })
     fn('peers', () => json(host.peers()))
     fn('getStateEvents', (t) => json(host.getStateEvents(ctx.getString(t))))
     fn('setStateEvent', (t, j, k) => {

@@ -97,15 +97,16 @@ const claimed = await b.frame.waitForFunction(
   }, [pair.p, pair.q, aId], { timeout: 10000 }).then(() => true).catch(() => false)
 if (!claimed) fail('b never saw a\'s claims on the chained dots')
 else console.log('b sees both dots claimed by a')
-const lineSeen = await b.frame.waitForFunction(
+// ... and the shared chain record + live tip bead it draws the wire from
+// (chains are glTF cubes each peer stretches locally over this data)
+const chainSeen = await b.frame.waitForFunction(
   id => {
-    const lines = window.__jig.view.lines
-    if (!lines) return false
-    for (const key of lines.keys()) if (key.startsWith(id + '/')) return true
-    return false
+    const rec = JSON.parse(window.__jig.sim.data.get('chain:' + id) ?? 'null')
+    if (!rec || !Array.isArray(rec.ids) || rec.ids.length < 2 || !rec.tip) return false
+    return window.__jig.sim.props.has(rec.tip)
   }, aId, { timeout: 5000 }).then(() => true).catch(() => false)
-if (!lineSeen) fail('b never saw a\'s chain line')
-else console.log('b sees a\'s chain line')
+if (!chainSeen) fail('b never saw a\'s shared chain record + tip bead')
+else console.log('b sees a\'s chain data (order + tip bead)')
 
 await a.page.mouse.up()
 

@@ -38,6 +38,16 @@ export function configureGlbLoader(renderer: THREE.WebGLRenderer) {
 }
 
 /**
+ * Parse glTF JSON (embedded data-URI buffers only) into a renderable
+ * graph: script-instantiated cosmetics (world.loadGltf), so no collider
+ * bake - scripts draw with these, they do not build physics.
+ */
+export async function parseGltfJson(json: string): Promise<THREE.Group> {
+  const gltf = await (loader ?? new GLTFLoader()).parseAsync(json, '')
+  return gltf.scene
+}
+
+/**
  * Parse GLB bytes into visuals + collider geometry. The bake is
  * deterministic: same bytes -> same scene graph -> same traversal order,
  * and the f64 matrix transforms round to f32 identically on every peer, so

@@ -42,7 +42,7 @@ test mid-flight; finish edits first.
   fake-latency send delay, per-peer strike/exclusion + divergence latches.
 - `render.ts`: Three scene, mesh sync from ECS, fixed-timestep interpolation
   (prev->curr by alpha), rubber-band error offsets (View.errors), cmd/ctrl
-  toggles left-drag orbit; cosmetic layers (lines, screens, labels).
+  toggles left-drag orbit; cosmetic layers (screens, labels, script glTF).
 - `input.ts`: click ground = spawn, drag box = grab/move@33ms/release with
   throw velocity, presented-pose grab override.
 - `main.ts`: orchestration; frame loop = fold -> advance -> mirror -> render;
@@ -193,7 +193,7 @@ world.onmidi exposes WebMIDI to scripts: defining the handler is the
 subscription (access requested lazily, so non-MIDI worlds never prompt);
 local device events are parsed (noteon/noteoff/control/pitchbend),
 delivered to our own script, and broadcast as {kind:'midi'} - a COSMETIC
-plane like shared lines, never folded/hashed. Deliberate design call
+plane, never folded/hashed. Deliberate design call
 (Matthew asked): folding notes as prop ops would cost a rollback per
 note on every peer at piano rates (fold storms, see perf section) to
 sync state physics never reads; cosmetics that do not feed physics stay
@@ -214,6 +214,27 @@ addInteractable() for pointer picking - all local cosmetics, restored
 on script stop, trimesh collider untouched (see websg.ts ScriptHost).
 examples/piano.js is the pianola; test/piano.mjs e2e's the full flow
 (glb upload, rig, __jig.midi chord on both tabs, click-a-key capture).
+
+## WebSG = glTF manipulation, not drawing (2026-07-25)
+
+API design rule from Matthew: the WebSG surface is for MANIPULATING
+glTF DATA, never for procedurally drawing primitives - do not add
+further high-level cosmetic entities (screens and labels predate the
+rule and are grandfathered until they can be glTF too). The line
+entity (and its 'line' DcMessage plane) was REMOVED under this rule.
+Scripts that want geometry call world.loadGltf(name, gltfJson) - glTF
+JSON with data-URI buffers, parsed async, mounted as a local cosmetic
+whose nodes join the scene-node namespace (findNodeByName / writable
+TRS / extras / addInteractable picking) - and the example worlds share
+a byte-identical createPolyline helper (unit cubes stretched per
+segment; polyTick() each update catches late parses; fades animate
+node SCALE, since color/opacity changes reload the batch). Anything
+shared rides real data, not cosmetic broadcasts: dots chains are chain
+order + colour in the kv table plus a "tip" bead prop (radius 0.05)
+the dragger streams world.move ops at (~20Hz), every peer drawing all
+chains locally from that. test/snake.mjs was flaky before and after
+this change (focus-sensitive keyboard game; fails identically on the
+prior commit) - not a regression.
 
 ## Known gaps / next-step candidates
 

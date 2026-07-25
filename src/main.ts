@@ -2,7 +2,7 @@ import { Raycaster, Vector2, Vector3, type Object3D } from 'three'
 import sanitizeHtml from 'sanitize-html'
 import { BOOT_LEAD_TICKS, Sim } from './sim'
 import { peerColor } from './color'
-import { cachedScene, cacheScene, configureGlbLoader, parseGlb } from './scene'
+import { cachedScene, cacheScene, configureGlbLoader, parseGlb, parseGltfJson } from './scene'
 import { fetchWorldAsset, mediaUploadLimit, SCRIPT_STATE_TYPES, uploadWorldAsset } from './matrix/world'
 import { Net } from './net'
 import { Session } from './session'
@@ -198,26 +198,19 @@ async function main() {
     }
   }
 
-  // Ephemeral shared line entities ride beside the session protocol:
-  // latest-wins per (author, id), purely cosmetic, so they are intercepted
-  // before receive().
+  // The cosmetic midi plane rides beside the session protocol, so it is
+  // intercepted before receive().
   const onMsg = (from: string, msg: DcMessage) => {
     if (msg.kind === 'midi') {
       deliverMidi(msg.peer, msg.d)
       return
     }
-    if (msg.kind === 'line') {
-      view.setLine(`${msg.peer}/${msg.id}`, msg.points.length ? msg.points : null,
-        msg.color, msg.opacity, msg.width, msg.worldUnits)
-      return
-    }
     session.receive(from, msg)
   }
-  // A departed peer takes its shared lines with it, and the primary clears
-  // any claims it left behind (its own session can no longer unclaim them).
+  // A departed peer's claims are cleared by the primary (its own session
+  // can no longer unclaim them).
   const onLeft = (id: string) => {
     session.peerLeft(id)
-    view.removeLines(`${id}/`)
     if (isRoot()) {
       for (const [pid, p] of sim.props) {
         if (p.claim === id) session.emit('unclaim', pid, { pos: { x: 0, y: 0, z: 0 }, force: true })
@@ -385,17 +378,25 @@ async function main() {
     id, x: p.pos.x, y: p.pos.y, z: p.pos.z, color: p.color, size: p.size, kind: p.kind,
     claimedBy: p.claim ?? '', mine: p.claim === session.id,
   })
-  // The script's line entities: rendered locally under our author key, and
-  // (when shared) broadcast as full latest-wins state per (author, id).
-  const scriptLines = new Map<string, boolean>() // id -> shared
+  // Script-instantiated glTF (world.loadGltf): local cosmetics parsed
+  // from script-supplied glTF JSON, mounted under view.scriptRoot; their
+  // nodes join the scene-node namespace below. Parsing is async: the
+  // entry exists from the call, the object lands when the parse does
+  // (scripts poll findNodeByName, like waiting for the world scene).
+  const scriptGltf = new Map<string, { obj: import('three').Object3D | null }>()
   // glTF scene nodes a script has repositioned (world.findNodeByName +
-  // TRS writes): local cosmetics like lines - every peer's script animates
-  // its own rendered copy, and the baked trimesh collider never moves.
+  // TRS writes): local cosmetics - every peer's script animates its own
+  // rendered copy, and the baked trimesh collider never moves.
   // Originals are saved on first touch and restored when the script stops,
   // so the URL-cached scene survives a script swap unmutated.
+  // the shared scene-node namespace: the world scene's nodes first, then
+  // script-instantiated glTF (which needs no restore bookkeeping - it
+  // dies with the script)
   const sceneNodeFor = (name: string) => {
     const url = sim.sceneUrl
-    return { url, obj: url ? cachedScene(url)?.object.getObjectByName(name) ?? null : null }
+    const fromScene = url ? cachedScene(url)?.object.getObjectByName(name) ?? null : null
+    if (fromScene) return { url, obj: fromScene, scripted: false }
+    return { url, obj: view.scriptRoot.getObjectByName(name) ?? null, scripted: true }
   }
   const sceneTouched = new Map<string, { url: string; name: string; t: number[]; r: number[]; s: number[] }>()
   const restoreSceneNodes = () => {
@@ -620,10 +621,12 @@ async function main() {
       }
     },
     setSceneNodeTransform: (name, json) => {
-      const { url, obj } = sceneNodeFor(name)
-      if (!url || !obj) return false
-      const key = `${url} ${name}`
-      if (!sceneTouched.has(key)) {
+      const { url, obj, scripted } = sceneNodeFor(name)
+      if (!obj) return false
+      // world-scene nodes get restore bookkeeping; script glTF dies with
+      // the script (mxc URLs cannot contain spaces, so the key is unique)
+      const key = `${url} ${name}`
+      if (!scripted && url && !sceneTouched.has(key)) {
         sceneTouched.set(key, {
           url, name,
           t: obj.position.toArray(), r: obj.quaternion.toArray() as number[], s: obj.scale.toArray(),
@@ -743,24 +746,28 @@ async function main() {
       session.emit('data', key, { pos: { x: 0, y: 0, z: 0 }, data: json })
       return true
     },
-    line: (id, pointsJson, color, opacity, width, worldUnits, shared) => {
-      const points = pointsJson ? JSON.parse(pointsJson) as { x: number; y: number; z: number }[] : []
-      scriptLines.set(id, shared)
-      view.setLine(`${session.id}/${id}`, points, color, opacity, width, worldUnits)
-      if (shared) {
-        (net as NetLike).broadcast({ kind: 'line', peer: session.id, id, points, color, opacity, width, worldUnits })
-      }
-    },
-    removeLine: id => {
-      const shared = scriptLines.get(id)
-      if (shared === undefined) return
-      scriptLines.delete(id)
-      view.setLine(`${session.id}/${id}`, null, 0, 0, 0, false)
-      if (shared) {
-        (net as NetLike).broadcast({
-          kind: 'line', peer: session.id, id, points: [], color: 0, opacity: 0, width: 0, worldUnits: false,
+    loadGltf: (name, json) => {
+      if (scriptGltf.has(name)) return false
+      const entry: { obj: import('three').Object3D | null } = { obj: null }
+      scriptGltf.set(name, entry)
+      parseGltfJson(json)
+        .then(obj => {
+          if (scriptGltf.get(name) !== entry) return // unloaded mid-parse
+          obj.name = name
+          entry.obj = obj
+          view.mountScriptObject(obj)
         })
-      }
+        .catch(e => {
+          if (scriptGltf.get(name) === entry) scriptGltf.delete(name)
+          log(`loadGltf('${name}') failed: ${e}`)
+        })
+      return true
+    },
+    unloadGltf: name => {
+      const entry = scriptGltf.get(name)
+      if (!entry) return
+      scriptGltf.delete(name)
+      if (entry.obj) view.unmountScriptObject(entry.obj)
     },
     screen: (id, peer, x, y, z, yaw, w, h) => {
       scriptScreens.add(id)
@@ -796,18 +803,19 @@ async function main() {
     let entity = hit?.id ?? null
     let point = hit ? { x: hit.point.x, y: hit.point.y, z: hit.point.z } : null
     // props missed: try the scene nodes the script marked interactable
-    // (nearest intersection whose ancestry carries a registered name)
+    // (nearest intersection whose ancestry carries a registered name),
+    // in the world scene and script-instantiated glTF alike
     if (!entity && scriptInteractables.size) {
-      const root = sim.sceneUrl ? cachedScene(sim.sceneUrl)?.object : null
-      if (root) {
-        for (const h of scriptRay.intersectObject(root, true)) {
-          let o: Object3D | null = h.object
-          while (o && !scriptInteractables.has(o.name)) o = o.parent
-          if (!o) continue
-          entity = o.name
-          point = { x: h.point.x, y: h.point.y, z: h.point.z }
-          break
-        }
+      const roots: Object3D[] = [view.scriptRoot]
+      const sceneRoot = sim.sceneUrl ? cachedScene(sim.sceneUrl)?.object : null
+      if (sceneRoot) roots.push(sceneRoot)
+      for (const h of scriptRay.intersectObjects(roots, true)) {
+        let o: Object3D | null = h.object
+        while (o && !scriptInteractables.has(o.name)) o = o.parent
+        if (!o) continue
+        entity = o.name
+        point = { x: h.point.x, y: h.point.y, z: h.point.z }
+        break
       }
     }
     const o = scriptRay.ray.origin, d = scriptRay.ray.direction
@@ -836,7 +844,7 @@ async function main() {
     scriptKeysOn = false
     scriptMidiOn = false
     attachMidiInputs() // detaches: no script is listening anymore
-    for (const id of [...scriptLines.keys()]) scriptHost.removeLine(id) // its lines go with it
+    for (const name of [...scriptGltf.keys()]) scriptHost.unloadGltf(name) // its glTF goes with it
     for (const id of [...scriptScreens]) scriptHost.removeScreen(id) // and its screens
     for (const id of [...scriptLabels]) scriptHost.removeLabel(id) // and its labels
     restoreSceneNodes() // scene nodes it moved go back where the glb put them

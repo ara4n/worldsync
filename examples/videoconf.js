@@ -17,6 +17,98 @@ const STEP = Math.PI / 4.5         // angular pitch: chord ~4.9 > screen width
 let screens = {}  // peer id -> { screen, frame }
 let shown = ''    // signature of the peer set currently laid out
 
+// -- polylines as glTF data (keep this helper in sync across the example
+// worlds; scripts have no imports). The WebSG API deliberately has no
+// drawing primitives - it manipulates glTF data - so a "line" here is a
+// batch of unit cubes instantiated once via world.loadGltf and stretched
+// segment by segment through the scene-node TRS API. Instantiation is
+// async: call polyTick() every update so freshly parsed batches catch
+// up. width is world units; scale is a cheap thickness multiplier (0
+// hides); color/opacity changes reload the batch (fine for discrete
+// changes, not per-frame fades). --
+const POLY_BOX = 'data:application/octet-stream;base64,AAAAvwAAAL8AAAC/AAAAPwAAAL8AAAC/AAAAPwAAAD8AAAC/AAAAvwAAAD8AAAC/AAAAvwAAAL8AAAA/AAAAPwAAAL8AAAA/AAAAPwAAAD8AAAA/AAAAvwAAAD8AAAA/AAABAAIAAAACAAMABAAGAAUABAAHAAYAAAAEAAUAAAAFAAEAAwACAAYAAwAGAAcAAAADAAcAAAAHAAQAAQAFAAYAAQAGAAIA'
+const polys = []
+let polySeq = 0
+function polyTick() {
+  for (const p of polys) if (p._dirty) p._dirty = !p._apply()
+}
+function createPolyline(opts = {}) {
+  const cap = opts.cap || 24 // max segments; unused nodes stay hidden
+  const lin = (v) => Math.pow(v / 255, 2.2) // sRGB int -> linear factor
+  const self = {
+    _id: 'poly' + (++polySeq),
+    _color: opts.color === undefined ? 0xffffff : opts.color,
+    _opacity: opts.opacity === undefined ? 1 : opts.opacity,
+    _width: opts.width === undefined ? 0.05 : opts.width,
+    _scale: 1,
+    _pts: opts.points || [],
+    _dirty: true,
+    _load() {
+      world.loadGltf(this._id, {
+        asset: { version: '2.0' },
+        scene: 0,
+        scenes: [{ nodes: Array.from({ length: cap }, (_, i) => i) }],
+        nodes: Array.from({ length: cap }, (_, i) => ({ name: this._id + '_' + i, mesh: 0, scale: [0, 0, 0] })),
+        meshes: [{ primitives: [{ attributes: { POSITION: 0 }, indices: 1, material: 0 }] }],
+        materials: [{
+          pbrMetallicRoughness: {
+            baseColorFactor: [lin(this._color >> 16 & 255), lin(this._color >> 8 & 255), lin(this._color & 255), this._opacity],
+          },
+          extensions: { KHR_materials_unlit: {} },
+          doubleSided: true,
+          alphaMode: this._opacity < 1 ? 'BLEND' : 'OPAQUE',
+        }],
+        extensionsUsed: ['KHR_materials_unlit'],
+        accessors: [
+          { bufferView: 0, componentType: 5126, count: 8, type: 'VEC3', min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
+          { bufferView: 1, componentType: 5123, count: 36, type: 'SCALAR' },
+        ],
+        bufferViews: [
+          { buffer: 0, byteOffset: 0, byteLength: 96 },
+          { buffer: 0, byteOffset: 96, byteLength: 72 },
+        ],
+        buffers: [{ uri: POLY_BOX, byteLength: 168 }],
+      })
+    },
+    _reload() { world.unloadGltf(this._id); this._load(); this._dirty = true },
+    _apply() {
+      const w = this._width * this._scale
+      for (let i = 0; i < cap; i++) {
+        const node = world.findNodeByName(this._id + '_' + i)
+        if (!node) return false // still parsing; polyTick retries
+        const a = this._pts[i], b = this._pts[i + 1]
+        const len = a && b ? Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z) : 0
+        if (w <= 0 || len < 1e-6) { node.scale = [0, 0, 0]; continue }
+        // quaternion turning +z onto the segment direction (half-way trick)
+        let qx = -(b.y - a.y) / len, qy = (b.x - a.x) / len, qw = 1 + (b.z - a.z) / len
+        const qn = Math.hypot(qx, qy, qw)
+        if (qn < 1e-4) { qx = 0; qy = 1; qw = 0 } // segment points exactly -z
+        else { qx /= qn; qy /= qn; qw /= qn }
+        node.translation = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 }
+        node.rotation = { x: qx, y: qy, z: 0, w: qw }
+        node.scale = { x: w, y: w, z: len + w / 2 } // tiny overlap closes corners
+      }
+      return true
+    },
+    get points() { return this._pts },
+    set points(ps) { this._pts = ps || []; this._dirty = true },
+    get color() { return this._color },
+    set color(c) { if (c !== this._color) { this._color = c; this._reload() } },
+    get opacity() { return this._opacity },
+    set opacity(o) { if (o !== this._opacity) { this._opacity = o; this._reload() } },
+    get scale() { return this._scale },
+    set scale(k) { if (k !== this._scale) { this._scale = k; this._dirty = true } },
+    despawn() {
+      world.unloadGltf(this._id)
+      const i = polys.indexOf(this)
+      if (i !== -1) polys.splice(i, 1)
+    },
+  }
+  self._load()
+  polys.push(self)
+  return self
+}
+
 world.onload = () => {
   world.env({ background: 0x10141a, fog: { color: 0x10141a, near: 14, far: 30 }, ground: true })
   world.camera({ x: 0, y: 2, z: 2.5 }, { x: 0, y: 2, z: -RADIUS })
@@ -64,6 +156,7 @@ function syncColliders(peers) {
 }
 
 world.onupdate = () => {
+  polyTick() // freshly parsed frame batches catch up with their points
   const peers = world.peers()
   const sig = peers.map((p) => p.id).join('|')
   if (sig === shown) return
@@ -74,7 +167,7 @@ world.onupdate = () => {
     if (!screens[p.id]) {
       screens[p.id] = {
         screen: world.createScreen({ peer: p.id, width: SW, height: SH }),
-        frame: world.createLine({ points: [], color: p.color, width: 2 }),
+        frame: createPolyline({ color: p.color, width: 0.06, cap: 4 }),
       }
     }
   }

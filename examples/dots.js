@@ -2,11 +2,14 @@
 // sandboxed; nobody talks to the network. The board is sim state (props),
 // so it is identical on every peer; claims are the coordination primitive:
 // you chain dots by claiming them one at a time, racing rivals dot-by-dot,
-// and claim races resolve deterministically in timeline order. Your chain
-// line (and everyone else's, in their own colour) is ephemeral cosmetic
-// state that rides beside the sim. Outcomes (clears, drops, refills,
-// reshuffles) are computed by the acting peer and shipped as ops, so no
-// shared randomness is ever needed.
+// and claim races resolve deterministically in timeline order. Chains are
+// DRAWN locally by every peer from shared data - the app has no line
+// primitive: chain order rides the kv table, the live endpoint is a tiny
+// "tip" prop the dragger moves (prop data over the datachannel, eased
+// client-side like any prop), and each script stretches glTF cubes
+// through the dots to render every chain in its owner's colour. Outcomes
+// (clears, drops, refills, reshuffles) are computed by the acting peer
+// and shipped as ops, so no shared randomness is ever needed.
 //
 // Upload with "load world script (.js)". Drag same-coloured adjacent dots
 // to chain them; release to clear chains of 2+; close a loop to clear the
@@ -32,6 +35,7 @@ const COLORS = [0xda664f, 0x9060b0, 0xe3db50, 0x94baf9, 0xa0e699]
 const R = 0.16
 const ORG = { x: -(W - 1) / 2, y: 1.4, z: -(D - 1) / 2 }
 const SCORE = 0.11, TIMER = 0.13 // hidden HUD props: the radius is the tag
+const TIP = 0.05                 // chain-tip bead props: radius is the tag
 const HIDE_Y = -30               // parked past the fog's far plane
 const GAME_S = 60, IDLE = 999, OVER_HOLD = 5
 
@@ -48,8 +52,12 @@ let anchor = null     // world position of the chain's last dot
 let planeN = null     // preview plane normal: pointer ray at chain start
 let preview = null    // current preview endpoint on that plane
 let seeded = false
-let chain = null      // shared line entity: my chain, everyone sees it
-let latticeLines = [] // local line entities, one per grid edge: { edge, line }
+let chainLine = null  // my chain, drawn locally (peers draw it from kv+tip)
+let chainColor = 0xffffff
+let tipId = null      // my chain-tip bead prop, moved with the pointer
+let lastTipMove = -1
+let peerChains = {}   // peer id -> { line }: rivals' chains, drawn from kv
+let latticeLines = [] // local guide wires, one per grid edge: { edge, line }
 let latticeTarget = 0.25
 let pendingDrops = [] // refills spawned above the board, dropped a beat later
 let dropWait = 0
@@ -64,6 +72,98 @@ let now = 0
 let deadline = null, lastPainted = -1, overAt = null // primary countdown state
 const orphanSince = {}
 
+// -- polylines as glTF data (keep this helper in sync across the example
+// worlds; scripts have no imports). The WebSG API deliberately has no
+// drawing primitives - it manipulates glTF data - so a "line" here is a
+// batch of unit cubes instantiated once via world.loadGltf and stretched
+// segment by segment through the scene-node TRS API. Instantiation is
+// async: call polyTick() every update so freshly parsed batches catch
+// up. width is world units; scale is a cheap thickness multiplier (0
+// hides); color/opacity changes reload the batch (fine for discrete
+// changes, not per-frame fades). --
+const POLY_BOX = 'data:application/octet-stream;base64,AAAAvwAAAL8AAAC/AAAAPwAAAL8AAAC/AAAAPwAAAD8AAAC/AAAAvwAAAD8AAAC/AAAAvwAAAL8AAAA/AAAAPwAAAL8AAAA/AAAAPwAAAD8AAAA/AAAAvwAAAD8AAAA/AAABAAIAAAACAAMABAAGAAUABAAHAAYAAAAEAAUAAAAFAAEAAwACAAYAAwAGAAcAAAADAAcAAAAHAAQAAQAFAAYAAQAGAAIA'
+const polys = []
+let polySeq = 0
+function polyTick() {
+  for (const p of polys) if (p._dirty) p._dirty = !p._apply()
+}
+function createPolyline(opts = {}) {
+  const cap = opts.cap || 24 // max segments; unused nodes stay hidden
+  const lin = (v) => Math.pow(v / 255, 2.2) // sRGB int -> linear factor
+  const self = {
+    _id: 'poly' + (++polySeq),
+    _color: opts.color === undefined ? 0xffffff : opts.color,
+    _opacity: opts.opacity === undefined ? 1 : opts.opacity,
+    _width: opts.width === undefined ? 0.05 : opts.width,
+    _scale: 1,
+    _pts: opts.points || [],
+    _dirty: true,
+    _load() {
+      world.loadGltf(this._id, {
+        asset: { version: '2.0' },
+        scene: 0,
+        scenes: [{ nodes: Array.from({ length: cap }, (_, i) => i) }],
+        nodes: Array.from({ length: cap }, (_, i) => ({ name: this._id + '_' + i, mesh: 0, scale: [0, 0, 0] })),
+        meshes: [{ primitives: [{ attributes: { POSITION: 0 }, indices: 1, material: 0 }] }],
+        materials: [{
+          pbrMetallicRoughness: {
+            baseColorFactor: [lin(this._color >> 16 & 255), lin(this._color >> 8 & 255), lin(this._color & 255), this._opacity],
+          },
+          extensions: { KHR_materials_unlit: {} },
+          doubleSided: true,
+          alphaMode: this._opacity < 1 ? 'BLEND' : 'OPAQUE',
+        }],
+        extensionsUsed: ['KHR_materials_unlit'],
+        accessors: [
+          { bufferView: 0, componentType: 5126, count: 8, type: 'VEC3', min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] },
+          { bufferView: 1, componentType: 5123, count: 36, type: 'SCALAR' },
+        ],
+        bufferViews: [
+          { buffer: 0, byteOffset: 0, byteLength: 96 },
+          { buffer: 0, byteOffset: 96, byteLength: 72 },
+        ],
+        buffers: [{ uri: POLY_BOX, byteLength: 168 }],
+      })
+    },
+    _reload() { world.unloadGltf(this._id); this._load(); this._dirty = true },
+    _apply() {
+      const w = this._width * this._scale
+      for (let i = 0; i < cap; i++) {
+        const node = world.findNodeByName(this._id + '_' + i)
+        if (!node) return false // still parsing; polyTick retries
+        const a = this._pts[i], b = this._pts[i + 1]
+        const len = a && b ? Math.hypot(b.x - a.x, b.y - a.y, b.z - a.z) : 0
+        if (w <= 0 || len < 1e-6) { node.scale = [0, 0, 0]; continue }
+        // quaternion turning +z onto the segment direction (half-way trick)
+        let qx = -(b.y - a.y) / len, qy = (b.x - a.x) / len, qw = 1 + (b.z - a.z) / len
+        const qn = Math.hypot(qx, qy, qw)
+        if (qn < 1e-4) { qx = 0; qy = 1; qw = 0 } // segment points exactly -z
+        else { qx /= qn; qy /= qn; qw /= qn }
+        node.translation = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, z: (a.z + b.z) / 2 }
+        node.rotation = { x: qx, y: qy, z: 0, w: qw }
+        node.scale = { x: w, y: w, z: len + w / 2 } // tiny overlap closes corners
+      }
+      return true
+    },
+    get points() { return this._pts },
+    set points(ps) { this._pts = ps || []; this._dirty = true },
+    get color() { return this._color },
+    set color(c) { if (c !== this._color) { this._color = c; this._reload() } },
+    get opacity() { return this._opacity },
+    set opacity(o) { if (o !== this._opacity) { this._opacity = o; this._reload() } },
+    get scale() { return this._scale },
+    set scale(k) { if (k !== this._scale) { this._scale = k; this._dirty = true } },
+    despawn() {
+      world.unloadGltf(this._id)
+      const i = polys.indexOf(this)
+      if (i !== -1) polys.splice(i, 1)
+    },
+  }
+  self._load()
+  polys.push(self)
+  return self
+}
+
 world.onload = () => {
   world.env({ background: 0xffffff, fog: { color: 0xffffff, near: 4.5, far: 11 }, ground: false })
   world.camera({ x: 0, y: ORG.y + 1, z: 5.2 }, { x: 0, y: ORG.y + 1, z: 0 })
@@ -75,14 +175,62 @@ world.onload = () => {
     if (y + 1 < H) segs.push([{ x, y, z }, { x, y: y + 1, z }])
     if (z + 1 < D) segs.push([{ x, y, z }, { x, y, z: z + 1 }])
   }
-  latticeLines = segs.map(([a, b]) => ({
-    edge: edgeKey(a, b),
-    line: world.createLine({ points: [at(a.x, a.y, a.z), at(b.x, b.y, b.z)], color: 0xdddddd, opacity: 0, width: 1 }),
-  }))
+  latticeLines = segs.map(([a, b]) => {
+    const line = createPolyline({
+      points: [at(a.x, a.y, a.z), at(b.x, b.y, b.z)], color: 0xdddddd, width: 0.012, cap: 1,
+    })
+    line.scale = 0 // faded in by fadeLattice (scale, not opacity: no reload)
+    return { edge: edgeKey(a, b), line }
+  })
   // the wire: world-units width after the original's cylinder segments
   // (radius 0.0286 at dot radius 0.15), recolored per drag to the chained
   // dots' color
-  chain = world.createLine({ points: [], color: world.me.color, width: 0.06, worldUnits: true, shared: true })
+  chainLine = createPolyline({ color: world.me.color, width: 0.06, cap: 40 })
+}
+
+/** publish my chain as shared data: the dot order and colour in the kv
+ * table, the live endpoint as the tip bead prop. Everything a rival's
+ * script needs to draw this chain already replicates over the
+ * datachannel; nothing cosmetic is broadcast. */
+function shareChain() {
+  if (sel.length) world.setData('chain:' + world.me.id, { ids: sel, color: chainColor, tip: tipId })
+  else world.deleteData('chain:' + world.me.id)
+}
+
+/** drop the tip bead and the shared record (drag over or cancelled) */
+function unshareChain() {
+  if (tipId) { world.despawn(tipId); tipId = null }
+  world.deleteData('chain:' + world.me.id)
+}
+
+/** draw every OTHER peer's chain from its shared record: claimed dots by
+ * id, then the tip bead's current sim position. The tip moves in the
+ * dragger's ~50ms world.move steps - the bead itself eases client-side,
+ * the wire follows at op rate. */
+function drawPeerChains() {
+  const seen = {}
+  for (const k of world.dataKeys()) {
+    if (k.indexOf('chain:') !== 0) continue
+    const peer = k.slice(6)
+    if (peer === world.me.id) continue
+    const rec = world.getData(k)
+    if (!rec || !Array.isArray(rec.ids)) continue
+    seen[peer] = true
+    let pc = peerChains[peer]
+    if (!pc) pc = peerChains[peer] = { line: createPolyline({ color: rec.color, width: 0.06, cap: 40 }) }
+    pc.line.color = rec.color // reloads only when their chain colour changed
+    const pts = []
+    for (const id of rec.ids) {
+      const p = world.prop(id)
+      if (p) pts.push({ x: p.x, y: p.y, z: p.z })
+    }
+    const tip = rec.tip ? world.prop(rec.tip) : null
+    if (tip) pts.push({ x: tip.x, y: tip.y, z: tip.z })
+    pc.line.points = pts.length >= 2 ? pts : []
+  }
+  for (const peer in peerChains) {
+    if (!seen[peer]) { peerChains[peer].line.despawn(); delete peerChains[peer] }
+  }
 }
 
 /** direction-independent key for the unit edge between grid coords a, b */
@@ -101,18 +249,20 @@ function chainedEdges() {
   return covered
 }
 
-/** ease the lattice toward its target opacity; called every update. Guides
- * under a chained link snap to 0 instead (the wire replaces them exactly) */
+/** ease the lattice toward its target weight; called every update. The
+ * fade is the wires' SCALE (thickness), which is a cheap TRS write -
+ * opacity would rebuild the batch's material every frame. Guides under a
+ * chained link snap to 0 instead (the wire replaces them exactly) */
 function fadeLattice() {
   const covered = chainedEdges()
   for (const l of latticeLines) {
     if (covered[l.edge]) {
-      if (l.line.opacity !== 0) l.line.opacity = 0
+      if (l.line.scale !== 0) l.line.scale = 0
       continue
     }
-    const d = latticeTarget - l.line.opacity
-    if (Math.abs(d) > 0.01) l.line.opacity += d * 0.12
-    else if (l.line.opacity !== latticeTarget) l.line.opacity = latticeTarget
+    const d = latticeTarget - l.line.scale
+    if (Math.abs(d) > 0.01) l.line.scale += d * 0.12
+    else if (l.line.scale !== latticeTarget) l.line.scale = latticeTarget
   }
 }
 
@@ -218,7 +368,8 @@ world.onupdate = (dt, time) => {
     latticeTarget = 0.25
     for (const id of new Set(sel)) world.unclaim(id)
     sel = []; cycleColor = null; preview = null
-    chain.points = []
+    chainLine.points = []
+    unshareChain()
   }
   // the round just ended: file our own final score into the per-user
   // room-state top-10 (self-reported; the host drops it if it doesn't
@@ -238,6 +389,7 @@ world.onupdate = (dt, time) => {
     revalidate()
     updateLine()
   }
+  drawPeerChains()
   // Refills spawn above the board and settle a couple of ticks later: the
   // spawn and the move must land on different ticks for every renderer to
   // see the drop (a same-tick move would just create them in place).
@@ -247,6 +399,7 @@ world.onupdate = (dt, time) => {
     dropWait = 0
   }
   fadeLattice()
+  polyTick() // apply this frame's wire/chain writes (and late parses)
 
   // claims trail spawns by a fold (a same-dispatch claim is refused)
   pendingClaims = pendingClaims.filter((pc) => {
@@ -338,6 +491,21 @@ world.onupdate = (dt, time) => {
     if (orphanSince[p.id] === undefined) orphanSince[p.id] = now
     else if (now - orphanSince[p.id] > 5) { world.despawn(p.id); delete orphanSince[p.id] }
   }
+  // sweep chain leftovers of departed peers: their kv record goes, and
+  // any tip bead no live chain record references (a peer who died
+  // mid-drag leaves both behind; departure already freed their dots)
+  const tipRefs = {}
+  for (const k of world.dataKeys()) {
+    if (k.indexOf('chain:') !== 0) continue
+    if (!live.has(k.slice(6))) { world.deleteData(k); continue }
+    const rec = world.getData(k)
+    if (rec && rec.tip) tipRefs[rec.tip] = true
+  }
+  for (const p of world.props()) {
+    if (p.size !== TIP || tipRefs[p.id]) { if (p.size === TIP) delete orphanSince[p.id]; continue }
+    if (orphanSince[p.id] === undefined) orphanSince[p.id] = now
+    else if (now - orphanSince[p.id] > 5) { world.despawn(p.id); delete orphanSince[p.id] }
+  }
 }
 
 world.onpointerdown = (ev) => {
@@ -352,11 +520,19 @@ world.onpointerdown = (ev) => {
   sel = [p.id]
   drawing = true
   cycleColor = null
-  chain.color = p.color
+  chainColor = p.color
+  chainLine.color = p.color
   planeN = ev.dir
   anchor = { x: p.x, y: p.y, z: p.z }
   preview = null
   latticeTarget = 1.0
+  // the tip bead: a real prop, so the sim replicates my live endpoint to
+  // every peer (and eases it client-side) without any cosmetic plane
+  tipId = world.createSphere({
+    position: anchor, color: p.color, radius: TIP, unlit: true, bounce: false, pop: false,
+  })
+  lastTipMove = now
+  shareChain()
 }
 
 world.onpointermove = (ev) => {
@@ -366,6 +542,11 @@ world.onpointermove = (ev) => {
     if (q) extend(q)
   }
   preview = anchor && planeN ? WebSG.rayPlane(ev.origin, ev.dir, anchor, planeN) : null
+  // stream the tip bead at ~drag-sampler rate: each move is one folded op
+  if (tipId && preview && now - lastTipMove > 0.05) {
+    lastTipMove = now
+    world.move(tipId, preview)
+  }
   updateLine()
 }
 
@@ -384,6 +565,7 @@ function extend(q) {
     if (sel.indexOf(popped) === -1) world.unclaim(popped)
     if (!hasLoop()) cycleColor = null
     anchor = { x: q.x, y: q.y, z: q.z }
+    shareChain()
     return
   }
   if (q.color !== last.color) return
@@ -404,6 +586,7 @@ function extend(q) {
   }
   sel.push(q.id)
   anchor = { x: q.x, y: q.y, z: q.z }
+  shareChain()
 }
 
 world.onpointerup = () => {
@@ -417,7 +600,8 @@ world.onpointerup = () => {
   sel = []
   cycleColor = null
   preview = null
-  chain.points = []
+  chainLine.points = []
+  unshareChain()
 }
 
 /** Rollback folds can hand a raced dot to a rival after we optimistically
@@ -439,6 +623,7 @@ function revalidate() {
     }
     sel = keep
     if (!hasLoop()) cycleColor = null
+    shareChain()
   }
   if (sel.length) {
     const a = world.prop(sel[sel.length - 1])
@@ -446,7 +631,8 @@ function revalidate() {
   } else if (drawing) {
     drawing = false
     latticeTarget = 0.25
-    chain.points = []
+    chainLine.points = []
+    unshareChain()
   }
 }
 
@@ -457,7 +643,7 @@ function updateLine() {
     if (p) pts.push({ x: p.x, y: p.y, z: p.z })
   }
   if (preview) pts.push(preview)
-  chain.points = pts.length >= 2 ? pts : []
+  chainLine.points = pts.length >= 2 ? pts : []
 }
 
 /** The acting peer computes the whole outcome (clears, drops, refills, a
@@ -482,6 +668,7 @@ function clearChain() {
   for (const id of ids) remove[id] = true
   const columns = {} // "x,z" -> surviving dots, sorted low-to-high
   for (const p of world.props()) {
+    if (p.size !== R) continue // not a board dot (tip beads sit in-board!)
     if (remove[p.id]) continue
     const g = gridOf(p)
     if (g.x < 0 || g.x >= W || g.y < 0 || g.y >= H || g.z < 0 || g.z >= D) continue
