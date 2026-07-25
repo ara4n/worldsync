@@ -324,6 +324,7 @@ const hostFor = (p: HubPeer): ScriptHost => ({
   sceneNodeTransform: () => null,
   setSceneNodeTransform: () => false,
   setInteractable: () => {},
+  sceneNodeExtras: () => null,
   spawn: (x, y, z, color) => {
     const id = p.session.nextNetId()
     p.session.emit('spawn', id, { pos: { x, y, z }, color })

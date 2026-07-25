@@ -42,10 +42,7 @@ test mid-flight; finish edits first.
   fake-latency send delay, per-peer strike/exclusion + divergence latches.
 - `render.ts`: Three scene, mesh sync from ECS, fixed-timestep interpolation
   (prev->curr by alpha), rubber-band error offsets (View.errors), cmd/ctrl
-  toggles left-drag orbit; cosmetic layers (lines, screens, labels, pianos).
-- `piano.ts`: the modelled grand for world.createGrandPiano - plan-shape
-  extrusions, PMREM-lit clearcoat gloss, 88 keys pivoting at the balance
-  rail with fast-attack/slow-release animation (see the MIDI section).
+  toggles left-drag orbit; cosmetic layers (lines, screens, labels).
 - `input.ts`: click ground = spawn, drag box = grab/move@33ms/release with
   throw velocity, presented-pose grab override.
 - `main.ts`: orchestration; frame loop = fold -> advance -> mirror -> render;
@@ -190,7 +187,7 @@ counters during serialization to make cross-peer byte comparison
 meaningful again (early-warning internals check, chapter 9) - nice-to-have
 only.
 
-## WebMIDI + pianola (2026-07-24)
+## WebMIDI + pianola (2026-07-24, reworked to glTF 2026-07-25)
 
 world.onmidi exposes WebMIDI to scripts: defining the handler is the
 subscription (access requested lazily, so non-MIDI worlds never prompt);
@@ -200,14 +197,23 @@ plane like shared lines, never folded/hashed. Deliberate design call
 (Matthew asked): folding notes as prop ops would cost a rollback per
 note on every peer at piano rates (fold storms, see perf section) to
 sync state physics never reads; cosmetics that do not feed physics stay
-off the timeline. worlds wanting physical presence seed ONE solid
-collider (videoconf pattern). world.createGrandPiano is the matching
-cosmetic entity (src/piano.ts, per-peer like screens); examples/piano.js
-is the pianola app; test/piano.mjs e2e's it via __jig.midi(status,d1,d2)
-(hardware-free injection through the exact hardware path); mock.html
-iframe now carries allow="midi". Untested against real hardware so far:
-a real device on a real Element Web host needs the host iframe to allow
-MIDI (EW does not today - degrade is a logged access failure).
+off the timeline. mock.html iframe carries allow="midi". Untested
+against real hardware so far: a real device on a real Element Web host
+needs the host iframe to allow MIDI (EW does not today - degrade is a
+logged access failure).
+
+The piano itself is glTF DATA, not an app primitive (Matthew: no
+world.createGrandPiano in the app; scripts animate existing glTF data
+instead). tools/piano-glb.mjs (plain node, OUTSIDE src/ so vite never
+bundles it) builds examples/piano.glb: a world with a stage floor and
+the modelled grand, every key a named node key_21..key_108 with its
+origin on the balance rail and {note, black, dip} in its glTF extras.
+The WebSG scene-node API animates it: findNodeByName exposes writable
+local TRS (write-through components, thirdroom-style), node.extras, and
+addInteractable() for pointer picking - all local cosmetics, restored
+on script stop, trimesh collider untouched (see websg.ts ScriptHost).
+examples/piano.js is the pianola; test/piano.mjs e2e's the full flow
+(glb upload, rig, __jig.midi chord on both tabs, click-a-key capture).
 
 ## Known gaps / next-step candidates
 

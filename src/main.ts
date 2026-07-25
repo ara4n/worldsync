@@ -413,7 +413,6 @@ async function main() {
   const scriptInteractables = new Set<string>()
   const scriptScreens = new Set<string>()
   const scriptLabels = new Set<string>()
-  const scriptPianos = new Set<string>()
   // Flipped by the first screen a script places; gates the camera toggle,
   // so worlds that never ask for video never show it.
   let videoWanted = false
@@ -644,6 +643,12 @@ async function main() {
       if (on) scriptInteractables.add(name)
       else scriptInteractables.delete(name)
     },
+    // GLTFLoader surfaces glTF extras as userData: plain JSON authoring
+    // metadata (the piano world's key rig parameters live there)
+    sceneNodeExtras: name => {
+      const { obj } = sceneNodeFor(name)
+      return obj && Object.keys(obj.userData).length ? obj.userData : null
+    },
     spawn: (x, y, z, color) => {
       const id = session.nextNetId()
       session.emit('spawn', id, { pos: { x, y, z }, color })
@@ -766,15 +771,6 @@ async function main() {
       scriptScreens.delete(id)
       view.removeScreen(`${session.id}/${id}`)
     },
-    piano: (id, x, y, z, yaw, size, color) => {
-      scriptPianos.add(id)
-      view.setPiano(`${session.id}/${id}`, { x, y, z }, yaw, size, color)
-    },
-    pianoNote: (id, note, velocity) => view.pianoNote(`${session.id}/${id}`, note, velocity),
-    removePiano: id => {
-      scriptPianos.delete(id)
-      view.removePiano(`${session.id}/${id}`)
-    },
     label: (id, text, x, y, z, yaw, h, color, flat) => {
       scriptLabels.add(id)
       view.setLabel(`${session.id}/${id}`, text.slice(0, 64), { x, y, z }, yaw, h, color, flat)
@@ -843,7 +839,6 @@ async function main() {
     for (const id of [...scriptLines.keys()]) scriptHost.removeLine(id) // its lines go with it
     for (const id of [...scriptScreens]) scriptHost.removeScreen(id) // and its screens
     for (const id of [...scriptLabels]) scriptHost.removeLabel(id) // and its labels
-    for (const id of [...scriptPianos]) scriptHost.removePiano(id) // and its pianos
     restoreSceneNodes() // scene nodes it moved go back where the glb put them
     scriptInteractables.clear()
     if (videoWanted) {

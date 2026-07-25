@@ -8,10 +8,8 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { OutlinePass } from 'three/addons/postprocessing/OutlinePass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js'
 import type { EcsStore } from './ecs'
 import { PropLayer } from './props'
-import { GrandPianoView } from './piano'
 
 const IDENTITY = new THREE.Quaternion()
 const tmpQ = new THREE.Quaternion()
@@ -363,47 +361,6 @@ export class View {
     }
   }
 
-  // -- grand pianos: modelled cosmetic instruments a world script places
-  // and plays (world.createGrandPiano / world.onmidi). Local-only like
-  // screens: every peer's script lays out its own and drives the keys. --
-  private pianos = new Map<string, GrandPianoView>()
-  // PMREM room environment, built on first use: the piano's clearcoat
-  // gloss needs *something* to reflect, and the scene has no envmap. Fed
-  // only to piano materials, so the tuned look of everything else is
-  // untouched.
-  private envTex: THREE.Texture | null = null
-  private pianoEnv(): THREE.Texture {
-    if (!this.envTex) {
-      const pmrem = new THREE.PMREMGenerator(this.renderer)
-      this.envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
-      pmrem.dispose()
-    }
-    return this.envTex
-  }
-
-  setPiano(key: string, pos: { x: number; y: number; z: number }, yaw: number, size: number, color: number) {
-    let p = this.pianos.get(key)
-    if (!p) {
-      p = new GrandPianoView(m => this.patchMaterial(m), this.pianoEnv())
-      p.group.name = key // "author/pianoId", for the inspector
-      this.scene.add(p.group)
-      this.pianos.set(key, p)
-    }
-    p.setPose(pos, yaw, size, color)
-  }
-
-  pianoNote(key: string, note: number, velocity: number) {
-    this.pianos.get(key)?.note(note, velocity)
-  }
-
-  removePiano(key: string) {
-    const p = this.pianos.get(key)
-    if (!p) return
-    this.scene.remove(p.group)
-    p.dispose()
-    this.pianos.delete(key)
-  }
-
   // -- text labels: flat planes textured with canvas-rendered text, so
   // scripts can caption the world (tetrix names each player's lane above
   // their next-piece ghost). Cosmetic like lines: never sim state, never
@@ -581,7 +538,6 @@ export class View {
       }
     }
     this.props.update(now)
-    for (const p of this.pianos.values()) p.update(now)
     this.controls.update()
     this.csm.update() // cascade frusta track the camera; must follow controls
     if (this.outlinePass?.selectedObjects.length) this.composer!.render()

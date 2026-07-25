@@ -162,14 +162,26 @@ local ones directly, the rest over a `midi` broadcast that rides beside
 the protocol like shared lines: never folded, never hashed. Physics
 never reads a note, so determinism is untouched; a world that folded
 each keypress as an op would instead buy a rollback per note on every
-peer at piano rates. `world.createGrandPiano({position, yaw, size,
-color})` places a modelled concert grand - curved rim, open lid,
-strings, 88 individually pivoting keys - as a local cosmetic like
-screens and labels, and the script plays it with
-`piano.noteOn(note, velocity)` / `noteOff(note)`. `examples/piano.js`
-is the pianola: plug a MIDI keyboard into any peer's machine and
-everyone watches the same keys dip (no audio yet); its one folded op is
-the case collider the primary seeds so thrown boxes bounce off.
+peer at piano rates.
+
+**Scripts animate existing glTF data, not app primitives.**
+`world.findNodeByName` on a named scene node exposes its local
+translation/rotation/scale as writable, thirdroom-style write-through
+properties (plus read-only `worldTranslation` and the node's glTF
+`extras`), applied to this client's rendered scene only - the same
+local-cosmetic plane as lines, restored when the script stops, with the
+baked trimesh collider untouched. `node.addInteractable()` marks a
+scene node pickable: pointer events then report it as `ev.entity` and a
+hit captures the gesture away from box spawning. The proving world is
+the pianola: `examples/piano.glb` (regenerate with `node
+tools/piano-glb.mjs`; the generator stays outside `src/` so vite never
+bundles it) is a modelled concert grand rigged the obvious glTF way -
+each of the 88 keys is a named node (`key_21`..`key_108`) whose origin
+sits on the balance rail, carrying `{note, black, dip}` in its extras -
+and `examples/piano.js` plays it: plug a MIDI keyboard into any peer's
+machine and everyone watches the same key nodes dip (or click a key to
+sound it locally; no audio yet). Nothing folds at all - the scene
+trimesh already makes the case and floor solid on every peer.
 
 **`examples/dots.js` is dots-3d ported whole into the sandbox** - the
 proving example for all of the above. The 3x3x3 board is props; players
@@ -212,9 +224,10 @@ primary's tab and asserts the survivor's instance takes over; `node
 test/dots.mjs` plays dots for real - uploads `examples/dots.js`, waits
 for the board, drags a chain with the mouse, asserts the second tab sees
 the claims and the chain line mid-drag, then the clear + refills, all
-hash-clean; `node test/piano.mjs` uploads `examples/piano.js` and
-injects MIDI via the hardware-free `__jig.midi` hook, asserting both
-tabs dip (and release) the same keys.
+hash-clean; `node test/piano.mjs` uploads the rigged `piano.glb` world
+plus `examples/piano.js`, injects MIDI via the hardware-free
+`__jig.midi` hook asserting both tabs dip (and release) the same key
+nodes, and clicks a key to prove interactable scene-node picking.
 
 To embed for real, serve the app (dev server works: `npm run dev --
 --host`) and add it to a room in Element Web with

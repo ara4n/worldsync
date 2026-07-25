@@ -58,6 +58,9 @@ interface WorldNode {
   scale: WebSG.Vector3
   /** world position (boxes: same as translation) */
   readonly worldTranslation: WebSG.Vector3
+  /** scene nodes: the node's glTF extras (authoring metadata, e.g. the
+   * piano world's key rig parameters), or null */
+  readonly extras: any
   /** held by anyone? */
   readonly grabbed: boolean
   /** held by us? */
@@ -124,24 +127,6 @@ interface WorldLabel {
   height: number
   color: number
   flat: boolean
-  despawn(): void
-}
-
-/** Cosmetic grand piano: a client-modelled instrument (curved rim, open
- * lid, 88 keys) the script animates pianola-style, usually from
- * world.onmidi. Local-only like screens: every peer's script places its
- * own, and identical midi feeds keep every view in step. No audio. */
-interface WorldGrandPiano {
-  position: WebSG.Vector3
-  yaw: number
-  /** 1 = full-size (~2.2m) grand */
-  size: number
-  /** case tint (default near-black gloss) */
-  color: number
-  /** press a key: MIDI note 21 (A0) to 108 (C8), velocity 1-127 */
-  noteOn(note: number, velocity?: number): void
-  /** release a key */
-  noteOff(note: number): void
   despawn(): void
 }
 
@@ -295,10 +280,6 @@ declare const world: {
   /** create a cosmetic text label (local-only; see WorldLabel) */
   createLabel(props?: { text?: string; position?: Vec3Like; yaw?: number; height?: number
     color?: number; flat?: boolean }): WorldLabel
-  /** create a cosmetic grand piano (local-only; see WorldGrandPiano).
-   * position is the floor point under the keyboard's center; yaw about Y. */
-  createGrandPiano(props?: { position?: Vec3Like; yaw?: number; size?: number
-    color?: number }): WorldGrandPiano
   /** background/fog colors and whether the default ground shows */
   env(opts?: { background?: number; fog?: { color: number; near: number; far: number } | null
     ground?: boolean }): void
