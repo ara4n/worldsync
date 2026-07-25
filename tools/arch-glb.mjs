@@ -739,15 +739,20 @@ for (const { from, to, e, local, pair } of allEdges) {
   pipeCount++
 }
 
-// the import ports: one breakout block per module with outgoing pipes
+// the import ports: one labeled breakout block per module with
+// outgoing pipes (never more than one; a slab with several fittings is
+// showing sockets - one per INBOUND pipe - not ports)
 const portMat = matFor(0x656e7a, { roughness: 0.4, metalness: 0.7 })
 for (const id of new Set(allEdges.map(e => e.from))) {
   const port = portOf[id]
-  const block = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.24, 0.3), portMat)
+  const block = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.24, 0.34), portMat)
   block.name = `${layout[id].kind === 'vendor' ? 'dep_' : 'mod_'}${id}_port`
   block.position.set(port.x, SLAB_H + 0.12, port.z)
   block.userData = { port: id }
   pipes.add(block)
+  const lbl = textMesh('imports', 0.1, 0.3, labelLight)
+  lbl.position.set(port.x, SLAB_H + 0.24 + 0.012, port.z)
+  pipes.add(lbl)
 }
 
 // masts: a pylon per district with a collar at each bus height it serves
