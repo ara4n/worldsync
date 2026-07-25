@@ -567,6 +567,13 @@ const pipes = new THREE.Group()
 pipes.name = 'pipes'
 world.add(pipes)
 
+// Toggle: BUS_ROUTING bundles cross-district pipes through per-district
+// mast pylons into one ribbon per district pair at a reserved height;
+// false routes every import as its own direct arc (no masts, heights
+// scale with distance, slight lateral bow to spread parallel runs).
+// Flipped off 2026-07-25 to compare against the bundled look.
+const BUS_ROUTING = false
+
 const cityX = layout.main.x, cityZ = layout.main.z
 const mastPos = {}
 for (const dst of DISTRICTS) {
@@ -596,14 +603,19 @@ for (const [from, a] of Object.entries(analyzed)) {
 
 // -- pipe endpoints MEAN something --
 // Outgoing: every module has ONE import port - a breakout block on the
-// slab edge facing its district mast - and all its pipes leave from it,
-// fanned just enough not to merge.
+// slab edge facing the centroid of its providers (the things it
+// imports) - and all its pipes leave from it, fanned just enough not
+// to merge.
 const portOf = {}
 for (const id of Object.keys(layout)) {
   const L = layout[id]
-  const m = mastPos[districtOf[id]]
-  let dx = m.x - L.x, dz = m.z - L.z
-  if (Math.hypot(dx, dz) < 0.01) { dx = 0; dz = -1 } // main IS its mast: port faces the sim heart
+  const provs = [...(analyzed[id]?.imports.keys() ?? [])].filter(p => layout[p])
+  let dx, dz
+  if (provs.length) {
+    dx = provs.reduce((n, p) => n + layout[p].x, 0) / provs.length - L.x
+    dz = provs.reduce((n, p) => n + layout[p].z, 0) / provs.length - L.z
+  } else { dx = cityX - L.x; dz = cityZ - L.z }
+  if (Math.hypot(dx, dz) < 0.01) { dx = 0; dz = -1 }
   const t = 1 / Math.max(Math.abs(dx) / L.hw, Math.abs(dz) / L.hd)
   const mag = Math.hypot(dx, dz)
   portOf[id] = {
@@ -686,17 +698,22 @@ for (const { from, to, e, local, pair } of allEdges) {
   const mat = matFor(color, { roughness: 0.35, metalness: 0.6 })
   const group = new THREE.Group()
   group.name = name
-  group.userData = { from, to, symbols: [...e.symbols].sort(), bus: pair ?? undefined,
+  group.userData = { from, to, symbols: [...e.symbols].sort(), bus: BUS_ROUTING ? pair ?? undefined : undefined,
     ...(e.dynamic ? { dynamic: true } : {}), ...(e.runtime ? { runtime: true } : {}) }
   const P = (x, y, z) => new THREE.Vector3(x, y, z)
   let pts
-  if (local) {
+  if (local || !BUS_ROUTING) {
+    // a direct arc: height scales with span, and a slight lateral bow
+    // (hashed per edge) spreads otherwise-parallel runs apart
     const dist = Math.hypot(jx - ax, jz - az)
     const clear = Math.max(...A.items.map(i => i.h), ...B.items.map(i => i.h)) + SLAB_H
-    const H = Math.max(0.7 + 0.6 * j + dist * 0.04, clear + 0.35, socketH + 0.4)
+    const H = Math.max(0.7 + 0.6 * j + dist * (local ? 0.04 : 0.11), clear + 0.35, socketH + 0.4)
+    const bowMag = local ? 0 : (hash01(name + 'b') - 0.5) * Math.min(3.5, dist * 0.2)
+    const dist2 = dist || 1
+    const bowX = (-(jz - az) / dist2) * bowMag, bowZ = ((jx - ax) / dist2) * bowMag
     pts = [
-      P(ax, aTop, az), P(ax, H, az),
-      P((ax + jx) / 2, H + dist * 0.02, (az + jz) / 2),
+      P(ax, aTop, az), P(ax, H * 0.85, az),
+      P((ax + jx) / 2 + bowX, H + dist * 0.02, (az + jz) / 2 + bowZ),
       P(jx, (H + socketH) / 2, jz), P(jx, socketH + 0.02, jz),
     ]
   } else {
@@ -771,7 +788,7 @@ for (const id of new Set(allEdges.map(e => e.from))) {
 
 // masts: a pylon per district with a collar at each bus height it serves
 const mastMat = matFor(0x596270, { roughness: 0.35, metalness: 0.8 })
-for (const [d, m] of Object.entries(mastPos)) {
+for (const [d, m] of BUS_ROUTING ? Object.entries(mastPos) : []) {
   const served = pairs.filter(p => p.split('|').includes(d)).map(p => busHeight[p])
   if (!served.length) continue
   const top = Math.max(...served) + 0.3
@@ -865,8 +882,9 @@ exporter.parse(world, result => {
   const idx = json.nodes.find(n => n.name === 'arch_index')
   console.log(`wrote ${out}`)
   console.log(`  ${(result.byteLength / 1024).toFixed(0)} kB, ${json.nodes.length} nodes: `
-    + `${slabs.length} modules, ${memberNodes.length} members, ${pipeNodes.length} pipes, `
-    + `${pairs.length} buses, districts: ${DISTRICTS.filter(d => d !== 'main').join(', ')}`)
+    + `${slabs.length} modules, ${memberNodes.length} members, ${pipeNodes.length} pipes `
+    + `(${BUS_ROUTING ? pairs.length + ' buses' : 'direct-routed'}), `
+    + `districts: ${DISTRICTS.filter(d => d !== 'main').join(', ')}`)
   const expected = Object.keys(layout).length
   if (slabs.length !== expected) { console.error(`FAIL: ${slabs.length} slabs, expected ${expected}`); process.exit(1) }
   if (pipeNodes.length !== pipeCount) { console.error('FAIL: pipe count mismatch'); process.exit(1) }
