@@ -274,30 +274,35 @@ prior commit) - not a regression.
 
 tools/arch-glb.mjs builds examples/arch.glb: the codebase as a 3D
 machine world, at MEMBER granularity, analyzed (not curated) with the
-TypeScript compiler API. Modules are district slabs (core north,
-render east, scripting south, transports west; vendors one layer deep
-in graphite at each district's edge) carrying blocks for their major
-members - when one class/function dominates a file (Sim, main()) the
-tool descends into it. Footprint ~ lines, height ~ consumer count
-(load-bearing = towers; main = the flat central manifold). Pipes =
-imports, symbol-accurate: a trunk drops onto the provider's slab and
-thin traces fan out to exactly the member blocks that edge imports;
-dynamic import() seams are thin pale pipes; net->vite /signal is the
-one runtime wire. Cross-district pipes route hierarchically to kill
-the rats' nest (Matthew asked): each district (main is its own hub)
-has a mast pylon, and every district pair gets a BUS at its own
-reserved height - member pipes climb their mast and run mast-to-mast
-as a ribbon of parallel tubes (slot offsets like a cable tray), so
-individual pipes stay traceable and named while reading as one trunk.
-Intra-district imports stay as short low arcs. Every slab/member/pipe
-is a named node (mod_sim,
-mod_sim__rollback, dep_three__Mesh, pipe_main__sim) with
-{module, member, kind, loc, consumers, symbols} extras - piano-rig
-style, so telemetry can later be overlaid by a world script scaling
-blocks from profiling data. Slab positions relax to avoid overlap from
-hand-placed district anchors; labels are flat ShapeGeometry text
-(extruded TextGeometry ballooned the glb 5x). Screenshot loop:
-scratchpad arch-shot script (mock.html upload + camera + png).
+TypeScript compiler API. Modules are slabs carrying blocks for their
+major members - when one class/function dominates a file (Sim,
+main()) the tool descends into it. Footprint ~ lines, height ~
+consumer count (load-bearing = towers; main = the flat central
+manifold). Layout has two cooperating sources (Matthew asked for
+both): DISTRICTS come from label propagation over the
+symbol-weighted import graph (main excluded or it glues everything;
+<3-member clusters merge into the hint-nearest one; found: sim,
+render, matrix_net, websg, websg_dts), GEOGRAPHY comes from an ASCII
+architecture diagram embedded in the tool - the layout DSL: token
+positions become slab anchors (dataflow west->east: transports ->
+wire/session -> sim -> presentation; chassis center; sandbox south;
+vendors outboard), then a relaxation pass de-overlaps. Pipes =
+imports, symbol-accurate, routed MANHATTAN (v2 was swoopy catmull
+ribbons): riser, orthogonal feeders, then a shared L-tray per
+district pair at its own reserved height with cable-tray slot
+offsets; cones on the longest leg + a down-cone at the socket give
+direction (pipes point at what they depend on); traces fan from the
+socket to the exact imported member blocks; dynamic import() thin and
+pale; net->vite /signal the one runtime wire. Every slab/member/pipe
+is a named node (mod_sim, mod_sim__rollback, dep_three__Mesh,
+pipe_main__sim) with {module, member, kind, district, loc, consumers,
+symbols} extras, and an arch_index node carries a manifest -
+examples/arch.js (the world script) uses it: SPACE sweeps the city
+between full detail and the module-dependency skeleton (scale 0.001
+is the hide channel), clicking a slab HUDs its extras. Labels are
+flat ShapeGeometry text (extruded TextGeometry ballooned the glb 5x).
+Screenshot loop: scratchpad arch-shot script (mock.html upload +
+script upload + keyboard + png).
 
 ## Known gaps / next-step candidates
 

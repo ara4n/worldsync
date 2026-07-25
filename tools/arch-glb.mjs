@@ -1,34 +1,46 @@
 // Build examples/arch.glb: the worldsync architecture as a 3D WORLD -
 // the codebase rendered as a machine, at MEMBER granularity. The
 // dependency data is not curated: this tool parses src/ with the
-// TypeScript compiler API. Every module is a district slab carrying
-// blocks for its major members (top-level classes/functions/consts;
-// when one class or function dominates the file - Sim, Session, View,
-// main() - the tool descends into it and its methods/fields become the
-// blocks). Member footprint ~ lines of code; member height ~ how many
-// modules import that symbol, so load-bearing API surfaces read as
-// towers. Modules cluster into districts (deterministic core north,
-// rendering east, scripting south, transports west) with third-party
-// dependencies (one layer deep, graphite, sub-blocks for just the
-// symbols we consume) on each district's outer edge.
+// TypeScript compiler API. Every module is a slab carrying blocks for
+// its major members (top-level classes/functions/consts; when one
+// class or function dominates the file - Sim, main() - the tool
+// descends into it and its methods/fields become the blocks). Member
+// footprint ~ lines of code; member height ~ how many modules import
+// that symbol, so load-bearing API surfaces read as towers.
 //
-// Pipes are import edges, colored by the consuming district: a trunk
-// rises from the consumer slab, drops onto a collared junction at the
-// provider slab's near edge, and thin traces fan out PCB-style from
-// the junction to the exact member blocks that edge imports. Dynamic
-// import() seams get thin pale pipes; the ws /signal wire to the vite
-// dev server is the one runtime (non-import) pipe.
+// LAYOUT comes from two cooperating sources:
+//  - DISTRICTS are discovered, not hand-assigned: label propagation
+//    over the weighted import graph (weights = symbols per edge; main
+//    is excluded so the chassis cannot glue everything into one blob),
+//    with small clusters merged into their hint-nearest neighbour.
+//  - GEOGRAPHY is authored: the ASCII diagram below is the layout
+//    hint, exactly the 2D architecture sketch you would draw by hand -
+//    dataflow runs west to east (transports -> session/timeline ->
+//    sim -> presentation), main is the central chassis everything
+//    bolts onto, the script sandbox hangs south, vendors sit outboard
+//    of their consumers. Token positions in the diagram become slab
+//    anchors; a relaxation pass then spaces the packed slabs apart.
 //
-// Built for telemetry overlay: every slab, member and pipe is a named
-// node (mod_sim, mod_sim__rollback, dep_three__Mesh, pipe_main__sim)
-// carrying {module, member, kind, zone, loc, symbols, ...} in its glTF
-// extras - the same rig pattern as the piano keys - so a world script
-// (or any glTF tool) can find a function by name and scale/raise it
-// from profiling data.
+// PIPES are import edges routed MANHATTAN-style: a vertical riser from
+// the consumer, orthogonal feeder legs at the bus height, then a shared
+// L-shaped tray between district masts - one tray per district pair,
+// each at its own reserved height, member pipes running side by side in
+// cable-tray slots. Every pipe carries flow cones (consumer -> provider)
+// on its longest leg and a down-cone where it plugs into the provider's
+// slab, where thin traces fan out to the exact members imported.
+// Dynamic import() seams are thin and pale; net -> vite /signal is the
+// one runtime (non-import) wire.
+//
+// Built for telemetry overlay and scripting: every slab, member and
+// pipe is a named node (mod_sim, mod_sim__rollback, dep_three__Mesh,
+// pipe_main__sim) with {module, member, kind, district, loc, consumers,
+// symbols} extras, and an 'arch_index' node carries a manifest of the
+// collapsible detail nodes - examples/arch.js uses it to toggle the
+// city between full detail and the module-dependency skeleton.
 //
 // Run: node tools/arch-glb.mjs
 // View: upload with "load glTF scene (.glb)" (it is a world with its
-// own floor + collider), or any glTF viewer.
+// own floor + collider), plus examples/arch.js as the world script.
 import { writeFileSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -52,69 +64,92 @@ globalThis.FileReader ??= FileReaderShim
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
-// ---------------------------------------------------------------- model
-const ZONES = {
-  core: 0x4f7cac, // the deterministic netcode heart
-  render: 0xc9913d,
-  script: 0x8a6fc9, // the QuickJS sandbox + authoring
-  transport: 0x3d9ba0, // ws demo mesh + the Matrix/LiveKit stack
-  vendor: 0x2e333b,
-  infra: 0x78828e, // dev harness: signaling plugin, mock host, headless hub
-}
-
-/** app modules: id -> [file, zone, district anchor x, z] */
+// ---------------------------------------------------------- the model
+/** app modules: id -> [file] (positions come from the hint diagram) */
 const MODULES = {
-  main: ['src/main.ts', 'core', 0, 0],
-  sim: ['src/sim.ts', 'core', 0.4, -7.6],
-  session: ['src/session.ts', 'core', -4.6, -6.2],
-  ecs: ['src/ecs.ts', 'core', 3.4, -5.6],
-  types: ['src/types.ts', 'core', 5.6, -7.4],
-  color: ['src/color.ts', 'core', 3.6, -3.4],
-  wire: ['src/wire.ts', 'core', -7.6, -7.0],
-  input: ['src/input.ts', 'core', -3.6, -3.0],
-  hub: ['src/hub.ts', 'infra', -10.4, -8.4],
-  render: ['src/render.ts', 'render', 8.2, -1.6],
-  props: ['src/props.ts', 'render', 10.6, -4.4],
-  scene: ['src/scene.ts', 'render', 8.0, 2.6],
-  audio: ['src/audio.ts', 'render', 11.2, 1.0],
-  inspector: ['src/inspector.ts', 'render', 11.0, 4.6],
-  websg: ['src/websg.ts', 'script', 0.8, 7.0],
-  websg_dts: ['src/websg-dts.ts', 'script', 4.8, 7.6],
-  editor: ['src/editor.ts', 'script', 8.0, 8.4],
-  ui: ['src/ui.ts', 'script', -2.8, 6.4],
-  net: ['src/net.ts', 'transport', -7.8, -2.4],
-  vite_signal: ['vite.config.ts', 'infra', -11.4, -4.0],
-  matrix_net: ['src/matrix/net.ts', 'transport', -9.4, 2.0],
-  matrix_transport: ['src/matrix/transport.ts', 'transport', -13.0, -0.6],
-  matrix_widget: ['src/matrix/widget.ts', 'transport', -11.6, 4.8],
-  matrix_world: ['src/matrix/world.ts', 'transport', -8.2, 5.6],
-  matrix_params: ['src/matrix/params.ts', 'transport', -6.2, 3.6],
-  mock_host: ['src/mock/host.ts', 'infra', -13.6, 7.4],
+  main: ['src/main.ts'],
+  sim: ['src/sim.ts'],
+  session: ['src/session.ts'],
+  ecs: ['src/ecs.ts'],
+  types: ['src/types.ts'],
+  color: ['src/color.ts'],
+  wire: ['src/wire.ts'],
+  input: ['src/input.ts'],
+  hub: ['src/hub.ts'],
+  render: ['src/render.ts'],
+  props: ['src/props.ts'],
+  scene: ['src/scene.ts'],
+  audio: ['src/audio.ts'],
+  inspector: ['src/inspector.ts'],
+  websg: ['src/websg.ts'],
+  websg_dts: ['src/websg-dts.ts'],
+  editor: ['src/editor.ts'],
+  ui: ['src/ui.ts'],
+  net: ['src/net.ts'],
+  vite_signal: ['vite.config.ts'],
+  matrix_net: ['src/matrix/net.ts'],
+  matrix_transport: ['src/matrix/transport.ts'],
+  matrix_widget: ['src/matrix/widget.ts'],
+  matrix_world: ['src/matrix/world.ts'],
+  matrix_params: ['src/matrix/params.ts'],
+  mock_host: ['src/mock/host.ts'],
 }
+const INFRA = new Set(['hub', 'vite_signal', 'mock_host'])
 
-/** vendor packages (one layer deep): id -> [label, match, x, z, district] */
+/** vendor packages (one layer deep): id -> [label, specifier match] */
 const VENDORS = {
-  three: ['three', /^three(\/|$)/, 16.4, -1.0, 'render'],
-  rapier: ['@dimforge/rapier3d', /^@dimforge\//, 0.4, -12.4, 'core'],
-  bitecs: ['bitecs', /^bitecs$/, 4.0, -11.4, 'core'],
-  cbor_x: ['cbor-x', /^cbor-x$/, -7.6, -10.6, 'core'],
-  quickjs: ['quickjs-emscripten', /^(quickjs-emscripten|@jitl\/)/, 0.8, 11.6, 'script'],
-  monaco: ['monaco-editor', /^monaco-editor(\/|$)/, 8.0, 12.4, 'script'],
-  sanitize_html: ['sanitize-html', /^sanitize-html$/, -5.6, 10.4, 'script'],
-  livekit: ['livekit-client', /^livekit-client$/, -17.0, -3.0, 'transport'],
-  matrix_js_sdk: ['matrix-js-sdk', /^matrix-js-sdk(\/|$)/, -17.4, 2.2, 'transport'],
-  matrix_widget_api: ['matrix-widget-api', /^matrix-widget-api$/, -16.6, 6.6, 'transport'],
+  three: ['three', /^three(\/|$)/],
+  rapier: ['@dimforge/rapier3d', /^@dimforge\//],
+  bitecs: ['bitecs', /^bitecs$/],
+  cbor_x: ['cbor-x', /^cbor-x$/],
+  quickjs: ['quickjs-emscripten', /^(quickjs-emscripten|@jitl\/)/],
+  monaco: ['monaco-editor', /^monaco-editor(\/|$)/],
+  sanitize_html: ['sanitize-html', /^sanitize-html$/],
+  livekit: ['livekit-client', /^livekit-client$/],
+  matrix_js_sdk: ['matrix-js-sdk', /^matrix-js-sdk(\/|$)/],
+  matrix_widget_api: ['matrix-widget-api', /^matrix-widget-api$/],
 }
 
-/** bus-routing district per module: main is its own hub (its fan-out
- * becomes ribbons, not a star of arcs); infra modules ride the district
- * they physically sit in; vendors declare theirs above. */
-const districtOf = (id) => {
-  if (id === 'main') return 'main'
-  if (id in VENDORS) return VENDORS[id][4]
-  const zone = MODULES[id][1]
-  if (zone === 'infra') return { hub: 'core', vite_signal: 'transport', mock_host: 'transport' }[id]
-  return zone
+// THE LAYOUT HINT: the architecture as I would sketch it in ASCII.
+// West -> east is dataflow: the transport stacks feed the shared
+// timeline (wire/session), which drives the deterministic sim, which
+// the presentation layer draws; main is the chassis in the middle of
+// it all; the script sandbox and authoring tools hang south; every
+// vendor sits outboard of the district that consumes it. Token
+// positions (column, row) become slab anchor coordinates.
+const DIAGRAM = `
+.                                   cbor_x          rapier       bitecs
+.
+.  livekit             hub                 wire        sim    ecs   types
+.
+.  matrix_js_sdk    matrix_transport   session                              props      three
+.
+.  matrix_widget_api   matrix_net                                    render
+.                                        net
+.  mock_host   matrix_widget                       input                    scene    audio
+.                            matrix_params        main
+.        matrix_world                                        color
+.                     vite_signal                                       inspector
+.
+.  sanitize_html     ui           websg      websg_dts     editor
+.
+.                              quickjs                  monaco
+`
+const CHAR_W = 0.48
+const ROW_D = 1.55
+const hint = {}
+{
+  const rows = DIAGRAM.split('\n')
+  for (const [r, line] of rows.entries()) {
+    for (const m of line.matchAll(/[a-z][a-z0-9_]*/g)) {
+      hint[m[0]] = { x: (m.index + m[0].length / 2) * CHAR_W, z: r * ROW_D }
+    }
+  }
+  const ids = [...Object.keys(MODULES), ...Object.keys(VENDORS)]
+  for (const id of ids) if (!hint[id]) throw new Error(`no diagram position for ${id}`)
+  // center on main
+  const c = hint.main
+  for (const id of ids) { hint[id] = { x: hint[id].x - c.x, z: hint[id].z - c.z } }
 }
 
 const TRUNKS = new Set(['main sim', 'main session', 'main render', 'session sim',
@@ -143,7 +178,6 @@ const lineSpan = (sf, node) => {
 const isExported = (node) =>
   (ts.getCombinedModifierFlags(node) & ts.ModifierFlags.Export) !== 0
 
-/** top-level (or descended) named declarations with line spans */
 const declsOf = (sf, statements, container) => {
   const out = []
   for (const st of statements) {
@@ -186,12 +220,11 @@ const classMembers = (sf, cls, container) => {
 const MEMBER_MIN_LINES = 6
 const MEMBER_CAP = 14
 
-const analyzed = {} // id -> { loc, members[], imports: Map(provider -> {symbols:Set, dynamic}) }
+const analyzed = {}
 for (const [id, [file]] of Object.entries(MODULES)) {
   const text = readFileSync(join(ROOT, file), 'utf8')
   const sf = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true)
   const loc = text.split('\n').length
-  // imports (static + dynamic), symbol-accurate for named bindings
   const imports = new Map()
   const edge = (provider, dynamic) => {
     if (!imports.has(provider)) imports.set(provider, { symbols: new Set(), dynamic })
@@ -207,7 +240,6 @@ for (const [id, [file]] of Object.entries(MODULES)) {
     const b = st.importClause?.namedBindings
     if (b && ts.isNamedImports(b)) for (const s of b.elements) e.symbols.add(s.name.text)
     if (b && ts.isNamespaceImport(b)) {
-      // namespace import: harvest actual member usage (THREE.Mesh, ...)
       for (const m of text.matchAll(new RegExp(`\\b${b.name.text}\\.([A-Za-z_$][\\w$]*)`, 'g'))) {
         e.symbols.add(m[1])
       }
@@ -218,7 +250,6 @@ for (const [id, [file]] of Object.entries(MODULES)) {
     const provider = resolveSpec(id, m[1])
     if (provider && provider !== id) edge(provider, !imports.has(provider) || imports.get(provider).dynamic)
   }
-  // members: top-level decls; descend when one class/function dominates
   let decls = declsOf(sf, sf.statements, null)
   const dominant = decls.find(d => d.lines > 0.55 * loc && (d.kind === 'class' || d.kind === 'function'))
   if (dominant) {
@@ -240,7 +271,6 @@ for (const [id, [file]] of Object.entries(MODULES)) {
   if (!members.length) members.push({ name: id, lines: loc, kind: 'module', pub: true, container: null })
   analyzed[id] = { loc, members, imports }
 }
-// the one runtime (non-import) wire: the ws demo signaling to the vite plugin
 analyzed.net.imports.set('vite_signal', { symbols: new Set(['/signal']), dynamic: false, runtime: true })
 analyzed.vite_signal = {
   loc: readFileSync(join(ROOT, 'vite.config.ts'), 'utf8').split('\n').length,
@@ -248,8 +278,6 @@ analyzed.vite_signal = {
   imports: new Map(),
 }
 
-// vendor members: the symbols the app actually pulls, weighted by how
-// many modules pull them
 const vendorUse = Object.fromEntries(Object.keys(VENDORS).map(k => [k, new Map()]))
 for (const a of Object.values(analyzed)) {
   for (const [provider, e] of a.imports) {
@@ -257,8 +285,6 @@ for (const a of Object.values(analyzed)) {
     for (const s of e.symbols) vendorUse[provider].set(s, (vendorUse[provider].get(s) ?? 0) + 1)
   }
 }
-
-// symbol -> consumer-module count per app provider (member load-bearing)
 const symbolConsumers = Object.fromEntries(Object.keys(MODULES).map(k => [k, new Map()]))
 for (const a of Object.values(analyzed)) {
   for (const [provider, e] of a.imports) {
@@ -266,12 +292,83 @@ for (const a of Object.values(analyzed)) {
     for (const s of e.symbols) symbolConsumers[provider].set(s, (symbolConsumers[provider].get(s) ?? 0) + 1)
   }
 }
-const indeg = Object.fromEntries([...Object.keys(MODULES), ...Object.keys(VENDORS)].map(k => [k, 0]))
+const ALL_IDS = [...Object.keys(MODULES), ...Object.keys(VENDORS)]
+const indeg = Object.fromEntries(ALL_IDS.map(k => [k, 0]))
 for (const a of Object.values(analyzed)) for (const p of a.imports.keys()) indeg[p]++
 
-// ------------------------------------------------------------- geometry
-/** shelf-pack member footprints onto a slab; returns placed rects and
- * the slab half-extents */
+// -------------------------------------------- districts by clustering
+// Label propagation over the undirected import graph, weighted by
+// symbols-per-edge. main is excluded (the chassis touches everything
+// and would glue the graph into one community); it becomes its own
+// routing hub. Clusters under 3 members merge into the hint-nearest
+// cluster, so singletons like ui land with their neighbours.
+const adj = Object.fromEntries(ALL_IDS.map(k => [k, new Map()]))
+for (const [from, a] of Object.entries(analyzed)) {
+  for (const [to, e] of a.imports) {
+    if (from === 'main' || to === 'main') continue
+    const w = Math.max(1, e.symbols.size)
+    adj[from].set(to, (adj[from].get(to) ?? 0) + w)
+    adj[to].set(from, (adj[to].get(from) ?? 0) + w)
+  }
+}
+const clusterNodes = ALL_IDS.filter(id => id !== 'main').sort()
+const label = Object.fromEntries(clusterNodes.map(n => [n, n]))
+for (let iter = 0; iter < 60; iter++) {
+  let changed = false
+  for (const n of clusterNodes) {
+    const counts = new Map()
+    for (const [nb, w] of adj[n]) {
+      if (nb === 'main') continue
+      counts.set(label[nb], (counts.get(label[nb]) ?? 0) + w)
+    }
+    if (!counts.size) continue
+    const best = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0][0]
+    if (best !== label[n]) { label[n] = best; changed = true }
+  }
+  if (!changed) break
+}
+let clusters = new Map()
+for (const n of clusterNodes) {
+  if (!clusters.has(label[n])) clusters.set(label[n], [])
+  clusters.get(label[n]).push(n)
+}
+const centroidOf = (ids) => ({
+  x: ids.reduce((s, i) => s + hint[i].x, 0) / ids.length,
+  z: ids.reduce((s, i) => s + hint[i].z, 0) / ids.length,
+})
+for (let guard = 0; guard < 40; guard++) {
+  const small = [...clusters.entries()].filter(([, m]) => m.length < 3)
+    .sort((a, b) => a[1].length - b[1].length)[0]
+  if (!small) break
+  const [key, membersOf] = small
+  clusters.delete(key)
+  const c = centroidOf(membersOf)
+  const nearest = [...clusters.entries()].sort((a, b) => {
+    const ca = centroidOf(a[1]), cb = centroidOf(b[1])
+    return Math.hypot(ca.x - c.x, ca.z - c.z) - Math.hypot(cb.x - c.x, cb.z - c.z)
+  })[0]
+  nearest[1].push(...membersOf)
+}
+// name each district after its biggest app module; main is its own
+const districtOf = { main: 'main' }
+const districtName = { main: 'main' }
+for (const membersOf of clusters.values()) {
+  const dominant = membersOf.filter(m => m in MODULES).sort((a, b) =>
+    (analyzed[b]?.loc ?? 0) - (analyzed[a]?.loc ?? 0))[0] ?? membersOf[0]
+  for (const m of membersOf) districtOf[m] = dominant
+  districtName[dominant] = dominant
+}
+const DISTRICTS = [...new Set(Object.values(districtOf))]
+const PALETTE = [0x4f7cac, 0xc9913d, 0x8a6fc9, 0x3d9ba0, 0x5da06b, 0xb0637a, 0x958f4e]
+const districtColor = { main: 0x46536b }
+{
+  const sized = DISTRICTS.filter(d => d !== 'main').sort((a, b) =>
+    Object.values(districtOf).filter(x => x === b).length
+    - Object.values(districtOf).filter(x => x === a).length || a.localeCompare(b))
+  sized.forEach((d, i) => { districtColor[d] = PALETTE[i % PALETTE.length] })
+}
+
+// ------------------------------------------------------------- layout
 const pack = (items, gap) => {
   const targetW = Math.max(Math.sqrt(items.reduce((n, i) => n + (i.w + gap) * (i.d + gap), 0)) * 1.12,
     Math.max(...items.map(i => i.w)) + gap)
@@ -298,19 +395,18 @@ const vendorMemberDims = (uses) =>
   ({ w: Math.min(0.55 + 0.14 * uses, 1.3), d: Math.min(0.55 + 0.14 * uses, 1.3),
     h: Math.min(0.35 + 0.22 * uses, 1.9) })
 
-// build per-block layouts
-const layout = {} // id -> { x, z, hw, hd, items[], zone, kind, module, loc }
-for (const [id, [file, zone, x, z]] of Object.entries(MODULES)) {
+const layout = {}
+for (const [id, [file]] of Object.entries(MODULES)) {
   const a = analyzed[id]
   const items = a.members.map(m => ({
     ...m, ...memberDims(m, symbolConsumers[id].get(m.name) ?? 0),
     consumers: symbolConsumers[id].get(m.name) ?? 0,
   }))
   const { hw, hd } = pack(items, 0.22)
-  layout[id] = { id, x, z, hw: hw + 0.42, hd: hd + 0.42, items, zone,
-    kind: zone === 'infra' ? 'infra' : 'app', module: file, loc: a.loc }
+  layout[id] = { id, x: hint[id].x, z: hint[id].z, hw: hw + 0.42, hd: hd + 0.42, items,
+    kind: INFRA.has(id) ? 'infra' : 'app', module: file, loc: a.loc }
 }
-for (const [id, [label, , x, z]] of Object.entries(VENDORS)) {
+for (const [id, [pkg]] of Object.entries(VENDORS)) {
   const uses = [...vendorUse[id].entries()].sort((a, b) => b[1] - a[1])
   const kept = uses.slice(0, 10)
   const items = kept.map(([name, n]) => ({ name, lines: 0, kind: 'symbol', pub: true,
@@ -319,14 +415,12 @@ for (const [id, [label, , x, z]] of Object.entries(VENDORS)) {
     items.push({ name: `+${uses.length - 10}`, lines: 0, kind: 'misc', pub: false,
       container: null, consumers: 0, ...vendorMemberDims(1) })
   }
-  if (!items.length) items.push({ name: label, lines: 0, kind: 'symbol', pub: true,
+  if (!items.length) items.push({ name: pkg, lines: 0, kind: 'symbol', pub: true,
     container: null, consumers: 1, ...vendorMemberDims(1) })
   const { hw, hd } = pack(items, 0.2)
-  layout[id] = { id, x, z, hw: hw + 0.38, hd: hd + 0.38, items, zone: 'vendor',
-    kind: 'vendor', module: label, loc: undefined }
+  layout[id] = { id, x: hint[id].x, z: hint[id].z, hw: hw + 0.38, hd: hd + 0.38, items,
+    kind: 'vendor', module: pkg, loc: undefined }
 }
-
-// relax slab positions so nothing overlaps (main stays pinned)
 for (let iter = 0; iter < 400; iter++) {
   let moved = false
   const ids = Object.keys(layout)
@@ -379,8 +473,6 @@ const dim = (c, f) => {
   return (r << 16) | (g << 8) | b
 }
 
-// flat ShapeGeometry text (no extrusion): an order of magnitude lighter
-// than TextGeometry across ~280 labels
 const textMesh = (text, size, maxW, mat) => {
   const g = new THREE.ShapeGeometry(font.generateShapes(text, size), 2)
   g.computeBoundingBox()
@@ -395,26 +487,30 @@ const textMesh = (text, size, maxW, mat) => {
 const labelLight = matFor(0xe8ebef, { roughness: 0.4 })
 const labelDark = matFor(0x0d1015, { roughness: 0.8 })
 
+const collapsibles = [] // [name, worldX+worldZ] for the toggle sweep
 for (const L of Object.values(layout)) {
+  const d = districtOf[L.id]
+  const zone = districtColor[d]
   const group = new THREE.Group()
   group.name = (L.kind === 'vendor' ? 'dep_' : 'mod_') + L.id
   group.position.set(L.x, 0, L.z)
   group.userData = {
-    module: L.module, kind: L.kind, zone: L.zone, loc: L.loc,
+    module: L.module, kind: L.kind, district: d, loc: L.loc,
     deps: [...(analyzed[L.id]?.imports.keys() ?? [])],
     dependents: indeg[L.id],
   }
   const slab = new THREE.Mesh(new THREE.BoxGeometry(L.hw * 2, SLAB_H, L.hd * 2),
-    matFor(dim(ZONES[L.zone], L.kind === 'vendor' ? 1 : 0.45)))
+    matFor(dim(zone, L.kind === 'vendor' ? 0.6 : 0.45)))
   slab.name = group.name + '_slab'
   slab.position.y = SLAB_H / 2
   group.add(slab)
   for (const it of L.items) {
     const color = L.kind === 'vendor' ? 0x4a5058
-      : it.kind === 'misc' ? dim(ZONES[L.zone], 0.5)
-      : it.pub ? ZONES[L.zone] : dim(ZONES[L.zone], 0.62)
+      : it.kind === 'misc' ? dim(zone, 0.5)
+      : it.pub ? zone : dim(zone, 0.62)
     const box = new THREE.Mesh(new THREE.BoxGeometry(it.w, it.h, it.d), matFor(color))
-    box.name = `${group.name}__${it.name.replace(/[^\w+]/g, '_')}`
+    const safe = it.name.replace(/[^\w+]/g, '_')
+    box.name = `${group.name}__${safe}`
     box.position.set(it.x, SLAB_H + it.h / 2, it.z)
     box.userData = {
       member: it.name, of: L.module, in: it.container ?? undefined, kind: it.kind,
@@ -422,11 +518,13 @@ for (const L of Object.values(layout)) {
     }
     group.add(box)
     const lbl = textMesh(it.name, 0.16, it.w * 0.94, L.kind === 'vendor' || !it.pub ? labelLight : labelDark)
+    lbl.name = `${group.name}__${safe}_label`
     lbl.position.set(it.x, SLAB_H + it.h + 0.015, it.z)
     group.add(lbl)
+    collapsibles.push([box.name, L.x + it.x + L.z + it.z])
+    collapsibles.push([lbl.name, L.x + it.x + L.z + it.z])
   }
-  // module nameplate on the slab's south margin
-  const plate = textMesh(L.id.replace(/_/g, L.module.startsWith('src/m') && L.id.startsWith('matrix') ? '/' : '-'),
+  const plate = textMesh(L.id.replace(/_/g, L.id.startsWith('matrix') ? '/' : '-'),
     0.34, L.hw * 1.8, L.kind === 'vendor' ? labelLight : matFor(0xf2f4f7, { roughness: 0.4 }))
   plate.name = group.name + '_plate'
   plate.position.set(0, SLAB_H + 0.015, L.hd - 0.24)
@@ -434,12 +532,7 @@ for (const L of Object.values(layout)) {
   world.add(group)
 }
 
-// -- pipes: hierarchical bus routing. Intra-district imports stay as
-// short low arcs; every cross-district edge climbs its district's MAST,
-// runs mast-to-mast in a ribbon of parallel pipes (one bus per district
-// pair, each pair at its own reserved height, edges offset side by side
-// like a cable tray), drops at the provider's mast and lands on the
-// provider slab, where traces fan out to the imported members. --
+// -- pipes: Manhattan trays between district masts --
 const hash01 = (s) => {
   let h = 2166136261
   for (const c of s) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619) }
@@ -449,44 +542,68 @@ const pipes = new THREE.Group()
 pipes.name = 'pipes'
 world.add(pipes)
 
-// mast per district: centroid pulled toward the city center, nudged
-// clear of slabs
 const cityX = layout.main.x, cityZ = layout.main.z
 const mastPos = {}
-for (const d of new Set(Object.keys({ ...MODULES, ...VENDORS }).map(districtOf))) {
-  let mx, mz
-  if (d === 'main') { mx = layout.main.x; mz = layout.main.z } else {
-    const Ds = Object.values(layout).filter(L => districtOf(L.id) === d)
-    mx = Ds.reduce((n, L) => n + L.x, 0) / Ds.length
-    mz = Ds.reduce((n, L) => n + L.z, 0) / Ds.length
-    mx += (cityX - mx) * 0.26; mz += (cityZ - mz) * 0.26
-    const dirx = (mx - cityX), dirz = (mz - cityZ)
-    const mag = Math.hypot(dirx, dirz) || 1
-    for (let step = 0; step < 40; step++) {
-      if (!Object.values(layout).some(L =>
-        Math.abs(mx - L.x) < L.hw + 0.35 && Math.abs(mz - L.z) < L.hd + 0.35)) break
-      mx += (dirx / mag) * 0.5; mz += (dirz / mag) * 0.5
-    }
+for (const dst of DISTRICTS) {
+  if (dst === 'main') { mastPos.main = { x: layout.main.x, z: layout.main.z }; continue }
+  const Ds = Object.values(layout).filter(L => districtOf[L.id] === dst)
+  let mx = Ds.reduce((n, L) => n + L.x, 0) / Ds.length
+  let mz = Ds.reduce((n, L) => n + L.z, 0) / Ds.length
+  mx += (cityX - mx) * 0.26; mz += (cityZ - mz) * 0.26
+  const dirx = mx - cityX, dirz = mz - cityZ
+  const mag = Math.hypot(dirx, dirz) || 1
+  for (let step = 0; step < 40; step++) {
+    if (!Object.values(layout).some(L =>
+      Math.abs(mx - L.x) < L.hw + 0.35 && Math.abs(mz - L.z) < L.hd + 0.35)) break
+    mx += (dirx / mag) * 0.5; mz += (dirz / mag) * 0.5
   }
-  mastPos[d] = { x: mx, z: mz }
+  mastPos[dst] = { x: mx, z: mz }
 }
 
-// classify edges, reserve one height per district pair, slot per edge
 const allEdges = []
 for (const [from, a] of Object.entries(analyzed)) {
   for (const [to, e] of a.imports) {
     if (!layout[from] || !layout[to]) continue
-    const d1 = districtOf(from), d2 = districtOf(to)
+    const d1 = districtOf[from], d2 = districtOf[to]
     allEdges.push({ from, to, e, local: d1 === d2, pair: d1 === d2 ? null : [d1, d2].sort().join('|') })
   }
 }
 const pairs = [...new Set(allEdges.filter(x => x.pair).map(x => x.pair))].sort()
-const busHeight = Object.fromEntries(pairs.map((p, i) => [p, 2.6 + 0.55 * i]))
+const busHeight = Object.fromEntries(pairs.map((p, i) => [p, 3.2 + 0.42 * i]))
 const slots = {}
 for (const p of pairs) {
   const es = allEdges.filter(x => x.pair === p).sort((a, b) =>
     `${a.from} ${a.to}`.localeCompare(`${b.from} ${b.to}`))
   es.forEach((x, i) => { slots[`${x.from} ${x.to}`] = i - (es.length - 1) / 2 })
+}
+
+const Y = new THREE.Vector3(0, 1, 0)
+/** orthogonal pipe: cylinders between points, sphere elbows, flow cones */
+const pipeRun = (group, pts, r, mat) => {
+  const clean = pts.filter((p, i) => i === 0 || p.distanceTo(pts[i - 1]) > 0.06)
+  let longest = null
+  for (let i = 0; i < clean.length - 1; i++) {
+    const p = clean[i], q = clean[i + 1]
+    const d = q.clone().sub(p)
+    const len = d.length()
+    const cyl = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, 10), mat)
+    cyl.position.copy(p).add(q).multiplyScalar(0.5)
+    cyl.quaternion.setFromUnitVectors(Y, d.clone().normalize())
+    group.add(cyl)
+    if (i > 0) {
+      const elbow = new THREE.Mesh(new THREE.SphereGeometry(r * 1.25, 10, 8), mat)
+      elbow.position.copy(p)
+      group.add(elbow)
+    }
+    if (Math.abs(d.y) < 0.01 && (!longest || len > longest.len)) longest = { p, q, len }
+  }
+  return longest
+}
+const flowCone = (group, at, dir, r, mat) => {
+  const cone = new THREE.Mesh(new THREE.ConeGeometry(r * 2.6, r * 7, 12), mat)
+  cone.position.copy(at)
+  cone.quaternion.setFromUnitVectors(Y, dir)
+  group.add(cone)
 }
 
 let pipeCount = 0
@@ -500,69 +617,69 @@ for (const { from, to, e, local, pair } of allEdges) {
   const jx = B.x + (dirx / mag) * (Math.abs(dirx / mag) * B.hw) * 0.82
   const jz = B.z + (dirz / mag) * (Math.abs(dirz / mag) * B.hd) * 0.82
   const aTop = Math.max(...A.items.map(i => i.h)) + SLAB_H
-  const r = e.dynamic ? 0.034 : e.runtime ? 0.036 : TRUNKS.has(`${from} ${to}`) ? 0.085 : 0.05
-  const color = e.dynamic ? 0xaab2bc : e.runtime ? 0xd8dce2 : ZONES[A.zone]
+  const r = e.dynamic ? 0.03 : e.runtime ? 0.033 : TRUNKS.has(`${from} ${to}`) ? 0.075 : 0.045
+  const color = e.dynamic ? 0xaab2bc : e.runtime ? 0xd8dce2 : districtColor[districtOf[from]]
   const mat = matFor(color, { roughness: 0.35, metalness: 0.6 })
-  let points
+  const group = new THREE.Group()
+  group.name = name
+  group.userData = { from, to, symbols: [...e.symbols].sort(), bus: pair ?? undefined,
+    ...(e.dynamic ? { dynamic: true } : {}), ...(e.runtime ? { runtime: true } : {}) }
+  const P = (x, y, z) => new THREE.Vector3(x, y, z)
+  // L between two points at height H, longer axis first
+  const legs = (x0, z0, x1, z1, H) =>
+    Math.abs(x1 - x0) > Math.abs(z1 - z0)
+      ? [P(x1, H, z0), P(x1, H, z1)]
+      : [P(x0, H, z1), P(x1, H, z1)]
+  let pts
   if (local) {
-    const dist = Math.hypot(jx - ax, jz - az)
-    const lane = Math.max(0.7 + 0.6 * j + dist * 0.04, aTop + 0.35)
-    points = [
-      new THREE.Vector3(ax, aTop, az),
-      new THREE.Vector3(ax, lane, az),
-      new THREE.Vector3((ax + jx) / 2, lane + dist * 0.02, (az + jz) / 2),
-      new THREE.Vector3(jx, lane * 0.55, jz),
-      new THREE.Vector3(jx, SLAB_H, jz),
-    ]
+    const H = Math.max(aTop, ...B.items.map(i => i.h + SLAB_H)) + 0.35 + 0.5 * j
+    pts = [P(ax, aTop, az), P(ax, H, az), ...legs(ax, az, jx, jz, H), P(jx, SLAB_H + 0.1, jz)]
   } else {
     const [pa, pb] = pair.split('|')
-    const m1 = mastPos[districtOf(from)], m2 = mastPos[districtOf(to)]
-    // the lateral frame comes from the SORTED pair, so both directions
-    // of travel share slot geometry and the ribbon stays parallel
+    const H = busHeight[pair]
+    const o = slots[`${from} ${to}`] * 0.16
     const fa = mastPos[pa], fb = mastPos[pb]
-    const fx = fb.x - fa.x, fz = fb.z - fa.z
-    const fmag = Math.hypot(fx, fz) || 1
-    const off = slots[`${from} ${to}`] * 0.17
-    const ox = (-fz / fmag) * off, oz = (fx / fmag) * off
-    const busH = busHeight[pair]
-    points = [
-      new THREE.Vector3(ax, aTop, az),
-      new THREE.Vector3(ax * 0.35 + m1.x * 0.65 + ox, busH * 0.55, az * 0.35 + m1.z * 0.65 + oz),
-      new THREE.Vector3(m1.x + ox, busH, m1.z + oz),
-      new THREE.Vector3(m2.x + ox, busH, m2.z + oz),
-      new THREE.Vector3(jx * 0.35 + m2.x * 0.65 + ox, busH * 0.55, jz * 0.35 + m2.z * 0.65 + oz),
-      new THREE.Vector3(jx, SLAB_H, jz),
+    // shared L-tray in the sorted-pair frame: x-leg at z=fa.z+o, then
+    // z-leg at x=fb.x+o; both directions of travel use the same rails
+    const C1 = P(fa.x, H, fa.z + o), C2 = P(fb.x + o, H, fa.z + o), C3 = P(fb.x + o, H, fb.z)
+    const corridor = districtOf[from] === pa ? [C1, C2, C3] : [C3, C2, C1]
+    const entry = corridor[0], exit = corridor[corridor.length - 1]
+    pts = [
+      P(ax, aTop, az), P(ax, H, az),
+      ...legs(ax, az, entry.x, entry.z, H),
+      ...corridor,
+      ...legs(exit.x, exit.z, jx, jz, H),
+      P(jx, SLAB_H + 0.1, jz),
     ]
   }
-  const pipe = new THREE.Mesh(
-    new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), local ? 40 : 72, r, 10), mat)
-  pipe.name = name
-  pipe.userData = { from, to, symbols: [...e.symbols].sort(), bus: pair ?? undefined,
-    ...(e.dynamic ? { dynamic: true } : {}), ...(e.runtime ? { runtime: true } : {}) }
-  pipes.add(pipe)
-  pipeCount++
+  const longest = pipeRun(group, pts, r, mat)
+  // flow cones: along the longest horizontal leg, and down into the socket
+  if (longest) {
+    const d = longest.q.clone().sub(longest.p).normalize()
+    flowCone(group, longest.p.clone().add(longest.q).multiplyScalar(0.5), d, r, mat)
+  }
+  flowCone(group, P(jx, SLAB_H + 0.42, jz), P(0, -1, 0), r, mat)
   const collar = new THREE.Mesh(new THREE.CylinderGeometry(r * 2.0, r * 2.5, 0.1, 12), mat)
   collar.name = name + '_socket'
   collar.position.set(jx, SLAB_H + 0.05, jz)
-  pipes.add(collar)
-  // traces: junction -> each imported member present on the slab
+  group.add(collar)
   const traceMat = matFor(dim(color, 0.85), { roughness: 0.4, metalness: 0.5 })
   for (const it of B.items) {
     if (!e.symbols.has(it.name)) continue
     const mx = B.x + it.x, mz = B.z + it.z
-    const tc = new THREE.CatmullRomCurve3([
-      new THREE.Vector3(jx, SLAB_H + 0.02, jz),
-      new THREE.Vector3((jx + mx) / 2, SLAB_H + 0.22, (jz + mz) / 2),
-      new THREE.Vector3(mx, SLAB_H + Math.min(0.3, it.h * 0.55), mz),
-    ])
-    const trace = new THREE.Mesh(new THREE.TubeGeometry(tc, 12, 0.02, 8), traceMat)
+    const trace = new THREE.Group()
     trace.name = `${name}__${it.name.replace(/[^\w+]/g, '_')}`
-    pipes.add(trace)
+    pipeRun(trace, [P(jx, SLAB_H + 0.04, jz),
+      ...legs(jx, jz, mx, mz, SLAB_H + 0.04), P(mx, SLAB_H + Math.min(0.3, it.h * 0.55), mz)],
+    0.018, traceMat)
+    group.add(trace)
+    collapsibles.push([trace.name, mx + mz])
   }
+  pipes.add(group)
+  pipeCount++
 }
 
-// the masts themselves: a pylon per district with a collar ring at each
-// bus height it serves
+// masts: a pylon per district with a collar at each bus height it serves
 const mastMat = matFor(0x596270, { roughness: 0.35, metalness: 0.8 })
 for (const [d, m] of Object.entries(mastPos)) {
   const served = pairs.filter(p => p.split('|').includes(d)).map(p => busHeight[p])
@@ -580,8 +697,18 @@ for (const [d, m] of Object.entries(mastPos)) {
   }
 }
 
-// -- floor centered on the relaxed city's bounding box, district
-// labels pushed just past each district's outer edge --
+// the manifest for examples/arch.js: what to collapse in skeleton mode,
+// swept across the city in (x+z) order
+const index = new THREE.Object3D()
+index.name = 'arch_index'
+index.userData = {
+  version: 2,
+  modules: Object.values(layout).map(L => (L.kind === 'vendor' ? 'dep_' : 'mod_') + L.id),
+  collapse: collapsibles.sort((a, b) => a[1] - b[1]).map(([n]) => n),
+}
+world.add(index)
+
+// -- floor + district labels + title --
 const Ls = Object.values(layout)
 const minX = Math.min(...Ls.map(L => L.x - L.hw)), maxX = Math.max(...Ls.map(L => L.x + L.hw))
 const minZ = Math.min(...Ls.map(L => L.z - L.hd)), maxZ = Math.max(...Ls.map(L => L.z + L.hd))
@@ -600,18 +727,18 @@ const floorText = (text, x, z, size) => {
   world.add(t)
   return t
 }
-for (const [zone, label] of [['core', 'CORE'], ['render', 'RENDER'], ['script', 'SCRIPTING'], ['transport', 'TRANSPORT']]) {
-  const Zs = Ls.filter(L => L.zone === zone)
+for (const dst of DISTRICTS) {
+  if (dst === 'main') continue
+  const Zs = Ls.filter(L => districtOf[L.id] === dst)
   const cx = Zs.reduce((n, L) => n + L.x, 0) / Zs.length, cz = Zs.reduce((n, L) => n + L.z, 0) / Zs.length
   const dx = cx - cx0, dz = cz - cz0
   const mag = Math.hypot(dx, dz) || 1
-  // walk outward from the district centroid until clear of every slab
   let px = cx, pz = cz
   for (let step = 0; step < 40; step++) {
     if (!Ls.some(L => Math.abs(px - L.x) < L.hw + 1.2 && Math.abs(pz - L.z) < L.hd + 1.2)) break
     px += (dx / mag) * 0.8; pz += (dz / mag) * 0.8
   }
-  floorText(label, px, pz + 0.6, 1.0)
+  floorText(districtName[dst].replace(/_/g, '/').toUpperCase(), px, pz + 0.6, 1.0)
 }
 floorText('worldsync', cx0 + ext - 5.5, cz0 + ext - 2, 1.3)
 
@@ -626,12 +753,14 @@ exporter.parse(world, result => {
   const slabs = json.nodes.filter(n => /^(mod|dep)_[^_]/.test(n.name ?? '') && n.extras?.module)
   const memberNodes = json.nodes.filter(n => n.extras?.member)
   const pipeNodes = json.nodes.filter(n => n.extras?.from)
+  const idx = json.nodes.find(n => n.name === 'arch_index')
   console.log(`wrote ${out}`)
   console.log(`  ${(result.byteLength / 1024).toFixed(0)} kB, ${json.nodes.length} nodes: `
-    + `${slabs.length} modules, ${memberNodes.length} members, ${pipeNodes.length} pipes; `
-    + `floor ${Math.round(ext * 2)}m`)
+    + `${slabs.length} modules, ${memberNodes.length} members, ${pipeNodes.length} pipes, `
+    + `${pairs.length} buses, districts: ${DISTRICTS.filter(d => d !== 'main').join(', ')}`)
   const expected = Object.keys(layout).length
   if (slabs.length !== expected) { console.error(`FAIL: ${slabs.length} slabs, expected ${expected}`); process.exit(1) }
   if (pipeNodes.length !== pipeCount) { console.error('FAIL: pipe count mismatch'); process.exit(1) }
-  if (!memberNodes.every(n => n.extras.of)) { console.error('FAIL: member extras missing provenance'); process.exit(1) }
+  if (!idx?.extras?.collapse?.length) { console.error('FAIL: arch_index manifest missing'); process.exit(1) }
+  if (DISTRICTS.length < 4) { console.error('FAIL: clustering degenerated'); process.exit(1) }
 }, err => { console.error(err); process.exit(1) }, { binary: true })
