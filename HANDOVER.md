@@ -27,6 +27,8 @@ test mid-flight; finish edits first.
   select normalisation mode and cadence (0 = app default).
 - `BOXES=150 node test/perf.mjs`: per-tick phase breakdown per mode.
 - `node test/verify-motion.mjs`: single-page replay-vs-live check mid-fall.
+- `node test/persist.mjs`: world persistence under the mock host
+  (default-off, inline + mxc checkpoint restore, clear on opt-out).
 
 ## File map (src/)
 
@@ -49,7 +51,15 @@ test mid-flight; finish edits first.
   hash exchange, staleness (opt-in), boot, worker ticker for hidden tabs,
   window.__jig test hooks, __divergence stash.
 - `ui.ts`: panel (latency slider, lag-pings + enforce-staleness checkboxes,
-  rubber-band ms, input-log download, verify button, peer table, log).
+  rubber-band ms, input-log download, verify button, persist-world
+  checkbox, peer table, log).
+- `matrix/persist.ts`: opt-in world persistence (org.worldsync.checkpoint
+  state event: persist flag + settled semantic dump, inline under 48kB
+  else CBOR in the media repo by mxc pointer). Root peer writes every 10s
+  from Sim.dumpPersist (OLDEST history snapshot = settled; grabs
+  dropped); Session.rooted gates restore (replayed as a boot seam);
+  toggle-off clears the event whole. Wired in main (syncPersist in the
+  frame loop + worker ticker, pagehide flush).
 - `vite.config.ts`: ws signaling server plugin (rooms, join order, relay).
 
 ## Core invariants (break these and peers diverge)

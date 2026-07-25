@@ -101,6 +101,22 @@ and a peer whose download outlives the op's lead applies the op hollow
 geometry arrives. Requires widget mode - the classic ws demo has no media
 repo to share bytes through, so its button just explains that.
 
+**World persistence** is opt-in via the panel's "persist world" checkbox
+(off by default: a world stays ephemeral and dies with its last session).
+The flag and its data share one `org.worldsync.checkpoint` state event.
+While on, the root peer checkpoints the settled sim every 10s as a
+SEMANTIC dump (bodies, props, kv table; grabs dropped - a checkpoint
+outlives every holder's session), read from the oldest history snapshot
+so no rollback can rewrite what was written; raw Rapier snapshot bytes
+are neither cross-peer nor version stable, so they never persist. The
+dump rides inline in the event content while it fits (48kB budget, under
+the 64KiB federation event cap); beyond that it is CBOR-encoded into the
+media repo and the event carries the mxc pointer. The next peer to ROOT
+a fresh tick grid replays the checkpoint as a boot seam (so raced
+joiners fold the identical restore); peers that adopt a running grid
+never restore - the live world is newer than any checkpoint. Unticking
+the box clears the event whole: ephemerality leaves nothing behind.
+
 **MSC3815 `script_url` (WebSG scripts)** is supported too: the panel's
 "load world script" button uploads a JS file and merges `script_url` into
 the world state event. The script runs in a QuickJS-in-WASM sandbox
