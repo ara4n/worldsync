@@ -75,6 +75,7 @@ function hud() {
     '<h3 style="margin:0">worldsync architecture</h3>'
     + `<p style="margin:2px 0">SPACE: ${mode === 'full' ? 'collapse to module skeleton' : 'expand member detail'}`
     + (queue.length ? ' (sweeping...)' : '')
-    + '<br>click a slab for module info; pipes point at what they depend on</p>'
+    + '<br>slab = module (rim-framed = external pkg), blocks = its functions/state/types'
+    + '<br>pipes = imports between modules, cones point at the dependency; click a slab for info</p>'
     + sel)
 }

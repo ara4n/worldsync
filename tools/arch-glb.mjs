@@ -499,19 +499,42 @@ for (const L of Object.values(layout)) {
     deps: [...(analyzed[L.id]?.imports.keys() ?? [])],
     dependents: indeg[L.id],
   }
+  // 1st-party modules wear their district colour; external packages are
+  // unmistakable: a uniform near-black slab with a bright rim frame and
+  // a pkg: nameplate, whatever district consumes them
   const slab = new THREE.Mesh(new THREE.BoxGeometry(L.hw * 2, SLAB_H, L.hd * 2),
-    matFor(dim(zone, L.kind === 'vendor' ? 0.6 : 0.45)))
+    matFor(L.kind === 'vendor' ? 0x1d2127 : dim(zone, 0.45)))
   slab.name = group.name + '_slab'
   slab.position.y = SLAB_H / 2
   group.add(slab)
+  if (L.kind === 'vendor') {
+    const rimMat = matFor(0xaab4c0, { roughness: 0.4, metalness: 0.5 })
+    const rims = [
+      [L.hw * 2, 0.07, 0, -(L.hd - 0.035)], [L.hw * 2, 0.07, 0, L.hd - 0.035],
+      [0.07, L.hd * 2 - 0.14, -(L.hw - 0.035), 0], [0.07, L.hd * 2 - 0.14, L.hw - 0.035, 0],
+    ]
+    for (const [w, d, x, z] of rims) {
+      const rim = new THREE.Mesh(new THREE.BoxGeometry(w, 0.06, d), rimMat)
+      rim.position.set(x, SLAB_H + 0.03, z)
+      group.add(rim)
+    }
+  }
   for (const it of L.items) {
     const color = L.kind === 'vendor' ? 0x4a5058
       : it.kind === 'misc' ? dim(zone, 0.5)
       : it.pub ? zone : dim(zone, 0.62)
-    const box = new THREE.Mesh(new THREE.BoxGeometry(it.w, it.h, it.d), matFor(color))
+    // shape codes the member kind: box = function/class machinery,
+    // tank (cylinder) = state/consts, thin upright panel = types
+    const isTank = L.kind !== 'vendor' && (it.kind === 'field' || it.kind === 'const')
+    const isPanel = L.kind !== 'vendor' && it.kind === 'type'
+    const ah = isPanel ? it.h * 0.8 : it.h
+    const geo = isTank ? new THREE.CylinderGeometry(it.w * 0.48, it.w * 0.48, ah, 14)
+      : isPanel ? new THREE.BoxGeometry(it.w, ah, 0.09)
+      : new THREE.BoxGeometry(it.w, ah, it.d)
+    const box = new THREE.Mesh(geo, matFor(color))
     const safe = it.name.replace(/[^\w+]/g, '_')
     box.name = `${group.name}__${safe}`
-    box.position.set(it.x, SLAB_H + it.h / 2, it.z)
+    box.position.set(it.x, SLAB_H + ah / 2, it.z)
     box.userData = {
       member: it.name, of: L.module, in: it.container ?? undefined, kind: it.kind,
       loc: it.lines || undefined, consumers: it.consumers || undefined, exported: it.pub,
@@ -519,12 +542,13 @@ for (const L of Object.values(layout)) {
     group.add(box)
     const lbl = textMesh(it.name, 0.16, it.w * 0.94, L.kind === 'vendor' || !it.pub ? labelLight : labelDark)
     lbl.name = `${group.name}__${safe}_label`
-    lbl.position.set(it.x, SLAB_H + it.h + 0.015, it.z)
+    lbl.position.set(it.x, SLAB_H + ah + 0.015, it.z)
     group.add(lbl)
     collapsibles.push([box.name, L.x + it.x + L.z + it.z])
     collapsibles.push([lbl.name, L.x + it.x + L.z + it.z])
   }
-  const plate = textMesh(L.id.replace(/_/g, L.id.startsWith('matrix') ? '/' : '-'),
+  const plate = textMesh(
+    L.kind === 'vendor' ? `pkg: ${L.module}` : L.id.replace(/_/g, L.id.startsWith('matrix') ? '/' : '-'),
     0.34, L.hw * 1.8, L.kind === 'vendor' ? labelLight : matFor(0xf2f4f7, { roughness: 0.4 }))
   plate.name = group.name + '_plate'
   plate.position.set(0, SLAB_H + 0.015, L.hd - 0.24)
@@ -741,6 +765,23 @@ for (const dst of DISTRICTS) {
   floorText(districtName[dst].replace(/_/g, '/').toUpperCase(), px, pz + 0.6, 1.0)
 }
 floorText('worldsync', cx0 + ext - 5.5, cz0 + ext - 2, 1.3)
+// the model explains itself: a legend etched into the floor south of
+// the city
+{
+  const lines = [
+    ['LEGEND', 0.7],
+    ['slab = one src module in its district colour - dark rim-framed slab = external package', 0.5],
+    ['box = function/class - tank = state/const - upright panel = type', 0.5],
+    ['footprint = lines of code - height = how many modules consume it', 0.5],
+    ['pipe = an import between two modules, riding its district-pair tray - cones point at the dependency', 0.5],
+    ['slab traces = the exact symbols that import pulls - thin pale pipe = lazy import()', 0.5],
+  ]
+  let z = maxZ + 2.2
+  for (const [text, size] of lines) {
+    floorText(text, cx0, z, size)
+    z += size + 0.42
+  }
+}
 
 // --------------------------------------------------------------- export
 const exporter = new GLTFExporter()
