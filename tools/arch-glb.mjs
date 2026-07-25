@@ -21,13 +21,14 @@
 //    of their consumers. Token positions in the diagram become slab
 //    anchors; a relaxation pass then spaces the packed slabs apart.
 //
-// PIPES are import edges routed MANHATTAN-style: a vertical riser from
-// the consumer, orthogonal feeder legs at the bus height, then a shared
-// L-shaped tray between district masts - one tray per district pair,
-// each at its own reserved height, member pipes running side by side in
-// cable-tray slots. Every pipe carries flow cones (consumer -> provider)
-// on its longest leg and a down-cone where it plugs into the provider's
-// slab, where thin traces fan out to the exact members imported.
+// PIPES are import edges routed as swoopy catmull ribbons (a Manhattan
+// tray variant was tried 2026-07-25 and reverted - it read worse):
+// each pipe rises from its consumer, swings through its district's
+// mast, and runs mast-to-mast at the district pair's reserved height
+// in a ribbon of parallel tubes (cable-tray slot offsets), then drops
+// to the provider's slab. Every pipe carries a flow cone mid-ribbon
+// (consumer -> provider) and a down-cone where it plugs into the
+// provider, where thin traces fan out to the exact members imported.
 // Dynamic import() seams are thin and pale; net -> vite /signal is the
 // one runtime (non-import) wire.
 //
@@ -593,7 +594,7 @@ for (const [from, a] of Object.entries(analyzed)) {
   }
 }
 const pairs = [...new Set(allEdges.filter(x => x.pair).map(x => x.pair))].sort()
-const busHeight = Object.fromEntries(pairs.map((p, i) => [p, 3.2 + 0.42 * i]))
+const busHeight = Object.fromEntries(pairs.map((p, i) => [p, 2.8 + 0.5 * i]))
 const slots = {}
 for (const p of pairs) {
   const es = allEdges.filter(x => x.pair === p).sort((a, b) =>
@@ -602,27 +603,6 @@ for (const p of pairs) {
 }
 
 const Y = new THREE.Vector3(0, 1, 0)
-/** orthogonal pipe: cylinders between points, sphere elbows, flow cones */
-const pipeRun = (group, pts, r, mat) => {
-  const clean = pts.filter((p, i) => i === 0 || p.distanceTo(pts[i - 1]) > 0.06)
-  let longest = null
-  for (let i = 0; i < clean.length - 1; i++) {
-    const p = clean[i], q = clean[i + 1]
-    const d = q.clone().sub(p)
-    const len = d.length()
-    const cyl = new THREE.Mesh(new THREE.CylinderGeometry(r, r, len, 10), mat)
-    cyl.position.copy(p).add(q).multiplyScalar(0.5)
-    cyl.quaternion.setFromUnitVectors(Y, d.clone().normalize())
-    group.add(cyl)
-    if (i > 0) {
-      const elbow = new THREE.Mesh(new THREE.SphereGeometry(r * 1.25, 10, 8), mat)
-      elbow.position.copy(p)
-      group.add(elbow)
-    }
-    if (Math.abs(d.y) < 0.01 && (!longest || len > longest.len)) longest = { p, q, len }
-  }
-  return longest
-}
 const flowCone = (group, at, dir, r, mat) => {
   const cone = new THREE.Mesh(new THREE.ConeGeometry(r * 2.6, r * 7, 12), mat)
   cone.position.copy(at)
@@ -649,39 +629,40 @@ for (const { from, to, e, local, pair } of allEdges) {
   group.userData = { from, to, symbols: [...e.symbols].sort(), bus: pair ?? undefined,
     ...(e.dynamic ? { dynamic: true } : {}), ...(e.runtime ? { runtime: true } : {}) }
   const P = (x, y, z) => new THREE.Vector3(x, y, z)
-  // L between two points at height H, longer axis first
-  const legs = (x0, z0, x1, z1, H) =>
-    Math.abs(x1 - x0) > Math.abs(z1 - z0)
-      ? [P(x1, H, z0), P(x1, H, z1)]
-      : [P(x0, H, z1), P(x1, H, z1)]
   let pts
   if (local) {
-    const H = Math.max(aTop, ...B.items.map(i => i.h + SLAB_H)) + 0.35 + 0.5 * j
-    pts = [P(ax, aTop, az), P(ax, H, az), ...legs(ax, az, jx, jz, H), P(jx, SLAB_H + 0.1, jz)]
+    const dist = Math.hypot(jx - ax, jz - az)
+    const H = Math.max(0.7 + 0.6 * j + dist * 0.04, aTop + 0.35)
+    pts = [
+      P(ax, aTop, az), P(ax, H, az),
+      P((ax + jx) / 2, H + dist * 0.02, (az + jz) / 2),
+      P(jx, H * 0.55, jz), P(jx, SLAB_H + 0.1, jz),
+    ]
   } else {
     const [pa, pb] = pair.split('|')
     const H = busHeight[pair]
-    const o = slots[`${from} ${to}`] * 0.16
+    const o = slots[`${from} ${to}`] * 0.17
+    // the lateral frame comes from the SORTED pair, so both directions
+    // of travel share slot geometry and the ribbon stays parallel
     const fa = mastPos[pa], fb = mastPos[pb]
-    // shared L-tray in the sorted-pair frame: x-leg at z=fa.z+o, then
-    // z-leg at x=fb.x+o; both directions of travel use the same rails
-    const C1 = P(fa.x, H, fa.z + o), C2 = P(fb.x + o, H, fa.z + o), C3 = P(fb.x + o, H, fb.z)
-    const corridor = districtOf[from] === pa ? [C1, C2, C3] : [C3, C2, C1]
-    const entry = corridor[0], exit = corridor[corridor.length - 1]
+    const fx = fb.x - fa.x, fz = fb.z - fa.z
+    const fmag = Math.hypot(fx, fz) || 1
+    const ox = (-fz / fmag) * o, oz = (fx / fmag) * o
+    const m1 = mastPos[districtOf[from]], m2 = mastPos[districtOf[to]]
     pts = [
-      P(ax, aTop, az), P(ax, H, az),
-      ...legs(ax, az, entry.x, entry.z, H),
-      ...corridor,
-      ...legs(exit.x, exit.z, jx, jz, H),
+      P(ax, aTop, az),
+      P(ax * 0.35 + m1.x * 0.65 + ox, H * 0.55, az * 0.35 + m1.z * 0.65 + oz),
+      P(m1.x + ox, H, m1.z + oz),
+      P(m2.x + ox, H, m2.z + oz),
+      P(jx * 0.35 + m2.x * 0.65 + ox, H * 0.55, jz * 0.35 + m2.z * 0.65 + oz),
       P(jx, SLAB_H + 0.1, jz),
     ]
   }
-  const longest = pipeRun(group, pts, r, mat)
-  // flow cones: along the longest horizontal leg, and down into the socket
-  if (longest) {
-    const d = longest.q.clone().sub(longest.p).normalize()
-    flowCone(group, longest.p.clone().add(longest.q).multiplyScalar(0.5), d, r, mat)
-  }
+  const curve = new THREE.CatmullRomCurve3(pts)
+  group.add(new THREE.Mesh(new THREE.TubeGeometry(curve, local ? 40 : 72, r, 10), mat))
+  // flow cones: mid-ribbon along the travel direction, and down into
+  // the socket
+  flowCone(group, curve.getPointAt(0.5), curve.getTangentAt(0.5), r, mat)
   flowCone(group, P(jx, SLAB_H + 0.42, jz), P(0, -1, 0), r, mat)
   const collar = new THREE.Mesh(new THREE.CylinderGeometry(r * 2.0, r * 2.5, 0.1, 12), mat)
   collar.name = name + '_socket'
@@ -691,11 +672,13 @@ for (const { from, to, e, local, pair } of allEdges) {
   for (const it of B.items) {
     if (!e.symbols.has(it.name)) continue
     const mx = B.x + it.x, mz = B.z + it.z
-    const trace = new THREE.Group()
+    const tc = new THREE.CatmullRomCurve3([
+      P(jx, SLAB_H + 0.02, jz),
+      P((jx + mx) / 2, SLAB_H + 0.22, (jz + mz) / 2),
+      P(mx, SLAB_H + Math.min(0.3, it.h * 0.55), mz),
+    ])
+    const trace = new THREE.Mesh(new THREE.TubeGeometry(tc, 12, 0.018, 8), traceMat)
     trace.name = `${name}__${it.name.replace(/[^\w+]/g, '_')}`
-    pipeRun(trace, [P(jx, SLAB_H + 0.04, jz),
-      ...legs(jx, jz, mx, mz, SLAB_H + 0.04), P(mx, SLAB_H + Math.min(0.3, it.h * 0.55), mz)],
-    0.018, traceMat)
     group.add(trace)
     collapsibles.push([trace.name, mx + mz])
   }

@@ -287,13 +287,15 @@ architecture diagram embedded in the tool - the layout DSL: token
 positions become slab anchors (dataflow west->east: transports ->
 wire/session -> sim -> presentation; chassis center; sandbox south;
 vendors outboard), then a relaxation pass de-overlaps. Pipes =
-imports, symbol-accurate, routed MANHATTAN (v2 was swoopy catmull
-ribbons): riser, orthogonal feeders, then a shared L-tray per
-district pair at its own reserved height with cable-tray slot
-offsets; cones on the longest leg + a down-cone at the socket give
-direction (pipes point at what they depend on); traces fan from the
-socket to the exact imported member blocks; dynamic import() thin and
-pale; net->vite /signal the one runtime wire. Every slab/member/pipe
+imports, symbol-accurate, routed as swoopy catmull ribbons through
+district masts - one bus per district pair at its own reserved
+height, cable-tray slot offsets keeping the ribbon parallel (a full
+Manhattan-tray variant was built and REVERTED 2026-07-25, Matthew
+judged it no clearer - it lives at commit 972d836 if wanted); a cone
+mid-ribbon plus a down-cone at the socket give direction (pipes point
+at what they depend on); traces fan from the socket to the exact
+imported member blocks; dynamic import() thin and pale; net->vite
+/signal the one runtime wire. Every slab/member/pipe
 is a named node (mod_sim, mod_sim__rollback, dep_three__Mesh,
 pipe_main__sim) with {module, member, kind, district, loc, consumers,
 symbols} extras, and an arch_index node carries a manifest -
