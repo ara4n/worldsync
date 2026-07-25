@@ -376,10 +376,18 @@ for precision manipulation instead of carrying it around. Decisions:
   Now the toggle click itself locks (it is a user gesture). When lock is
   genuinely unavailable, nav latches lockBroken and walk falls back to
   DRAG-LOOK on empty space (street-view style), with clicks acting
-  normally - that is the Element Web path, whose iframe grants no
-  pointer-lock (mock.html's does now, for what it is worth: current
-  Chrome does not even list pointer-lock as a permissions-policy
-  feature). Esc-exit cooldown failures (~1.3s) are ignored, not latched.
+  normally - that is the stock Element Web path. The REAL gate there
+  (found 2026-07-26, Element Desktop): AppTile's iframe is SANDBOXED,
+  and Chromium gates pointer lock in sandboxed frames on the sandbox
+  attribute's allow-pointer-lock flag - NOT the allow= feature list
+  (current Chrome does not even list pointer-lock as a permissions-
+  policy feature, so editing allow= does nothing). Matthew's element-web
+  checkout now adds allow-pointer-lock to AppTile's sandboxFlags
+  (uncommitted; upstream candidate). element-desktop sets no Electron
+  setPermissionRequestHandler, so its default grants the pointerLock
+  permission - no desktop-side change needed. mock.html's allow= grant
+  is kept as harmless future-proofing. Esc-exit cooldown failures
+  (~1.3s) are ignored, not latched.
   Debugging trap: under Playwright/CDP the browser window is UNFOCUSED
   and requestPointerLock rejects with WrongDocumentError everywhere,
   iframe or not - bringToFront() + a real click makes it succeed; do not
