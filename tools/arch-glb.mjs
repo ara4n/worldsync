@@ -92,18 +92,29 @@ const MODULES = {
   mock_host: ['src/mock/host.ts', 'infra', -13.6, 7.4],
 }
 
-/** vendor packages (one layer deep): id -> [label, match, x, z] */
+/** vendor packages (one layer deep): id -> [label, match, x, z, district] */
 const VENDORS = {
-  three: ['three', /^three(\/|$)/, 16.4, -1.0],
-  rapier: ['@dimforge/rapier3d', /^@dimforge\//, 0.4, -12.4],
-  bitecs: ['bitecs', /^bitecs$/, 4.0, -11.4],
-  cbor_x: ['cbor-x', /^cbor-x$/, -7.6, -10.6],
-  quickjs: ['quickjs-emscripten', /^(quickjs-emscripten|@jitl\/)/, 0.8, 11.6],
-  monaco: ['monaco-editor', /^monaco-editor(\/|$)/, 8.0, 12.4],
-  sanitize_html: ['sanitize-html', /^sanitize-html$/, -5.6, 10.4],
-  livekit: ['livekit-client', /^livekit-client$/, -17.0, -3.0],
-  matrix_js_sdk: ['matrix-js-sdk', /^matrix-js-sdk(\/|$)/, -17.4, 2.2],
-  matrix_widget_api: ['matrix-widget-api', /^matrix-widget-api$/, -16.6, 6.6],
+  three: ['three', /^three(\/|$)/, 16.4, -1.0, 'render'],
+  rapier: ['@dimforge/rapier3d', /^@dimforge\//, 0.4, -12.4, 'core'],
+  bitecs: ['bitecs', /^bitecs$/, 4.0, -11.4, 'core'],
+  cbor_x: ['cbor-x', /^cbor-x$/, -7.6, -10.6, 'core'],
+  quickjs: ['quickjs-emscripten', /^(quickjs-emscripten|@jitl\/)/, 0.8, 11.6, 'script'],
+  monaco: ['monaco-editor', /^monaco-editor(\/|$)/, 8.0, 12.4, 'script'],
+  sanitize_html: ['sanitize-html', /^sanitize-html$/, -5.6, 10.4, 'script'],
+  livekit: ['livekit-client', /^livekit-client$/, -17.0, -3.0, 'transport'],
+  matrix_js_sdk: ['matrix-js-sdk', /^matrix-js-sdk(\/|$)/, -17.4, 2.2, 'transport'],
+  matrix_widget_api: ['matrix-widget-api', /^matrix-widget-api$/, -16.6, 6.6, 'transport'],
+}
+
+/** bus-routing district per module: main is its own hub (its fan-out
+ * becomes ribbons, not a star of arcs); infra modules ride the district
+ * they physically sit in; vendors declare theirs above. */
+const districtOf = (id) => {
+  if (id === 'main') return 'main'
+  if (id in VENDORS) return VENDORS[id][4]
+  const zone = MODULES[id][1]
+  if (zone === 'infra') return { hub: 'core', vite_signal: 'transport', mock_host: 'transport' }[id]
+  return zone
 }
 
 const TRUNKS = new Set(['main sim', 'main session', 'main render', 'session sim',
@@ -423,7 +434,12 @@ for (const L of Object.values(layout)) {
   world.add(group)
 }
 
-// -- pipes + traces --
+// -- pipes: hierarchical bus routing. Intra-district imports stay as
+// short low arcs; every cross-district edge climbs its district's MAST,
+// runs mast-to-mast in a ribbon of parallel pipes (one bus per district
+// pair, each pair at its own reserved height, edges offset side by side
+// like a cable tray), drops at the provider's mast and lands on the
+// provider slab, where traces fan out to the imported members. --
 const hash01 = (s) => {
   let h = 2166136261
   for (const c of s) { h ^= c.charCodeAt(0); h = Math.imul(h, 16777619) }
@@ -432,57 +448,135 @@ const hash01 = (s) => {
 const pipes = new THREE.Group()
 pipes.name = 'pipes'
 world.add(pipes)
-let pipeCount = 0
+
+// mast per district: centroid pulled toward the city center, nudged
+// clear of slabs
+const cityX = layout.main.x, cityZ = layout.main.z
+const mastPos = {}
+for (const d of new Set(Object.keys({ ...MODULES, ...VENDORS }).map(districtOf))) {
+  let mx, mz
+  if (d === 'main') { mx = layout.main.x; mz = layout.main.z } else {
+    const Ds = Object.values(layout).filter(L => districtOf(L.id) === d)
+    mx = Ds.reduce((n, L) => n + L.x, 0) / Ds.length
+    mz = Ds.reduce((n, L) => n + L.z, 0) / Ds.length
+    mx += (cityX - mx) * 0.26; mz += (cityZ - mz) * 0.26
+    const dirx = (mx - cityX), dirz = (mz - cityZ)
+    const mag = Math.hypot(dirx, dirz) || 1
+    for (let step = 0; step < 40; step++) {
+      if (!Object.values(layout).some(L =>
+        Math.abs(mx - L.x) < L.hw + 0.35 && Math.abs(mz - L.z) < L.hd + 0.35)) break
+      mx += (dirx / mag) * 0.5; mz += (dirz / mag) * 0.5
+    }
+  }
+  mastPos[d] = { x: mx, z: mz }
+}
+
+// classify edges, reserve one height per district pair, slot per edge
+const allEdges = []
 for (const [from, a] of Object.entries(analyzed)) {
   for (const [to, e] of a.imports) {
-    const A = layout[from], B = layout[to]
-    if (!A || !B) continue
-    const name = `pipe_${from}__${to}`
-    const j = hash01(name)
-    // trunk: consumer slab top -> overhead lane -> junction inside the
-    // provider slab's edge nearest the consumer
-    const ax = A.x + (j - 0.5) * A.hw, az = A.z + (hash01(name + 'z') - 0.5) * A.hd
-    const dirx = A.x - B.x, dirz = A.z - B.z
-    const mag = Math.hypot(dirx, dirz) || 1
-    const jx = B.x + (dirx / mag) * (Math.abs(dirx / mag) * B.hw) * 0.82
-    const jz = B.z + (dirz / mag) * (Math.abs(dirz / mag) * B.hd) * 0.82
+    if (!layout[from] || !layout[to]) continue
+    const d1 = districtOf(from), d2 = districtOf(to)
+    allEdges.push({ from, to, e, local: d1 === d2, pair: d1 === d2 ? null : [d1, d2].sort().join('|') })
+  }
+}
+const pairs = [...new Set(allEdges.filter(x => x.pair).map(x => x.pair))].sort()
+const busHeight = Object.fromEntries(pairs.map((p, i) => [p, 2.6 + 0.55 * i]))
+const slots = {}
+for (const p of pairs) {
+  const es = allEdges.filter(x => x.pair === p).sort((a, b) =>
+    `${a.from} ${a.to}`.localeCompare(`${b.from} ${b.to}`))
+  es.forEach((x, i) => { slots[`${x.from} ${x.to}`] = i - (es.length - 1) / 2 })
+}
+
+let pipeCount = 0
+for (const { from, to, e, local, pair } of allEdges) {
+  const A = layout[from], B = layout[to]
+  const name = `pipe_${from}__${to}`
+  const j = hash01(name)
+  const ax = A.x + (j - 0.5) * A.hw, az = A.z + (hash01(name + 'z') - 0.5) * A.hd
+  const dirx = A.x - B.x, dirz = A.z - B.z
+  const mag = Math.hypot(dirx, dirz) || 1
+  const jx = B.x + (dirx / mag) * (Math.abs(dirx / mag) * B.hw) * 0.82
+  const jz = B.z + (dirz / mag) * (Math.abs(dirz / mag) * B.hd) * 0.82
+  const aTop = Math.max(...A.items.map(i => i.h)) + SLAB_H
+  const r = e.dynamic ? 0.034 : e.runtime ? 0.036 : TRUNKS.has(`${from} ${to}`) ? 0.085 : 0.05
+  const color = e.dynamic ? 0xaab2bc : e.runtime ? 0xd8dce2 : ZONES[A.zone]
+  const mat = matFor(color, { roughness: 0.35, metalness: 0.6 })
+  let points
+  if (local) {
     const dist = Math.hypot(jx - ax, jz - az)
-    const aTop = Math.max(...A.items.map(i => i.h)) + SLAB_H
-    const lane = Math.max(1.1 + 2.2 * j + dist * 0.06, aTop + 0.5)
-    const r = e.dynamic ? 0.034 : e.runtime ? 0.036 : TRUNKS.has(`${from} ${to}`) ? 0.1 : 0.055
-    const color = e.dynamic ? 0xaab2bc : e.runtime ? 0xd8dce2 : ZONES[A.zone]
-    const mat = matFor(color, { roughness: 0.35, metalness: 0.6 })
-    const curve = new THREE.CatmullRomCurve3([
+    const lane = Math.max(0.7 + 0.6 * j + dist * 0.04, aTop + 0.35)
+    points = [
       new THREE.Vector3(ax, aTop, az),
       new THREE.Vector3(ax, lane, az),
       new THREE.Vector3((ax + jx) / 2, lane + dist * 0.02, (az + jz) / 2),
       new THREE.Vector3(jx, lane * 0.55, jz),
       new THREE.Vector3(jx, SLAB_H, jz),
+    ]
+  } else {
+    const [pa, pb] = pair.split('|')
+    const m1 = mastPos[districtOf(from)], m2 = mastPos[districtOf(to)]
+    // the lateral frame comes from the SORTED pair, so both directions
+    // of travel share slot geometry and the ribbon stays parallel
+    const fa = mastPos[pa], fb = mastPos[pb]
+    const fx = fb.x - fa.x, fz = fb.z - fa.z
+    const fmag = Math.hypot(fx, fz) || 1
+    const off = slots[`${from} ${to}`] * 0.17
+    const ox = (-fz / fmag) * off, oz = (fx / fmag) * off
+    const busH = busHeight[pair]
+    points = [
+      new THREE.Vector3(ax, aTop, az),
+      new THREE.Vector3(ax * 0.35 + m1.x * 0.65 + ox, busH * 0.55, az * 0.35 + m1.z * 0.65 + oz),
+      new THREE.Vector3(m1.x + ox, busH, m1.z + oz),
+      new THREE.Vector3(m2.x + ox, busH, m2.z + oz),
+      new THREE.Vector3(jx * 0.35 + m2.x * 0.65 + ox, busH * 0.55, jz * 0.35 + m2.z * 0.65 + oz),
+      new THREE.Vector3(jx, SLAB_H, jz),
+    ]
+  }
+  const pipe = new THREE.Mesh(
+    new THREE.TubeGeometry(new THREE.CatmullRomCurve3(points), local ? 40 : 72, r, 10), mat)
+  pipe.name = name
+  pipe.userData = { from, to, symbols: [...e.symbols].sort(), bus: pair ?? undefined,
+    ...(e.dynamic ? { dynamic: true } : {}), ...(e.runtime ? { runtime: true } : {}) }
+  pipes.add(pipe)
+  pipeCount++
+  const collar = new THREE.Mesh(new THREE.CylinderGeometry(r * 2.0, r * 2.5, 0.1, 12), mat)
+  collar.name = name + '_socket'
+  collar.position.set(jx, SLAB_H + 0.05, jz)
+  pipes.add(collar)
+  // traces: junction -> each imported member present on the slab
+  const traceMat = matFor(dim(color, 0.85), { roughness: 0.4, metalness: 0.5 })
+  for (const it of B.items) {
+    if (!e.symbols.has(it.name)) continue
+    const mx = B.x + it.x, mz = B.z + it.z
+    const tc = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(jx, SLAB_H + 0.02, jz),
+      new THREE.Vector3((jx + mx) / 2, SLAB_H + 0.22, (jz + mz) / 2),
+      new THREE.Vector3(mx, SLAB_H + Math.min(0.3, it.h * 0.55), mz),
     ])
-    const pipe = new THREE.Mesh(new THREE.TubeGeometry(curve, 48, r, 10), mat)
-    pipe.name = name
-    pipe.userData = { from, to, symbols: [...e.symbols].sort(),
-      ...(e.dynamic ? { dynamic: true } : {}), ...(e.runtime ? { runtime: true } : {}) }
-    pipes.add(pipe)
-    pipeCount++
-    const collar = new THREE.Mesh(new THREE.CylinderGeometry(r * 2.0, r * 2.5, 0.1, 12), mat)
-    collar.name = name + '_socket'
-    collar.position.set(jx, SLAB_H + 0.05, jz)
-    pipes.add(collar)
-    // traces: junction -> each imported member present on the slab
-    const traceMat = matFor(dim(color, 0.85), { roughness: 0.4, metalness: 0.5 })
-    for (const it of B.items) {
-      if (!e.symbols.has(it.name)) continue
-      const mx = B.x + it.x, mz = B.z + it.z
-      const tc = new THREE.CatmullRomCurve3([
-        new THREE.Vector3(jx, SLAB_H + 0.02, jz),
-        new THREE.Vector3((jx + mx) / 2, SLAB_H + 0.22, (jz + mz) / 2),
-        new THREE.Vector3(mx, SLAB_H + Math.min(0.3, it.h * 0.55), mz),
-      ])
-      const trace = new THREE.Mesh(new THREE.TubeGeometry(tc, 12, 0.02, 8), traceMat)
-      trace.name = `${name}__${it.name.replace(/[^\w+]/g, '_')}`
-      pipes.add(trace)
-    }
+    const trace = new THREE.Mesh(new THREE.TubeGeometry(tc, 12, 0.02, 8), traceMat)
+    trace.name = `${name}__${it.name.replace(/[^\w+]/g, '_')}`
+    pipes.add(trace)
+  }
+}
+
+// the masts themselves: a pylon per district with a collar ring at each
+// bus height it serves
+const mastMat = matFor(0x596270, { roughness: 0.35, metalness: 0.8 })
+for (const [d, m] of Object.entries(mastPos)) {
+  const served = pairs.filter(p => p.split('|').includes(d)).map(p => busHeight[p])
+  if (!served.length) continue
+  const top = Math.max(...served) + 0.3
+  const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.1, top, 10), mastMat)
+  mast.name = `mast_${d}`
+  mast.position.set(m.x, top / 2, m.z)
+  mast.userData = { district: d, buses: pairs.filter(p => p.split('|').includes(d)) }
+  pipes.add(mast)
+  for (const h of served) {
+    const ring = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.2, 0.1, 12), mastMat)
+    ring.position.set(m.x, h, m.z)
+    pipes.add(ring)
   }
 }
 

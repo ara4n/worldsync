@@ -283,7 +283,14 @@ tool descends into it. Footprint ~ lines, height ~ consumer count
 imports, symbol-accurate: a trunk drops onto the provider's slab and
 thin traces fan out to exactly the member blocks that edge imports;
 dynamic import() seams are thin pale pipes; net->vite /signal is the
-one runtime wire. Every slab/member/pipe is a named node (mod_sim,
+one runtime wire. Cross-district pipes route hierarchically to kill
+the rats' nest (Matthew asked): each district (main is its own hub)
+has a mast pylon, and every district pair gets a BUS at its own
+reserved height - member pipes climb their mast and run mast-to-mast
+as a ribbon of parallel tubes (slot offsets like a cable tray), so
+individual pipes stay traceable and named while reading as one trunk.
+Intra-district imports stay as short low arcs. Every slab/member/pipe
+is a named node (mod_sim,
 mod_sim__rollback, dep_three__Mesh, pipe_main__sim) with
 {module, member, kind, loc, consumers, symbols} extras - piano-rig
 style, so telemetry can later be overlaid by a world script scaling
