@@ -14,6 +14,8 @@
 // reports it as ev.entity and PERFORMS it - the click becomes a real
 // MIDI note via world.sendMidi, taking the exact hardware path (echoed
 // into our own onmidi, played by the audio engine, broadcast to peers).
+// Holding the button and dragging plays a glissando: the note follows
+// the key under the pointer, key by key.
 //
 // Sound comes from the world itself: piano.glb carries the Salamander
 // grand samples as KHR_audio sources on a positional emitter riding the
@@ -88,15 +90,28 @@ world.onmidi = (ev) => {
 }
 
 // clicking a key performs it while the button is down: the note goes out
-// as real MIDI, and the echo into our own onmidi above does the animating
+// as real MIDI, and the echo into our own onmidi above does the animating.
+// Dragging is a glissando: the sounding note follows whichever key the
+// pointer crosses (sliding off the keyboard mutes; back on resumes).
+let dragging = false
 world.onpointerdown = (ev) => {
   if (!ev.entity || !ev.entity.startsWith('key_')) return
+  dragging = true
   clicked = Number(ev.entity.slice(4))
   world.sendMidi(0x90, clicked, 100)
 }
+world.onpointermove = (ev) => {
+  if (!dragging) return
+  const note = ev.entity && ev.entity.startsWith('key_') ? Number(ev.entity.slice(4)) : null
+  if (note === clicked) return
+  if (clicked !== null) world.sendMidi(0x80, clicked, 0)
+  if (note !== null) world.sendMidi(0x90, note, 100)
+  clicked = note
+}
 world.onpointerup = () => {
-  if (clicked === null) return
-  world.sendMidi(0x80, clicked, 0)
+  if (!dragging) return
+  dragging = false
+  if (clicked !== null) world.sendMidi(0x80, clicked, 0)
   clicked = null
 }
 

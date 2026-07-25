@@ -150,9 +150,24 @@ for (const [t, name] of [[a, 'a'], [b, 'b']]) {
   await t.frame.waitForFunction(() => window.__jig.audio().sounding >= 1, null, { timeout: 5000 })
     .catch(() => fail(`${name}: clicked key never sounded`))
 }
+// drag to key_86 (two whites up): glissando must release 84 and press 86
+// on both tabs while the button stays down
+console.log('dragging to key_86...')
+const s86 = await a.frame.evaluate(() => {
+  const key = window.__jig.view.scene.getObjectByName('key_86')
+  const p = key.getWorldPosition(key.position.clone())
+  return window.__jig.screenOfWorld(p.x, 0.745, 0.3)
+})
+for (let i = 1; i <= 4; i++) {
+  await a.page.mouse.move(off.x + s.x + ((s86.x - s.x) * i) / 4, off.y + s.y + ((s86.y - s.y) * i) / 4)
+  await a.page.waitForTimeout(60)
+}
+await waitUp(a.frame, 84, 'a glissando left key 84')
+await waitDown(a.frame, 86, 'a glissando reached key 86')
+await waitDown(b.frame, 86, 'b glissando reached key 86 (broadcast)')
 await a.page.mouse.up()
-await waitUp(a.frame, 84, 'a clicked key up')
-await waitUp(b.frame, 84, 'b clicked key up')
+await waitUp(a.frame, 86, 'a glissando key up')
+await waitUp(b.frame, 86, 'b glissando key up')
 const spawned = await a.frame.evaluate(() => window.__jig.sim.bodies.size)
 if (spawned !== 0) fail(`click was not captured: ${spawned} box(es) spawned`)
 
