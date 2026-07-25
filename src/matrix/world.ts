@@ -106,6 +106,13 @@ export async function uploadWorldAsset(
   return content_uri
 }
 
+/** Upload raw bytes to the media repo (checkpoint blobs); scenes and
+ * scripts go through uploadWorldAsset, which also patches room state. */
+export async function uploadBlob(api: WidgetApi, bytes: Uint8Array, type: string): Promise<string> {
+  const { content_uri } = await withMediaTimeout(api, () => api.uploadFile(new Blob([bytes as Uint8Array<ArrayBuffer>], { type })))
+  return content_uri
+}
+
 /** The homeserver's media upload cap, via the host (null = unknown). */
 export async function mediaUploadLimit(api: WidgetApi): Promise<number | null> {
   try {

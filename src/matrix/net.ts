@@ -8,6 +8,7 @@ import { initWidgetClient } from './widget'
 import { WidgetApiToWidgetAction, type IRoomEvent, type WidgetApi } from 'matrix-widget-api'
 import { BroadcastTransport, LiveKitTransport, type DataTransport } from './transport'
 import { readWorldSceneUrl, readWorldScriptUrl, worldUrls, WORLD_EVENT_TYPE } from './world'
+import { CHECKPOINT_EVENT_TYPE } from './persist'
 
 /** How long a senior membership may stay unreachable on the transport
  * before a calibrating joiner writes it off as a ghost and self-roots.
@@ -58,6 +59,10 @@ export class MatrixNet {
    * effects enter the timeline as ordinary ops, so a plain state watch is
    * enough (no op, no seam handling). */
   onWorldScript: (scriptUrl: string | null) => void = () => {}
+  /** The room's org.worldsync.checkpoint state event changed (persist
+   * toggled, or a checkpoint written); raw content, '' state key only.
+   * The initial read happens in main after connect() resolves. */
+  onCheckpointChanged: (content: Record<string, unknown>) => void = () => {}
 
   /** every membership senior to us has stayed transport-unreachable past
    * the grace period: ghosts. main wires this to Session.seniorsUnreachable
@@ -162,6 +167,10 @@ export class MatrixNet {
     client.on(ClientEvent.Event, (ev: MatrixEvent) => {
       if (ev.getType() === WORLD_EVENT_TYPE) {
         this.onWorldScript(worldUrls(ev.getContent() as Record<string, unknown>).scriptUrl)
+        return
+      }
+      if (ev.getType() === CHECKPOINT_EVENT_TYPE) {
+        if ((ev.getStateKey() ?? '') === '') this.onCheckpointChanged(ev.getContent() as Record<string, unknown>)
         return
       }
       if (ev.getType() !== EventType.GroupCallMemberPrefix) return

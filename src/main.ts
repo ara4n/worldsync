@@ -4,6 +4,7 @@ import { BOOT_LEAD_TICKS, Sim } from './sim'
 import { peerColor } from './color'
 import { cachedScene, cacheScene, configureGlbLoader, parseGlb, parseGltfJson } from './scene'
 import { fetchWorldAsset, mediaUploadLimit, SCRIPT_STATE_TYPES, uploadWorldAsset } from './matrix/world'
+import { loadCheckpoint, readPersist, setPersist, writeCheckpoint } from './matrix/persist'
 import { Net } from './net'
 import { AudioEngine } from './audio'
 import { Session } from './session'
@@ -142,6 +143,22 @@ async function main() {
       })
       inspector.toggle()
     },
+    // org.worldsync.checkpoint: opt-in world persistence. The flag is room
+    // state, so every peer's checkbox follows; whoever is root does the
+    // writing. Toggling OFF clears the checkpoint - ephemeral is the
+    // default and turning persistence back off leaves nothing behind.
+    onPersist: on => {
+      if (!wp) {
+        log('world persistence needs Matrix (run as a widget; the mock host works: /mock.html)')
+        ui.setPersist(false)
+        return
+      }
+      const m = net as import('./matrix/net').MatrixNet
+      setPersist(m.client, wp.roomId, on)
+        // checkpoint now rather than on the next cadence point
+        .then(() => { if (on) { persist.lastWritten = null; persist.nextWriteAt = 0 } })
+        .catch(e => { logErr('persist toggle failed', e); ui.setPersist(persist.on) })
+    },
   })
   let editor: import('./editor').ScriptEditor | null = null
   let inspector: import('./inspector').SceneInspector | null = null
@@ -255,6 +272,7 @@ async function main() {
     }
     m.onWorldScript = url => worldScriptChanged(url)
     m.onSeniorsUnreachable = () => session.seniorsUnreachable()
+    m.onCheckpointChanged = content => checkpointChanged(content)
   }
 
   // Keep the rendered scene in step with the sim's active scene (which can
@@ -985,6 +1003,76 @@ async function main() {
     }
   }
 
+  // --- org.worldsync.checkpoint: opt-in world persistence ---
+  // OFF by default: a room's world dies with its last session. When ON,
+  // the root peer checkpoints the settled sim state (the OLDEST history
+  // snapshot: nothing can fold below it, so what leaves is final) into
+  // room state every few seconds - inline in the event while it fits, a
+  // media-repo CBOR blob with a pointer event beyond that (see persist.ts).
+  // The peer that next ROOTS a fresh tick grid replays the checkpoint as
+  // a boot seam; a peer that adopted a running grid never restores, since
+  // the live world it booted from is newer than any checkpoint.
+  const CHECKPOINT_EVERY_MS = 10_000
+  const persist = {
+    on: false,
+    restoreChecked: false,
+    lastWritten: null as string | null, // JSON of the last dump written (change detection)
+    nextWriteAt: 0,
+    writing: false,
+  }
+  const checkpointChanged = (content: Record<string, unknown>) => {
+    const on = content.persist === true
+    if (on === persist.on) return
+    persist.on = on
+    ui.setPersist(on)
+    log(on ? 'world persistence ON for this room' : 'world persistence OFF (the default)')
+  }
+  const syncPersist = (now: number) => {
+    if (!wp || !session.ready()) return
+    const m = net as import('./matrix/net').MatrixNet
+    if (!persist.restoreChecked && session.rooted) {
+      persist.restoreChecked = true
+      ;(async () => {
+        const cp = await loadCheckpoint(m.api, m.client, wp.roomId)
+        // rooted can flip mid-fetch (a live senior appeared and hard-resynced
+        // us): their world wins, drop the restore
+        if (!cp || cp.entities.length === 0 || !session.rooted) return
+        // Stamped ahead like any boot seam; from = the current tick, so ops
+        // that race the restore are re-applied on top of it everywhere.
+        const seamTick = sim.tick + BOOT_LEAD_TICKS
+        for (const e of cp.entities) {
+          session.emit('boot', e.netId,
+            { pos: e.pos, rot: e.rot, vel: e.linvel, angvel: e.angvel, color: e.color, prop: e.prop, data: e.data },
+            seamTick, sim.tick)
+        }
+        log(`world restored from checkpoint (${cp.entities.length} entities, saved at tick ${cp.tick})`)
+      })().catch(e => logErr('checkpoint restore failed', e))
+    }
+    if (!persist.on || persist.writing || now < persist.nextWriteAt || !isRoot()) return
+    persist.nextWriteAt = now + CHECKPOINT_EVERY_MS
+    const dump = sim.dumpPersist()
+    const key = JSON.stringify(dump.entities)
+    if (key === persist.lastWritten) return
+    persist.writing = true
+    writeCheckpoint(m.api, m.client, wp.roomId, dump)
+      .then(how => {
+        persist.lastWritten = key
+        log(`checkpoint saved (${dump.entities.length} entities, ${how})`)
+      })
+      .catch(e => logErr('checkpoint save failed', e))
+      .finally(() => { persist.writing = false })
+  }
+  // Best-effort flush on the way out, so the last session's final seconds
+  // are not lost with it; the postMessage may not complete before the page
+  // dies, and the periodic checkpoint bounds the loss either way.
+  addEventListener('pagehide', () => {
+    if (!wp || !persist.on || !session.ready() || !isRoot()) return
+    const m = net as import('./matrix/net').MatrixNet
+    const dump = sim.dumpPersist()
+    if (JSON.stringify(dump.entities) === persist.lastWritten) return
+    void writeCheckpoint(m.api, m.client, wp.roomId, dump).catch(() => {})
+  })
+
   let lastNotReady = 0
   const out: Emitter = {
     ready: () => {
@@ -1092,9 +1180,15 @@ async function main() {
 
   if (net instanceof Net) net.connect(room)
   else {
-    (net as import('./matrix/net').MatrixNet)
-      .connect(wp!, params.get('lkService'), widgetBoot!)
-      .then(() => { micUi(); camUi() })
+    const m = net as import('./matrix/net').MatrixNet
+    m.connect(wp!, params.get('lkService'), widgetBoot!)
+      .then(() => {
+        micUi()
+        camUi()
+        // the persist flag that predates us arrives with the initial state
+        // read, not through the event watch
+        checkpointChanged({ persist: readPersist(m.client, wp!.roomId) })
+      })
       .catch(e => { log(`matrix connect failed: ${e}`); console.error('[worldsync]', e) })
   }
 
@@ -1113,6 +1207,7 @@ async function main() {
     view.props.sync(sim.props, now)
     syncScene()
     syncScript()
+    syncPersist(now)
     const alpha = session.calibrated
       ? Math.min(Math.max(session.tickTimeNow(now) - sim.tick, 0), 1)
       : 0
@@ -1147,6 +1242,7 @@ async function main() {
     sim.mirror()
     syncScene() // scene fetches must not stall while the tab is hidden
     syncScript() // nor the script, if the hidden tab is the root
+    syncPersist(wallNow()) // nor checkpoints, ditto
   }
 
   // Hooks for automated smoke tests and console poking.

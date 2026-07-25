@@ -123,6 +123,11 @@ export class Session {
   }
 
   get calibrated() { return this.tickClock.calibrated }
+  /** This peer rooted the tick grid itself (nobody calibrated it): the
+   * world it starts from IS the room's world, so checkpoint restore is
+   * its job alone. Flips false on a hard resync (a live senior appeared;
+   * their world wins and a restore mid-flight must abort). */
+  get rooted() { return this.started && this.calibratedFrom === null }
   tickTimeNow(now = this.clock()) { return this.tickClock.tickTimeAt(now) }
   ready() { return this.id !== '' && this.started }
   nextNetId() { return `${this.id}-${this.spawnCount++}` }

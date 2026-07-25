@@ -1070,46 +1070,59 @@ export class Sim {
     let from = this.tick
     let rec: HistoryRec | null = null
     for (const [k, r] of this.history) { if (k <= this.tick) { from = k; rec = r } }
+    return { from, entities: rec ? this.dumpRec(rec, true) : [] }
+  }
+
+  /**
+   * Settled dump for persistence checkpoints, read from the OLDEST stored
+   * snapshot: rollbacks clamp there, so no fold can rewrite what leaves
+   * here. Grabs are dropped (a checkpoint outlives every holder's
+   * session); a held body persists as a dynamic one at its pinned pose.
+   */
+  dumpPersist(): { tick: number; entities: BootEntity[] } {
+    for (const [k, rec] of this.history) return { tick: k, entities: this.dumpRec(rec, false) }
+    return { tick: this.tick, entities: [] }
+  }
+
+  private dumpRec(rec: HistoryRec, grabs: boolean): BootEntity[] {
     const out: BootEntity[] = []
-    if (rec) {
-      const world = RAPIER.World.restoreSnapshot(rec.snap)
-      for (const [netId, h] of rec.bodies) {
-        const b = world.getRigidBody(h)
-        const eid = this.ecs.entityFor(netId)
-        if (!b || eid === undefined) continue
-        const q = b.rotation()
-        const g = rec.grabs.get(netId)
-        out.push({
-          netId,
-          color: this.ecs.Tint.value[eid],
-          pos: vec(b.translation()),
-          rot: { x: q.x, y: q.y, z: q.z, w: q.w },
-          linvel: vec(b.linvel()),
-          angvel: vec(b.angvel()),
-          grab: g && { holder: g.holder, order: g.order, target: { ...g.target } },
-        })
-      }
-      world.free()
-      for (const [netId, p] of rec.props) {
-        out.push({
-          netId, color: p.color, pos: { ...p.pos },
-          rot: { x: 0, y: 0, z: 0, w: 1 }, linvel: { ...ZERO }, angvel: { ...ZERO },
-          prop: {
-            kind: p.kind, color: p.color, size: p.size, unlit: p.unlit, claim: p.claim,
-            bounce: p.bounce, pop: p.pop, opacity: p.opacity,
-            yaw: p.yaw, dims: p.dims && { ...p.dims }, solid: p.solid,
-          },
-        })
-      }
-      for (const [key, value] of rec.data) {
-        out.push({
-          netId: key, color: 0, pos: { ...ZERO },
-          rot: { x: 0, y: 0, z: 0, w: 1 }, linvel: { ...ZERO }, angvel: { ...ZERO },
-          data: value,
-        })
-      }
+    const world = RAPIER.World.restoreSnapshot(rec.snap)
+    for (const [netId, h] of rec.bodies) {
+      const b = world.getRigidBody(h)
+      const eid = this.ecs.entityFor(netId)
+      if (!b || eid === undefined) continue
+      const q = b.rotation()
+      const g = grabs ? rec.grabs.get(netId) : undefined
+      out.push({
+        netId,
+        color: this.ecs.Tint.value[eid],
+        pos: vec(b.translation()),
+        rot: { x: q.x, y: q.y, z: q.z, w: q.w },
+        linvel: vec(b.linvel()),
+        angvel: vec(b.angvel()),
+        grab: g && { holder: g.holder, order: g.order, target: { ...g.target } },
+      })
     }
-    return { from, entities: out }
+    world.free()
+    for (const [netId, p] of rec.props) {
+      out.push({
+        netId, color: p.color, pos: { ...p.pos },
+        rot: { x: 0, y: 0, z: 0, w: 1 }, linvel: { ...ZERO }, angvel: { ...ZERO },
+        prop: {
+          kind: p.kind, color: p.color, size: p.size, unlit: p.unlit, claim: p.claim,
+          bounce: p.bounce, pop: p.pop, opacity: p.opacity,
+          yaw: p.yaw, dims: p.dims && { ...p.dims }, solid: p.solid,
+        },
+      })
+    }
+    for (const [key, value] of rec.data) {
+      out.push({
+        netId: key, color: 0, pos: { ...ZERO },
+        rot: { x: 0, y: 0, z: 0, w: 1 }, linvel: { ...ZERO }, angvel: { ...ZERO },
+        data: value,
+      })
+    }
+    return out
   }
 
 }

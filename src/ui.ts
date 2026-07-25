@@ -34,11 +34,13 @@ export interface Hooks {
   onScriptFile(f: File): void
   onEditScript(): void
   onInspectScene(): void
+  onPersist(on: boolean): void
 }
 
 export class UI {
   private statusEl: HTMLElement
   private logEl: HTMLElement
+  private persistEl: HTMLInputElement
   private lines: string[] = []
   private lastRender = 0
 
@@ -60,6 +62,7 @@ export class UI {
         <input id="scriptfile" type="file" accept=".js,text/javascript" style="display:none">
         <button id="editscript">edit world script</button>
         <button id="inspect">inspect scene</button>
+        <label><input id="persist" type="checkbox"> persist world</label>
       </div>
       <div id="status"></div>
       <div id="log"></div>
@@ -96,7 +99,12 @@ export class UI {
     filePick('#script', '#scriptfile', f => hooks.onScriptFile(f))
     ;(root.querySelector('#editscript') as HTMLButtonElement).onclick = () => hooks.onEditScript()
     ;(root.querySelector('#inspect') as HTMLButtonElement).onclick = () => hooks.onInspectScene()
+    this.persistEl = root.querySelector('#persist') as HTMLInputElement
+    this.persistEl.onchange = () => hooks.onPersist(this.persistEl.checked)
   }
+
+  /** reflect the room's persist flag without firing the hook */
+  setPersist(on: boolean) { this.persistEl.checked = on }
 
   log(line: string) {
     this.lines.push(line)

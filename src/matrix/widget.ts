@@ -5,6 +5,7 @@ import {
 import { createRoomWidgetClient, EventType, type MatrixClient, type ICapabilities } from 'matrix-js-sdk'
 import type { WidgetParams } from './params'
 import { SCRIPT_STATE_TYPES, WORLD_EVENT_TYPE } from './world'
+import { CHECKPOINT_EVENT_TYPE } from './persist'
 
 /**
  * Matryoshka bootstrap, after element-call's src/widget.ts: the WidgetApi
@@ -49,10 +50,12 @@ export async function initWidgetClient(p: WidgetParams): Promise<{ api: WidgetAp
     sendState: [
       { eventType: EventType.GroupCallMemberPrefix },
       { eventType: WORLD_EVENT_TYPE, stateKey: '' },
+      { eventType: CHECKPOINT_EVENT_TYPE, stateKey: '' },
     ],
     receiveState: [
       { eventType: EventType.GroupCallMemberPrefix },
       { eventType: WORLD_EVENT_TYPE },
+      { eventType: CHECKPOINT_EVENT_TYPE },
       { eventType: EventType.RoomCreate },
       { eventType: EventType.RoomMember },
       { eventType: EventType.RoomEncryption },
