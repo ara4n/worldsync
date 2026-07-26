@@ -61,14 +61,14 @@ const spawnGrid = (t, n, x0) => t.frame.evaluate(([count, ox]) => {
 const positions = (t, ids) => t.frame.evaluate(ns =>
   Object.fromEntries(ns.map(n => [n, window.__jig.pos(n)])), ids)
 
-const bodyCount = t => t.frame.evaluate(() => window.__jig.sim.bodies.size)
+const bodyCount = t => t.frame.evaluate(() => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith("avatar:")).length)
 
 // --- default off: a world with no checkpoint dies with its sessions ---
 const a = await open('a')
 await spawnGrid(a, 3, 0)
 await a.page.waitForTimeout(2000)
 const b = await open('b') // state keeper; its widget adopts a's world
-await b.frame.waitForFunction(() => window.__jig.sim.bodies.size === 3, null, { timeout: 10000 })
+await b.frame.waitForFunction(() => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith("avatar:")).length === 3, null, { timeout: 10000 })
   .catch(async () => fail(`b never saw a's boxes (${await bodyCount(b)})`))
 await a.page.close()
 await killWidget(b)
@@ -92,7 +92,7 @@ const cPos = await positions(c, cIds)
 await killWidget(c)
 
 const d = await open('d')
-await d.frame.waitForFunction(() => window.__jig.sim.bodies.size === 3, null, { timeout: 15000 })
+await d.frame.waitForFunction(() => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith("avatar:")).length === 3, null, { timeout: 15000 })
   .catch(async () => fail(`d never restored the checkpoint (${await bodyCount(d)} bodies)`))
 if (!await d.frame.evaluate(() => document.getElementById('persist').checked)) {
   fail('d: persist checkbox does not reflect the room flag')
@@ -119,7 +119,7 @@ const dAll = await positions(d, dIds.slice(0, 5))
 await killWidget(d)
 
 const e = await open('e')
-await e.frame.waitForFunction(() => window.__jig.sim.bodies.size === 153, null, { timeout: 20000 })
+await e.frame.waitForFunction(() => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith("avatar:")).length === 153, null, { timeout: 20000 })
   .catch(async () => fail(`e never restored the mxc checkpoint (${await bodyCount(e)} bodies)`))
 const ePos = await positions(e, dIds.slice(0, 5))
 for (const id of dIds.slice(0, 5)) {

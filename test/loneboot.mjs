@@ -35,7 +35,8 @@ if (ok) {
     const w = document.getElementById('widget').contentWindow
     const { session } = w.__jig
     session.emit('spawn', session.nextNetId(), { pos: { x: 0, y: 3, z: 0 }, color: 0x33cc66 })
-    return new Promise(r => setTimeout(() => r(w.__jig.sim.bodies.size), 2000))
+    return new Promise(r => setTimeout(
+      () => r([...w.__jig.sim.bodies.keys()].filter(k => !k.startsWith('avatar:')).length), 2000))
   })
   if (bodies < 1) fail('spawn did not land in the lone-booted sim')
 }

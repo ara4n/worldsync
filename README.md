@@ -36,12 +36,15 @@ move it (physics resumes on release, with throw velocity), drag empty
 space (or cmd-drag / right-drag) to orbit, two-finger drag pans along the
 ground plane, pinch or ctrl-wheel zooms.
 
-Navigation (bottom HUD, thirdroom-style): the `walk` toggle (or `?nav=walk`)
-switches to a first-person avatar - click the world to capture the mouse and
-look around (or use the cursor keys), WASD moves, shift runs, space jumps,
-and dragging a box carries it on your view ray (steer it by looking, throw
-it by releasing mid-swing). The floor comes from the rendered scene, so you
-can climb a glTF world's stairs; the avatar is pure camera, never sim state.
+Navigation (bottom HUD, thirdroom-style): WALK IS THE DEFAULT - you start
+on foot as a first-person avatar, standing near the world's centre of
+interest, facing it. Click the world to capture the mouse and look around
+(or use the cursor keys), WASD moves, shift runs, space jumps, and
+dragging a box carries it on your view ray (steer it by looking, throw it
+by releasing mid-swing). The floor comes from the rendered scene, so you
+can climb a glTF world's stairs. The `orbit` toggle (or `?nav=orbit`)
+restores the classic jig view - and going out-of-body leaves your avatar
+standing where you left it.
 Single-click a box in either mode to select it (outlined): the view switches
 to orbit around it for precision work, and the HUD grows an `edit` button
 unlocking move/rotate/scale gizmos - drag an axis to transform along it, or
@@ -50,6 +53,23 @@ protocol (grab + pose stream + release; scale lands as one `resize` op).
 Click empty space or press esc to deselect and return to where you were.
 World scripts can pin the mode with `world.navigation('orbit'|'walk')` -
 the board worlds (dots, chess, tetrix...) pin orbit.
+
+Avatars (thirdroom-style, on by default): every peer is an animated
+silver Mixamo figure - Idle/Walk/Run/strafe/turn/fall clips picked from
+its velocity, exactly thirdroom's animation brain - visible to everyone
+(you see your own only when out of body; it hides while the camera is
+inside it). Peers spawn shoulder-to-shoulder on an arc facing the scene's
+centre, ~1.4m apart. While you walk, your figure's HEAD tracks your view
+pitch on every peer's screen; while you have something selected, its LEFT
+ARM points at the selection. Avatars are solid: a kinematic box collider
+(0.6 x 1.7 x 0.6) that shoves dynamic boxes identically on every peer.
+The figure itself rides a cosmetic latest-wins broadcast (never folded,
+never hashed); only the collider touches the timeline (one spawn op; its
+motion rides the same pose plane as dragged boxes). Swap the model by
+replacing `public/avatar-default.glb` (built by `tools/avatar-glb.mjs`
+from the thirdroom checkout next door): any GLB on the standard mixamorig
+skeleton works, clips bind by name. `world.avatars(false)` turns the
+whole thing off for board worlds (dots does).
 
 Rendering: cascaded shadow maps (4 cascades, splits weighted hard toward
 the camera so contact shadows get millimetre texels), double-sided

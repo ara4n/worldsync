@@ -658,6 +658,7 @@ async function main() {
     boxes: () => {
       const out = []
       for (const netId of sim.bodies.keys()) {
+        if (netId.startsWith(AVATAR_PREFIX)) continue // avatars are not boxes
         const b = sim.body(netId)
         if (!b) continue
         const p = b.translation()

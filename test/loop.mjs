@@ -17,7 +17,7 @@ function fail(msg) {
 
 const page = await ctx.newPage()
 page.on('pageerror', e => console.error('pageerror:', String(e).slice(0, 200)))
-await page.goto(`${base}/mock.html?room=${room}`)
+await page.goto(`${base}/mock.html?room=${room}&nav=orbit`)
 await page.waitForFunction(() => {
   const f = document.getElementById('widget')
   const w = f && f.contentWindow
@@ -31,7 +31,10 @@ await frame.setInputFiles('#scriptfile', {
   name: 'dots.js', mimeType: 'text/javascript',
   buffer: readFileSync(new URL('../examples/dots.js', import.meta.url)),
 })
-await frame.waitForFunction(() => window.__jig.sim.props.size === 27, null, { timeout: 20000 })
+// count BOARD dots only: the score/timer props park at y=-30 and can land
+// before or after the last board dot depending on startup timing
+await frame.waitForFunction(() =>
+  window.__jig.props().filter(p => p.y > -1).length === 27, null, { timeout: 20000 })
 console.log('board up')
 
 // Paint the front-face square (z=2) colour C, the dots directly behind it
@@ -95,12 +98,12 @@ await page.mouse.up()
 // restore 27
 const cleared = await frame.waitForFunction(() => {
   const gone = id => !window.__jig.sim.props.has(id)
-  return window.__jig.props().length === 27
+  return window.__jig.props().filter(p => p.y > -1).length === 27
     && window.__loopIds.square.every(gone) && gone(window.__loopIds.extra)
 }, null, { timeout: 15000 }).then(() => true).catch(() => false)
 if (!cleared) {
   const state = await frame.evaluate(() => ({
-    n: window.__jig.props().length,
+    n: window.__jig.props().filter(p => p.y > -1).length,
     squareLeft: window.__loopIds.square.filter(id => window.__jig.sim.props.has(id)).length,
     extraLeft: window.__jig.sim.props.has(window.__loopIds.extra),
   }))

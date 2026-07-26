@@ -20,7 +20,7 @@ function fail(msg) {
 async function open(name) {
   const page = await ctx.newPage()
   page.on('pageerror', (e) => console.error(`${name} pageerror:`, String(e).slice(0, 200)))
-  await page.goto(`${base}/mock.html?room=${name}${Math.random().toString(36).slice(2, 8)}`)
+  await page.goto(`${base}/mock.html?room=${name}${Math.random().toString(36).slice(2, 8)}&nav=orbit`)
   await page.waitForFunction(() => {
     const f = document.getElementById('widget')
     const w = f && f.contentWindow
@@ -112,7 +112,8 @@ async function uploadScript(t, path, name) {
     return ps.length >= 99 && pieces.length === 32
   }, BOARD_Y, { timeout: 30000 }).then(() => true).catch(() => false)
   if (!seeded) fail('chess: board never fully seeded')
-  const cubes = await t.frame.evaluate(() => window.__jig.sim.bodies.size)
+  const cubes = await t.frame.evaluate(
+    () => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith('avatar:')).length)
   if (cubes !== 0) fail(`chess: expected no physics cubes, got ${cubes}`)
   await t.page.waitForTimeout(1200)
 

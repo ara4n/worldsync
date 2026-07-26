@@ -17,7 +17,7 @@ const browser = await chromium.launch({ headless: false })
 async function open(name) {
   const page = await browser.newPage()
   page.on('pageerror', e => console.error(`${name} pageerror:`, String(e)))
-  await page.goto(`${base}/?room=${room}&norm=${norm}&cad=${cad}`)
+  await page.goto(`${base}/?room=${room}&nav=orbit&norm=${norm}&cad=${cad}`)
   await page.waitForFunction(() => window.__jig && window.__jig.session && window.__jig.session.ready(), null, { timeout: 15000 })
   return page
 }
@@ -41,7 +41,9 @@ outer: while (Date.now() < deadline) {
   // Tight grid of clicks; whatever lands on an existing box becomes a quick
   // grab+release instead of a spawn, like the manual repro. Keep going until
   // the target box count is reached, then just keep poking the pile.
-  if (await a.evaluate(() => window.__jig.sim.bodies.size) < targetBoxes) {
+  // avatar collider bodies ride sim.bodies too: boxes only for the count,
+  // and drags must never pick an avatar (grabs on them are inert anyway)
+  if (await a.evaluate(() => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith('avatar:')).length) < targetBoxes) {
     for (let gx = -4; gx <= 4; gx++) {
       for (let gz = -3; gz <= 3; gz++) {
         const s = await a.evaluate(([x, z]) => window.__jig.screenOfGround(x, z),
@@ -55,8 +57,10 @@ outer: while (Date.now() < deadline) {
   }
   // Drag a box THROUGH the pile: world-space waypoints criss-crossing the
   // grid at grab height, so the held box plows through the others.
-  const netId = await a.evaluate(r =>
-    [...window.__jig.sim.bodies.keys()][r % window.__jig.sim.bodies.size], round * 7)
+  const netId = await a.evaluate(r => {
+    const boxes = [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith('avatar:'))
+    return boxes[r % boxes.length]
+  }, round * 7)
   const pt = await a.evaluate(id => window.__jig.screenPos(id), netId)
   if (pt) {
     await a.mouse.move(pt.x, pt.y)

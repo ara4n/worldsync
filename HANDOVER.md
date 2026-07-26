@@ -34,6 +34,11 @@ test mid-flight; finish edits first.
   bit-exact across peers, resize + streamed-rotation replication, and the
   walker (WASD/run/jump/arrow look). Pointer-lock carrying is manual-only:
   CDP synthetic events carry no movementX/Y.
+- `node test/avatar.mjs`: the animated avatars e2e: walk-by-default, two
+  peers grow figures + collider bodies, locomotion clips replicate from
+  velocity (Walk/Run/Idle/Fall1), head pitch + left-arm aim replicate,
+  the collider shoves a box bit-equal on both peers, hashes agree, a
+  departed peer's figure and collider go with it.
 
 ## File map (src/)
 
@@ -56,10 +61,13 @@ test mid-flight; finish edits first.
   a click never disturbs), drag box = grab/move@33ms/release with throw
   velocity (presented-pose grab override); walk-locked drags carry on
   the view ray; empty-space drags move the viewpoint (orbit/drag-look).
-- `nav.ts`: navigation modes (orbit vs thirdroom-style walk: pointer-lock
-  look, WASD/shift/space, floor raycast, pure camera - never sim state),
-  selection, the bottom HUD, and the edit gizmo (TransformControls ->
-  grab/pose-rot-stream/release, scale -> one 'resize' op).
+- `nav.ts`: navigation modes (thirdroom-style walk is the DEFAULT, orbit
+  via toggle/?nav=orbit: pointer-lock look, WASD/shift/space, floor
+  raycast; the walk camera itself is never sim state), selection, the
+  bottom HUD, the edit gizmo (TransformControls ->
+  grab/pose-rot-stream/release, scale -> one 'resize' op), spawnAt +
+  avatarState (the avatar plane reads feet/yaw/pitch/vel/grounded).
+- `avatar.ts`: the animated peer figures (see the avatars section).
 - `main.ts`: orchestration; frame loop = fold -> advance -> mirror -> render;
   hash exchange, staleness (opt-in), boot, worker ticker for hidden tabs,
   window.__jig test hooks, __divergence stash.
@@ -396,6 +404,67 @@ for precision manipulation instead of carrying it around. Decisions:
   mistake that for a host restriction. Locked mouselook is therefore
   untestable headlessly (no movementX on synthetic events); drag-look is
   covered in test/nav.mjs instead.
+
+## Animated avatars (2026-07-26)
+
+Thirdroom's avatars, ported (Matthew asked): every peer is an animated
+silver Mixamo figure, on by default, walk is now the DEFAULT nav mode,
+and peers spawn on an arc facing the scene bbox centre (origin bare),
+~1.4m apart by join rank, self-healing across scene resets and refined
+(unless you already walked) when a pending scene fetch lands.
+
+Two planes, deliberately separate:
+
+- FIGURE = cosmetic. src/avatar.ts renders one GLTF figure per peer
+  (GLTFLoader + SkeletonUtils.clone), driven by the latest-wins 'avatar'
+  DcMessage (feet/yaw/pitch/vel/grounded/mode/aim, ~30Hz on change + 1s
+  keepalive, sent from avatarSync in main.ts after nav.update) - never
+  folded, never hashed, departed peers cleaned up in onLeft like lines.
+  The animation brain is thirdroom's animation.game.ts almost verbatim:
+  squared-speed thresholds (idle 0.5; walk->run moved to 36 = 6m/s for
+  this jig's 4/9m/s speeds), 8/s fade-in 4/s fade-out, phase-synced
+  blends, reversed strafe clips for backpedalling, TurnLeft/Right,
+  Fall1 airborne, Fall2 below -12m/s. On top, two behaviours thirdroom
+  never had, both post-mixer world-space bone edits (rotateBoneWorld):
+  head+neck pitch to the peer's view angle (walk mode only; orbit =
+  out-of-body, figure left alone), and the left arm two-bone-aimed at
+  the peer's selection while one exists (aim point rides the broadcast).
+  Your own figure hides when the camera sits inside it (proximity, not
+  a first-person flag, so going out-of-body un-hides it as you swing
+  away). Facing trap: the rig flips PI inside its group, so the group
+  takes RAW yaw; a second PI there once cancelled the first and every
+  figure walked backwards, head pitch reading inverted.
+- COLLIDER = folded state, via existing machinery only. One 'avatar' op
+  spawns a kinematic 0.6x1.7x0.6 box (netId 'avatar:<peer>', prefix IS
+  the avatar flag - no side table) entered into the grab table with its
+  owner as permanent holder, so streamPose -> pinTarget -> pinAndStep
+  drives it exactly like a dragged box (that is the entire determinism
+  story; pose samples stream at TICK_MS while walking, the pin holds
+  when idle/orbit). Boot seams carry it through the generic grab-table
+  path untouched; dumpPersist SKIPS avatar bodies (checkpoints outlive
+  sessions); holdsAny SKIPS avatar grabs or every beat would heal-fold
+  idle rooms forever; grab/release/resize ops on avatar ids are inert
+  (a test once grabbed one at random); render.syncBodies and
+  scriptHost.boxes filter the prefix. The primary despawns leavers'
+  bodies (onLeft) and sweeps ghosts (avatarSync); each peer re-emits
+  its own spawn if the body vanishes (scene ops reset the world).
+
+The asset: public/avatar-default.glb, built by tools/avatar-glb.mjs from
+the SIBLING thirdroom checkout - the X-bot full-animation-rig.glb whole
+(silver retint + compaction; low metalness on purpose: no env map, so
+real metal reads black). The Y-bot attempt is parked behind --ybot:
+same-named mixamo skeletons still differ in rest ORIENTATIONS, so
+rotation-only retargeting folds the legs up; a real Y-bot wants clips
+exported on its own skeleton (Mixamo/Blender), not tool-side math. Rig
+assumptions elsewhere: NONE beyond standard mixamorig bone names (clips
+bind by name; bone() tolerates the loader stripping ':').
+
+world.avatars(false) (WebSG) hides the layer AND retires the caller's
+collider; dots does it; restored on script stop. Scripted-test estate
+pins ?nav=orbit (mock host forwards extra query params for the
+mock.html tests); tests that count sim.bodies filter the avatar prefix,
+and smoke/nav input-log comparisons exclude avatar ops (a peer's own
+spawn predates a joiner's session, arriving as boot, not op).
 
 ## Element Web/Desktop host gotchas (2026-07-26)
 

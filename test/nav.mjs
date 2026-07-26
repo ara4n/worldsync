@@ -21,7 +21,7 @@ async function open(name) {
     if (/favicon/.test(url) || /favicon/.test(m.text())) return
     errors.push(`${name}: ${m.text()} (${url})`)
   })
-  await page.goto(`${base}/?room=${room}`)
+  await page.goto(`${base}/?room=${room}&nav=orbit`)
   await page.waitForFunction(() => window.__jig && window.__jig.session && window.__jig.session.ready(), null, { timeout: 15000 })
   return page
 }
@@ -42,9 +42,11 @@ console.log('peers connected')
 const vp = a.viewportSize()
 await a.mouse.move(vp.width / 2, vp.height / 2)
 await a.keyboard.press('1')
-await a.waitForFunction(() => window.__jig.sim.bodies.size === 1, null, { timeout: 5000 })
-await b.waitForFunction(() => window.__jig.sim.bodies.size === 1, null, { timeout: 5000 })
-const netId = await a.evaluate(() => [...window.__jig.sim.bodies.keys()][0])
+// avatar collider bodies (avatar:<peer>) ride sim.bodies too: count boxes only
+const boxKeys = () => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith('avatar:'))
+await a.waitForFunction(`(${boxKeys})().length === 1`, null, { timeout: 5000 })
+await b.waitForFunction(`(${boxKeys})().length === 1`, null, { timeout: 5000 })
+const netId = await a.evaluate(`(${boxKeys})()[0]`)
 await a.waitForTimeout(1200)
 
 // -- single-click selects (no grab: the box must not move) --
@@ -64,13 +66,13 @@ const empty = await a.evaluate(() => window.__jig.screenOfGround(6, 6))
 await a.mouse.click(empty.x, empty.y)
 await a.waitForFunction(() => !window.__jig.nav.selection, null, { timeout: 2000 })
 await a.waitForTimeout(400)
-if (await a.evaluate(() => window.__jig.sim.bodies.size) !== 1) fail('deselect click spawned a box')
+if (await a.evaluate(`(${boxKeys})().length`) !== 1) fail('deselect click spawned a box')
 console.log('empty click deselected without spawning')
 
 // -- 1 spawns under the pointer --
 await a.mouse.move(empty.x, empty.y)
 await a.keyboard.press('1')
-await a.waitForFunction(() => window.__jig.sim.bodies.size === 2, null, { timeout: 3000 })
+await a.waitForFunction(`(${boxKeys})().length === 2`, null, { timeout: 3000 })
 console.log('1 spawned a box under the pointer')
 
 // -- reselect, enable edit, drag the gizmo's center section --
@@ -331,12 +333,16 @@ console.log('back to orbit')
 
 // -- the sims must still agree after all of it --
 await a.waitForTimeout(1000)
+// avatar ops excluded: a's own spawn predates b's join (b gets it as a
+// boot entity, not an op), so the raw logs legitimately differ there
 const getLog = page => page.evaluate(() =>
-  JSON.stringify([...window.__jig.sim.inputLog].sort((x, y) =>
-    x.tick - y.tick || x.order - y.order || x.seq - y.seq)))
+  JSON.stringify([...window.__jig.sim.inputLog]
+    .filter(e => !e.netId.startsWith('avatar:'))
+    .sort((x, y) =>
+      x.tick - y.tick || x.order - y.order || x.seq - y.seq)))
 const [logA, logB] = await Promise.all([getLog(a), getLog(b)])
 if (logA !== logB) fail('peers fed different inputs to their sims')
-console.log(`input logs identical (${JSON.parse(logA).length} entries)`)
+else console.log(`input logs identical (${JSON.parse(logA).length} entries)`)
 
 const realErrors = errors.filter(e => !/favicon/.test(e))
 if (realErrors.length) fail(`console/page errors:\n${realErrors.join('\n')}`)

@@ -937,6 +937,9 @@ export class Sim {
         return
       }
       case 'grab': {
+        // avatar bodies are permanently their owner's: a stray grab
+        // (script, test) must not overwrite the pin's holder
+        if (i.netId.startsWith(AVATAR_PREFIX)) return
         const b = bodyOf(ctx, i.netId)
         if (!b) return
         // The grabber teleports the body to their presented pose, which is the
@@ -950,6 +953,7 @@ export class Sim {
         return
       }
       case 'release': {
+        if (i.netId.startsWith(AVATAR_PREFIX)) return // the avatar pin never releases
         const g = ctx.grabs.get(i.netId)
         if (!g || g.holder !== i.peer) return
         ctx.grabs.delete(i.netId)
@@ -1061,6 +1065,7 @@ export class Sim {
         // Remove + recreate (rather than setHalfExtents) so the parent
         // body's mass properties are recomputed unambiguously; handle
         // allocation order stays timeline order, like body creation.
+        if (i.netId.startsWith(AVATAR_PREFIX)) return // avatar dims are fixed at spawn
         const b = bodyOf(ctx, i.netId)
         if (!b || !i.dims) return
         const old = b.collider(0)

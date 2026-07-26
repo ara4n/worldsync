@@ -84,8 +84,9 @@ const row = await a.waitForSelector('#inspector .row', { timeout: 30000 }).catch
 if (!row) fail('inspector never showed the scene tree')
 // expand down to the named mesh and select it; props must show the geometry
 const shelf = await a.evaluate(() => {
-  // expanding rebuilds the tree DOM, so re-query until nothing is collapsed
-  for (let i = 0; i < 50; i++) {
+  // expanding rebuilds the tree DOM, so re-query until nothing is
+  // collapsed (the avatar figures alone contribute ~70 bone rows each)
+  for (let i = 0; i < 600; i++) {
     const t = [...document.querySelectorAll('#inspector .row .twist')].find(x => x.textContent === '▸')
     if (!t) break
     t.click()
@@ -111,7 +112,8 @@ if (!await logged(a, 'world script running')) fail('a: script never ran after sa
 if (!await logged(b, 'world script running')) fail('b: script never started on the other peer')
 // the starter script (primary-only) spawns boxes; both sims must agree
 for (const [name, f] of [['a', a], ['b', b]]) {
-  const ok = await f.waitForFunction(() => window.__jig.sim.bodies.size >= 1, null, { timeout: 20000 })
+  const ok = await f.waitForFunction(
+    () => [...window.__jig.sim.bodies.keys()].some(k => !k.startsWith('avatar:')), null, { timeout: 20000 })
     .then(() => true).catch(() => false)
   if (!ok) fail(`${name}: the saved script never spawned a box`)
 }

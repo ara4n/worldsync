@@ -32,7 +32,7 @@ function fail(msg) {
 async function open(name) {
   const page = await ctx.newPage()
   page.on('pageerror', e => console.error(`${name} pageerror:`, String(e).slice(0, 200)))
-  await page.goto(`${base}/mock.html?room=${room}`)
+  await page.goto(`${base}/mock.html?room=${room}&nav=orbit`)
   await page.waitForFunction(() => {
     const f = document.getElementById('widget')
     const w = f && f.contentWindow
@@ -168,7 +168,7 @@ await waitDown(b.frame, 86, 'b glissando reached key 86 (broadcast)')
 await a.page.mouse.up()
 await waitUp(a.frame, 86, 'a glissando key up')
 await waitUp(b.frame, 86, 'b glissando key up')
-const spawned = await a.frame.evaluate(() => window.__jig.sim.bodies.size)
+const spawned = await a.frame.evaluate(() => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith("avatar:")).length)
 if (spawned !== 0) fail(`click was not captured: ${spawned} box(es) spawned`)
 
 // clicking the piano BODY (not a key) selects the scene node - and must
@@ -180,7 +180,7 @@ await a.frame.waitForFunction(() => window.__jig.nav.selection?.kind === 'scene'
   .catch(() => fail('body click did not select a scene node'))
 const selName = await a.frame.evaluate(() => window.__jig.nav.selection?.name)
 console.log(`selected scene node: ${selName}`)
-if (await a.frame.evaluate(() => window.__jig.sim.bodies.size) !== 0) fail('body click spawned a box')
+if (await a.frame.evaluate(() => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith("avatar:")).length) !== 0) fail('body click spawned a box')
 await a.page.keyboard.press('Escape')
 await a.frame.waitForFunction(() => !window.__jig.nav.selection, null, { timeout: 2000 })
 

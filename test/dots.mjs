@@ -20,7 +20,7 @@ function fail(msg) {
 async function open(name) {
   const page = await ctx.newPage()
   page.on('pageerror', e => console.error(`${name} pageerror:`, String(e).slice(0, 200)))
-  await page.goto(`${base}/mock.html?room=${room}`)
+  await page.goto(`${base}/mock.html?room=${room}&nav=orbit`)
   await page.waitForFunction(() => {
     const f = document.getElementById('widget')
     const w = f && f.contentWindow
@@ -125,6 +125,17 @@ for (const [name, t] of [['a', a], ['b', b]]) {
   }
 }
 console.log('chain cleared, refills landed: 27 dots on both tabs')
+
+// dots is a board world: world.avatars(false) must hide every figure and
+// retire the avatar collider bodies on both tabs
+for (const [name, t] of [['a', a], ['b', b]]) {
+  const off = await t.frame.waitForFunction(() =>
+    window.__jig.view.avatars.enabled === false
+    && ![...window.__jig.sim.bodies.keys()].some(k => k.startsWith('avatar:')),
+    null, { timeout: 15000 }).then(() => true).catch(() => false)
+  if (!off) fail(`${name}: world.avatars(false) left figures or colliders behind`)
+}
+console.log('avatars hidden and colliders retired (world.avatars(false))')
 
 // convergence: wait for a settled-hash comparison, no divergence latched
 for (const [name, t] of [['a', a], ['b', b]]) {

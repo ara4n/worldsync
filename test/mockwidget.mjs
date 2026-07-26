@@ -56,7 +56,8 @@ await b.page().waitForTimeout(6000)
 
 for (const [name, f] of [['a', a], ['b', b]]) {
   const s = await f.evaluate(() => ({
-    entities: window.__jig.sim.bodies.size,
+    // boxes only: each peer also carries an avatar collider body
+    entities: [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith('avatar:')).length,
     peers: [...window.__jig.session.peers.values()].map(p => ({ id: p.id, checked: p.checked, divergedAt: p.divergedAt })),
     anomalies: window.__jig.sim.anomalies,
     verify: window.__jig.sim.verifyReplay(60),
