@@ -30,6 +30,12 @@ import type { Emitter } from './input'
  * camera snaps to its eyes); the figure never teleports to wherever the
  * orbit view drifted.
  *
+ * Walk mode has two thirdroom-style toggles: V swings the camera out to
+ * an over-the-shoulder boom (same mouselook, the figure in view), and F
+ * toggles flight - gravity off, W/S along the full LOOK ray (look up and
+ * press W to gain height), A/D still level. Landing is F again; the
+ * floor stops a downward glide either way.
+ *
  * The avatar is pure camera - local cosmetics, never sim state: walking
  * feeds nothing into the timeline, so determinism is untouched. Floor
  * comes from a downward raycast against the rendered scene (three's
@@ -50,6 +56,11 @@ const MOUSE_SENS = 0.0022  // rad/px of pointer-lock movement
 const PITCH_MAX = Math.PI / 2 - 0.05
 const STEP_UP = 1.0        // tallest ledge the walker steps straight onto
 const DOWN = new THREE.Vector3(0, -1, 0)
+// the V-key over-the-shoulder boom: behind the head along the look ray,
+// offset toward the right shoulder (far enough that the local figure's
+// hide-when-camera-inside-it check keeps it visible)
+const SHOULDER_BACK = 2.2
+const SHOULDER_RIGHT = 0.45
 
 /** What a click selected: a physics box (edits replicate as ops) or a
  * glTF scene node (edits are local previews, like the inspector's - the
@@ -94,6 +105,10 @@ export class Nav {
   private pitch = 0
   private vy = 0
   private grounded = false
+  // walk-mode camera + flight toggles (V and F); both survive mode
+  // round-trips, so orbit detours keep your chosen viewpoint and altitude
+  private shoulder = false
+  private flying = false
   private keys = new Set<string>()
   private lastMs = 0
   private rayDown = new THREE.Raycaster()
@@ -124,12 +139,28 @@ export class Nav {
     this.vy = 0
     this.yaw = yawTo
     this.pitch = 0
-    if (this.applied === 'walk') {
-      const cam = this.view.camera
-      cam.position.set(this.feet.x, this.feet.y + EYE_HEIGHT, this.feet.z)
-      cam.rotation.order = 'YXZ'
-      cam.rotation.set(this.pitch, this.yaw, 0)
+    if (this.applied === 'walk') this.placeCamera()
+  }
+
+  /** the walk-mode camera: at the eyes, or on the V-key shoulder boom -
+   * behind the head along the look ray, offset to the right shoulder,
+   * clamped above whatever floor lies beneath it */
+  private placeCamera() {
+    const cam = this.view.camera
+    cam.rotation.order = 'YXZ'
+    cam.rotation.set(this.pitch, this.yaw, 0)
+    const eyeY = this.feet.y + EYE_HEIGHT
+    if (!this.shoulder) {
+      cam.position.set(this.feet.x, eyeY, this.feet.z)
+      return
     }
+    const cp = Math.cos(this.pitch), sp = Math.sin(this.pitch)
+    const sin = Math.sin(this.yaw), cos = Math.cos(this.yaw)
+    // look dir (-sin*cp, sp, -cos*cp); right (cos, 0, -sin)
+    const px = this.feet.x + sin * cp * SHOULDER_BACK + cos * SHOULDER_RIGHT
+    const py = eyeY - sp * SHOULDER_BACK
+    const pz = this.feet.z + cos * cp * SHOULDER_BACK - sin * SHOULDER_RIGHT
+    cam.position.set(px, Math.max(py, this.floorAt(px, pz, py) + 0.3), pz)
   }
 
   private hud: HTMLElement
@@ -236,7 +267,9 @@ export class Nav {
 
   /** left-drag orbit on empty space (OrbitControls reserves LEFT for box
    * gestures, so Input feeds us the drag): swing the camera around the
-   * current pivot, same feel and clamps as OrbitControls' own rotate.
+   * current pivot, same feel as OrbitControls' own rotate. The polar
+   * clamp only guards the poles - the full {-90,90} elevation range is
+   * open, precision inspection wants to look from anywhere.
    * This is what keeps the viewpoint movable after selecting an object. */
   orbitBy(dx: number, dy: number) {
     const c = this.view.controls
@@ -245,7 +278,7 @@ export class Nav {
     const sph = new THREE.Spherical().setFromVector3(off)
     const k = 2 * Math.PI / this.view.renderer.domElement.clientHeight
     sph.theta -= dx * k
-    sph.phi = THREE.MathUtils.clamp(sph.phi - dy * k, 0.05, c.maxPolarAngle)
+    sph.phi = THREE.MathUtils.clamp(sph.phi - dy * k, 0.05, Math.PI - 0.05)
     cam.position.copy(c.target).add(off.setFromSpherical(sph))
     cam.lookAt(c.target)
   }
@@ -290,17 +323,11 @@ export class Nav {
   }
 
   /** Point the orbit controls at target without moving the camera: the
-   * target sits on the view ray (orbitTargetFor), and the polar clamp is
-   * widened to the current gaze - a walker looking level or upward sits
-   * outside the default limit, and OrbitControls would otherwise snap
-   * the camera to it (the pop this exists to kill). Recomputed at every
-   * handover, so a downward gaze tightens it back to the default. */
+   * target sits on the view ray (orbitTargetFor), so the handover never
+   * pops. (The polar range is fully open, so no clamp-widening dance is
+   * needed to stop OrbitControls snapping an out-of-range gaze.) */
   private setOrbitPivot(target: THREE.Vector3) {
-    const c = this.view.controls
-    c.target.copy(target)
-    const off = this.view.camera.position.clone().sub(target)
-    const polar = Math.acos(THREE.MathUtils.clamp(off.y / (off.length() || 1), -1, 1))
-    c.maxPolarAngle = THREE.MathUtils.clamp(Math.max(Math.PI / 2 - 0.05, polar + 0.02), 0, Math.PI - 0.01)
+    this.view.controls.target.copy(target)
   }
 
   /** the selected Object3D, whatever its kind */
@@ -436,6 +463,18 @@ export class Nav {
       this.toggleMode()
       return
     }
+    // V: over-the-shoulder camera; F: flight - walk-mode toggles, like
+    // thirdroom's
+    if (e.code === 'KeyV' && !e.repeat && this.effective() === 'walk') {
+      this.shoulder = !this.shoulder
+      return
+    }
+    if (e.code === 'KeyF' && !e.repeat && this.effective() === 'walk') {
+      this.flying = !this.flying
+      this.vy = 0 // lift or land from rest either way
+      this.renderHud()
+      return
+    }
     // shift is a modifier, not a movement key: track it here or the
     // held-keys set never learns about it and running never engages
     if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
@@ -455,7 +494,7 @@ export class Nav {
       this.keys.add(e.code)
       // jump on the press itself: a quick tap can come and go entirely
       // between two frames, which a per-frame key poll would miss
-      if (e.code === 'Space' && !e.repeat && this.grounded) this.vy = JUMP_SPEED
+      if (e.code === 'Space' && !e.repeat && this.grounded && !this.flying) this.vy = JUMP_SPEED
     }
   }
 
@@ -467,12 +506,10 @@ export class Nav {
       const cam = this.view.camera
       if (mode === 'walk') {
         this.view.controls.enabled = false
-        // the camera rejoins the avatar: eyes in the figure's head, facing
-        // its way (Matthew: the figure stays put however far the orbit
-        // view roamed; it must never teleport under the camera)
-        cam.position.set(this.feet.x, this.feet.y + EYE_HEIGHT, this.feet.z)
-        cam.rotation.order = 'YXZ'
-        cam.rotation.set(this.pitch, this.yaw, 0)
+        // the camera rejoins the avatar: at its eyes (or shoulder boom),
+        // facing its way (Matthew: the figure stays put however far the
+        // orbit view roamed; it must never teleport under the camera)
+        this.placeCamera()
       } else {
         if (this.locked) document.exitPointerLock()
         this.view.controls.enabled = true
@@ -532,10 +569,16 @@ export class Nav {
       // rotateY(yaw): forward (0,0,-1) -> (-sin, 0, -cos); right (1,0,0)
       // -> (cos, 0, -sin). The right vector's z is NEGATIVE sin: a +sin
       // here once mirrored strafing over half the compass.
-      const dx = (-sin * fwd + cos * strafe) * norm
-      const dz = (-cos * fwd - sin * strafe) * norm
+      // Flying, forward instead follows the full LOOK ray (pitch in): W
+      // while looking up gains height, thirdroom-style; strafe stays
+      // level. cp scales the horizontal share so speed is preserved.
+      const fly = walk && this.flying
+      const cp = fly ? Math.cos(this.pitch) : 1
+      const dx = (-sin * cp * fwd + cos * strafe) * norm
+      const dz = (-cos * cp * fwd - sin * strafe) * norm
       this.feet.x += dx
       this.feet.z += dz
+      if (fly) this.feet.y += Math.sin(this.pitch) * fwd * norm
       // face the motion, head level: this is also the pose walk mode
       // rejoins at, so the handover reads as stepping into the figure
       if (!walk) {
@@ -544,15 +587,24 @@ export class Nav {
       }
     }
 
-    // gravity and floor snap (jumps fire on the Space keydown itself)
-    this.vy = Math.max(TERMINAL, this.vy - GRAVITY * dt)
-    this.feet.y += this.vy * dt
-    const floor = this.floorAt(this.feet.x, this.feet.z, this.feet.y)
-    if (this.feet.y <= floor && this.vy <= 0) {
-      this.feet.y = floor
+    if (this.flying) {
+      // flight: no gravity - altitude comes from looking up or down while
+      // moving; the floor still stops a downward glide
       this.vy = 0
-      this.grounded = true
-    } else this.grounded = false
+      const floor = this.floorAt(this.feet.x, this.feet.z, this.feet.y)
+      if (this.feet.y < floor) this.feet.y = floor
+      this.grounded = this.feet.y <= floor + 1e-3
+    } else {
+      // gravity and floor snap (jumps fire on the Space keydown itself)
+      this.vy = Math.max(TERMINAL, this.vy - GRAVITY * dt)
+      this.feet.y += this.vy * dt
+      const floor = this.floorAt(this.feet.x, this.feet.z, this.feet.y)
+      if (this.feet.y <= floor && this.vy <= 0) {
+        this.feet.y = floor
+        this.vy = 0
+        this.grounded = true
+      } else this.grounded = false
+    }
 
     // smoothed velocity, for the avatar's locomotion clip selection
     if (dt > 0) {
@@ -561,12 +613,7 @@ export class Nav {
     }
     this.prevFeet.copy(this.feet)
 
-    if (walk) {
-      const cam = this.view.camera
-      cam.position.set(this.feet.x, this.feet.y + EYE_HEIGHT, this.feet.z)
-      cam.rotation.order = 'YXZ'
-      cam.rotation.set(this.pitch, this.yaw, 0)
-    }
+    if (walk) this.placeCamera()
   }
 
   private floorAt(x: number, z: number, fromY: number): number {
@@ -631,13 +678,14 @@ export class Nav {
       () => this.toggleMode(),
       'toggle first-person walking (WASD / shift / space) vs orbit view (O)')
     if (mode === 'walk') {
+      const fv = `${this.flying ? 'F: land' : 'F: fly'} · V: shoulder cam`
       hint(this.locked
-        ? 'WASD move · shift run · space jump · 1: spawn · drag box: carry · click: select · esc: cursor'
+        ? `WASD move · shift run · space jump · ${fv} · 1: spawn · drag box: carry · click: select · esc: cursor`
         : this.lockBroken
-          ? 'drag: look around · WASD move · shift run · space jump · 1: spawn'
-          : 'click the world to look around · WASD move · shift run · space jump · 1: spawn')
+          ? `drag: look around · WASD move · shift run · space jump · ${fv} · 1: spawn`
+          : `click the world to look around · WASD move · shift run · space jump · ${fv} · 1: spawn`)
     } else {
-      hint('drag: orbit · WASD: walk the figure · drag box: move · click: select · 1: spawn box · O: walk')
+      hint('drag: orbit · cmd-drag: pan · WASD: walk the figure · drag box: move · click: select · 1: spawn box · O: walk')
     }
   }
 }

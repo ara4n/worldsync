@@ -51,13 +51,20 @@ unlocking move/rotate/scale gizmos - drag an axis to transform along it, or
 the center section for all axes. Edits replicate live through the ordinary
 protocol (grab + pose stream + release; scale lands as one `resize` op).
 Click empty space or press esc to deselect and return to where you were.
+In walk mode, `V` toggles an over-the-shoulder third-person camera
+(same mouselook, your figure in view) and `F` toggles flight,
+thirdroom-style: gravity off, W/S along the full look direction - look
+up and press W to gain height - with A/D still level. Press `F` again
+to land.
 Press `O` (or the HUD toggle) to flip between walk and orbit. The avatar
 stays steerable while in orbit: WASD walks the figure third-person
 (headings relative to the camera - W walks away from it), shift runs,
 space jumps, and switching back to walk rejoins it (the camera snaps to
 the figure's eyes; the figure never teleports to the camera). Two-finger
 pan in orbit is screen-space: up/down and left/right relative to the
-view. Backtick (`` ` ``) toggles the scene inspector.
+view; cmd-drag pans along the ground plane instead (drag down to walk
+the view forward along its heading). Backtick (`` ` ``) toggles the
+scene inspector.
 World scripts can suggest a starting mode with
 `world.navigation('orbit'|'walk')` - the floorless board worlds (dots,
 snake) open in orbit; the toggle can always override.

@@ -384,7 +384,15 @@ for precision manipulation instead of carrying it around. Decisions:
   motion, collider streams along), and orbit -> walk snaps the camera to
   the figure - never the figure to the camera. Orbit two-finger pan is
   screen-space (camera right/up axes; top-down it degrades to the old
-  ground slide). Backtick toggles the scene inspector.
+  ground slide); cmd-drag pans XZ along the ground plane (the old
+  cmd-drag orbit became redundant once plain empty-space drags orbit);
+  the orbit polar range is fully open ({-90,90} elevation - the old
+  ~5..85deg clamp and setOrbitPivot's clamp-widening dance are gone).
+  Backtick toggles the scene inspector.
+- Walk-mode toggles (2026-07-26, thirdroom semantics): V = over-the-
+  shoulder boom (SHOULDER_BACK/RIGHT in nav.ts, floor-clamped), F =
+  flight (gravity off, W/S along the full look ray, A/D level, floor
+  stops a downward glide). Both flags survive orbit round-trips.
 - Selection outline shares the OutlinePass with the inspector and
   world.highlight: last caller wins, fine for a jig.
 - POINTER LOCK (bug Matthew hit in the piano room, fixed 2026-07-26):

@@ -67,19 +67,26 @@ export class View {
     this.controls = new OrbitControls(this.camera, this.renderer.domElement)
     this.controls.target.set(0, 0.5, 0)
     this.controls.enableDamping = true
-    this.controls.maxPolarAngle = Math.PI / 2 - 0.05
-    // Left button is reserved for spawning and dragging boxes, except while
-    // cmd (or ctrl) is held, which turns it into orbit for mac trackpads.
+    // polar range stays fully open ({-90,90} elevation): orbit is the
+    // precision inspection view, so looking from straight above to
+    // straight below must both work (Spherical.makeSafe guards the poles)
+    // Left button is reserved for spawning and dragging boxes; while cmd
+    // (or ctrl) is held it PANS along the ground plane instead - plain
+    // drags on empty space already orbit (nav.orbitBy), so the modifier
+    // supplies the missing translation: drag down walks the view forward
+    // along its heading, XZ only. (The screen-space axis pair lives on
+    // the trackpad two-finger pan.)
     this.controls.mouseButtons = { MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE } as any
-    const setOrbit = (on: boolean) => {
-      // PAN, not ROTATE: OrbitControls swaps rotate<->pan while
+    this.controls.screenSpacePanning = false // OrbitControls' pan = the ground-plane one
+    const setPan = (on: boolean) => {
+      // ROTATE, not PAN: OrbitControls swaps rotate<->pan while
       // ctrl/meta/shift is down, and this binding is only ever active
-      // with cmd/ctrl held, so PAN is what actually orbits here.
-      (this.controls.mouseButtons as any).LEFT = on ? THREE.MOUSE.PAN : undefined
+      // with cmd/ctrl held, so ROTATE is what actually pans here.
+      (this.controls.mouseButtons as any).LEFT = on ? THREE.MOUSE.ROTATE : undefined
     }
-    addEventListener('keydown', e => { if (e.key === 'Meta' || e.key === 'Control') setOrbit(true) })
-    addEventListener('keyup', e => { if (e.key === 'Meta' || e.key === 'Control') setOrbit(false) })
-    addEventListener('blur', () => setOrbit(false))
+    addEventListener('keydown', e => { if (e.key === 'Meta' || e.key === 'Control') setPan(true) })
+    addEventListener('keyup', e => { if (e.key === 'Meta' || e.key === 'Control') setPan(false) })
+    addEventListener('blur', () => setPan(false))
 
     // Wheel is ours, not OrbitControls': a trackpad two-finger drag arrives
     // as plain wheel deltas (pan: the world follows the fingers, in SCREEN

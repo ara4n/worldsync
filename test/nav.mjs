@@ -140,6 +140,44 @@ await a.keyboard.press('Escape')
 await a.waitForFunction(() => !window.__jig.nav.selection, null, { timeout: 2000 })
 console.log('esc deselected')
 
+// -- cmd-drag pans along the ground plane: pure XZ translation, no
+// height change, no rotation (plain drags orbit instead) --
+{
+  const pose = () => a.evaluate(() => ({
+    p: window.__jig.view.camera.position.toArray(),
+    q: window.__jig.view.camera.quaternion.toArray(),
+  }))
+  const p0 = await pose()
+  await a.mouse.move(300, 300)
+  await a.keyboard.down('Meta')
+  await a.mouse.down()
+  await a.mouse.move(300, 380, { steps: 6 })
+  await a.mouse.up()
+  await a.keyboard.up('Meta')
+  await a.waitForTimeout(600) // orbit damping glides the pan to rest
+  const p1 = await pose()
+  const dxz = Math.hypot(p1.p[0] - p0.p[0], p1.p[2] - p0.p[2])
+  const dy = Math.abs(p1.p[1] - p0.p[1])
+  const turned = 1 - Math.abs(p0.q.reduce((s, n, i) => s + n * p1.q[i], 0))
+  console.log(`cmd-drag panned ${dxz.toFixed(2)}m in XZ (dy ${dy.toFixed(3)}m)`)
+  if (dxz < 0.5) fail(`cmd-drag panned only ${dxz.toFixed(2)}m`)
+  if (dy > 0.05) fail(`cmd-drag pan changed the camera height by ${dy.toFixed(3)}m`)
+  if (turned > 0.01) fail('cmd-drag pan rotated the camera')
+}
+
+// -- the polar range is fully open: orbiting can swing below the horizon
+// to look up from underneath (the old clamp stopped ~5deg above level) --
+{
+  const below = await a.evaluate(() => {
+    for (let i = 0; i < 40; i++) window.__jig.nav.orbitBy(0, -12)
+    return window.__jig.view.camera.position.y - window.__jig.view.controls.target.y
+  })
+  console.log(`orbit swung to ${below.toFixed(2)}m below the pivot plane`)
+  if (below > -0.5) fail(`orbit cannot swing below the horizon (dy ${below.toFixed(2)})`)
+  // swing back to a high vantage so the later drag tests see the boxes
+  await a.evaluate(() => { for (let i = 0; i < 30; i++) window.__jig.nav.orbitBy(0, 10) })
+}
+
 // -- stranded-pin regression: fling a box toward the horizon, then drag
 // slowly back; the sim pose must follow the hand home instead of hanging
 // in the distance until release (pin catch-up floor + drag range cap) --
@@ -386,6 +424,38 @@ await b.waitForFunction(() => {
 await b.keyboard.press('Backquote')
 await b.waitForFunction(() => document.querySelector('#inspector').style.display === 'none', null, { timeout: 2000 })
 console.log('backtick toggled the inspector')
+
+// -- V: over-the-shoulder camera - the boom sits ~2.2m behind the eyes
+// with mouselook unchanged; V again returns to first person --
+const eyeDist = () => b.evaluate(() => {
+  const s = window.__jig.nav.avatarState
+  const c = window.__jig.view.camera.position
+  return Math.hypot(c.x - s.pos.x, c.y - (s.pos.y + 1.6), c.z - s.pos.z)
+})
+await b.keyboard.press('KeyV')
+await b.waitForTimeout(120)
+const boom = await eyeDist()
+console.log(`shoulder cam ${boom.toFixed(2)}m from the eyes`)
+if (boom < 1.5 || boom > 3.5) fail(`V boom distance ${boom.toFixed(2)}m, expected ~2.25`)
+await b.keyboard.press('KeyV')
+await b.waitForTimeout(120)
+if (await eyeDist() > 0.05) fail('second V did not return to first person')
+console.log('V toggled the shoulder cam and back')
+
+// -- F: flight - look up, W climbs along the look ray; F again lands --
+await b.keyboard.press('KeyF')
+await b.keyboard.down('ArrowUp') // pitch the gaze well up
+await b.waitForTimeout(700)
+await b.keyboard.up('ArrowUp')
+await b.keyboard.down('KeyW')
+await b.waitForTimeout(500)
+await b.keyboard.up('KeyW')
+const flew = await b.evaluate(() => window.__jig.nav.avatarState.pos.y)
+console.log(`flew to ${flew.toFixed(2)}m`)
+if (flew < 0.5) fail(`flying W while looking up climbed only ${flew.toFixed(2)}m`)
+await b.keyboard.press('KeyF') // land
+await b.waitForFunction(() => window.__jig.nav.avatarState.pos.y < 0.5, null, { timeout: 3000 })
+console.log('F landed the walker')
 
 // -- the sims must still agree after all of it --
 await a.waitForTimeout(1000)
