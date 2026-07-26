@@ -173,6 +173,10 @@ export interface ScriptHost {
    * a first-person walker makes no sense) or 'walk' (explorable worlds).
    * Cleared when the script stops; selection still borrows orbit. */
   setNavMode(mode: string): void
+  /** show or hide peer avatars (on by default; board worlds like dots
+   * turn them off). Hides every figure AND retires this peer's own
+   * avatar collider; restored when the script stops. */
+  setAvatars(on: boolean): void
   /** send a raw MIDI channel message as if a local device played it:
    * echoed into our own world.onmidi and the audio engine, and broadcast
    * on the cosmetic midi plane, so a script-driven note (clicked piano
@@ -515,6 +519,8 @@ const PRELUDE = `
     // pin the navigation mode ('orbit' for board worlds, 'walk' for
     // explorable ones); the user's toggle yields while pinned
     navigation(mode) { H.setNavMode(String(mode)) },
+    // show/hide peer avatars (on by default; dots turns them off)
+    avatars(on) { H.setAvatars(on !== false) },
     createBoxMesh: (p) => ({ __mesh: p }),
     createCollider: (p) => ({ __collider: p }),
     createMaterial: (p) => ({ __material: p }),
@@ -707,6 +713,7 @@ export class WorldScript {
       return ctx.undefined
     })
     fn('setNavMode', (m) => { host.setNavMode(ctx.getString(m)); return ctx.undefined })
+    fn('setAvatars', (v) => { host.setAvatars(ctx.dump(v) === true); return ctx.undefined })
     ctx.setProp(ctx.global, '__host', bridge)
     bridge.dispose()
   }

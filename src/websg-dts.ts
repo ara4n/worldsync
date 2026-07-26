@@ -310,6 +310,11 @@ declare const world: {
    * the script stops. Selecting a box still borrows orbit for precision
    * manipulation. */
   navigation(mode: 'orbit' | 'walk'): void
+  /** show or hide peer avatars (ON by default: every walking peer is an
+   * animated figure, with a collider, for everyone). Board worlds (dots)
+   * pass false: figures hide everywhere and this peer's avatar collider
+   * retires. Restored when the script stops. */
+  avatars(on: boolean): void
 
   createBoxMesh(props?: unknown): unknown
   createCollider(props?: unknown): unknown

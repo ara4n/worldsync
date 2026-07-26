@@ -16,6 +16,9 @@
 // data the dropped clips stranded. Mesh, skin, hierarchy are untouched.
 //
 // Run: node tools/avatar-glb.mjs
+// Escape hatch: node tools/avatar-glb.mjs --xbot skips the merge and
+// silvers the known-working X-bot rig as-is (if the Y-bot merge ever
+// misbehaves, swap the default with this one command).
 import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
@@ -67,7 +70,8 @@ function writeGlb(path, json, bin) {
 const COMP_SIZE = { 5120: 1, 5121: 1, 5122: 2, 5123: 2, 5125: 4, 5126: 4 }
 const TYPE_COMPS = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 }
 
-const base = readGlb(join(TR, 'mixamo-y.glb'))
+const xbot = process.argv.includes('--xbot')
+const base = readGlb(join(TR, xbot ? 'full-animation-rig.glb' : 'mixamo-y.glb'))
 const rig = readGlb(join(TR, 'full-animation-rig.glb'))
 if (!base.json.skins?.length) throw new Error('base avatar has no skin')
 

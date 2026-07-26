@@ -216,6 +216,11 @@ function boot() {
   // our own origin: the vite dev server answers /_matrix/client/versions
   widgetUrl.searchParams.set('baseUrl', location.origin)
   widgetUrl.searchParams.set('mockTransport', '1')
+  // pass through anything else on the mock page's own URL (nav=orbit for
+  // the scripted tests, cad=, norm=...), without clobbering the above
+  for (const [k, v] of qs) {
+    if (!widgetUrl.searchParams.has(k) && k !== 'room') widgetUrl.searchParams.set(k, v)
+  }
 
   // waitForIframeLoad stays at its default (true), matching what Element
   // Web gives widgets added via /addwidget: the handshake starts from the

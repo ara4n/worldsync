@@ -69,7 +69,10 @@ export class Nav {
   /** main wires this: true while a running script claims space + arrows */
   keysClaimedByScript: () => boolean = () => false
 
-  private userMode: NavMode = 'orbit'
+  // walk is the default (thirdroom-style avatars want you IN the world);
+  // ?nav=orbit restores the classic jig view - the scripted-test estate
+  // rides on it, and board-world scripts pin orbit anyway
+  private userMode: NavMode = 'walk'
   private scriptMode: NavMode | null = null
   private applied: NavMode = 'orbit'
   private selected: Selection | null = null
@@ -85,6 +88,39 @@ export class Nav {
   private lastMs = 0
   private rayDown = new THREE.Raycaster()
   private tmpV = new THREE.Vector3()
+  // smoothed walker velocity (m/s), for the avatar's locomotion clips
+  private vel = new THREE.Vector3()
+  private prevFeet = new THREE.Vector3(0, 0, 8)
+  /** true once the user has actually walked (WASD): spawn placement must
+   * not yank a walker who already set off exploring */
+  hasMoved = false
+
+  /** the avatar plane reads these: feet/view state, world space */
+  get avatarState() {
+    return {
+      pos: { x: this.feet.x, y: this.feet.y, z: this.feet.z },
+      yaw: this.yaw, pitch: this.pitch,
+      vel: { x: this.vel.x, y: this.vel.y, z: this.vel.z },
+      grounded: this.grounded,
+    }
+  }
+
+  /** place the walker (spawn slots, scene arrivals): feet at (x,z) on
+   * whatever floor a ray from fromY finds, facing `yawTo` */
+  spawnAt(x: number, z: number, yawTo: number, fromY = 3) {
+    this.feet.set(x, this.floorAt(x, z, fromY), z)
+    this.prevFeet.copy(this.feet)
+    this.vel.set(0, 0, 0)
+    this.vy = 0
+    this.yaw = yawTo
+    this.pitch = 0
+    if (this.applied === 'walk') {
+      const cam = this.view.camera
+      cam.position.set(this.feet.x, this.feet.y + EYE_HEIGHT, this.feet.z)
+      cam.rotation.order = 'YXZ'
+      cam.rotation.set(this.pitch, this.yaw, 0)
+    }
+  }
 
   private hud: HTMLElement
   private crosshair: HTMLElement
@@ -114,7 +150,19 @@ export class Nav {
     addEventListener('blur', () => this.keys.clear())
 
     const params = new URLSearchParams(location.search)
-    if (params.get('nav') === 'walk') this.userMode = 'walk'
+    const nv = params.get('nav')
+    if (nv === 'walk' || nv === 'orbit') this.userMode = nv
+    if (this.userMode === 'walk') {
+      // starting on foot: skip applyMode's adopt-the-camera handover (the
+      // classic orbit position would drop the walker from mid-air) and
+      // stand at the default feet, facing the origin; the avatar spawn
+      // placement (main) repositions once the session knows its slot
+      this.applied = 'walk'
+      this.view.controls.enabled = false
+      this.view.camera.position.set(this.feet.x, this.feet.y + EYE_HEIGHT, this.feet.z)
+      this.view.camera.rotation.order = 'YXZ'
+      this.view.camera.rotation.set(0, 0, 0)
+    }
     this.applyMode()
   }
 
@@ -141,6 +189,7 @@ export class Nav {
   setCameraPose(pos: { x: number; y: number; z: number }, target: { x: number; y: number; z: number }) {
     if (this.effective() !== 'walk') { this.view.setCameraPose(pos, target); return }
     this.feet.set(pos.x, pos.y - EYE_HEIGHT, pos.z)
+    this.prevFeet.copy(this.feet) // a teleport is not motion: no velocity spike
     this.vy = 0
     const d = this.tmpV.set(target.x - pos.x, target.y - pos.y, target.z - pos.z).normalize()
     this.yaw = Math.atan2(-d.x, -d.z)
@@ -405,6 +454,7 @@ export class Nav {
         this.pitch = THREE.MathUtils.clamp(Math.asin(THREE.MathUtils.clamp(d.y, -1, 1)), -PITCH_MAX, PITCH_MAX)
         this.feet.copy(cam.position)
         this.feet.y = Math.max(0, cam.position.y - EYE_HEIGHT)
+        this.prevFeet.copy(this.feet)
         this.vy = 0
       } else {
         if (this.locked) document.exitPointerLock()
@@ -436,6 +486,8 @@ export class Nav {
     }
     if (this.effective() !== 'walk') {
       this.crosshair.style.display = 'none'
+      this.vel.set(0, 0, 0) // out of body: the figure stands still
+      this.prevFeet.copy(this.feet)
       return
     }
     this.crosshair.style.display = this.locked ? 'block' : 'none'
@@ -449,6 +501,7 @@ export class Nav {
     // WASD in the yaw plane; shift runs
     const fwd = (this.keys.has('KeyW') ? 1 : 0) - (this.keys.has('KeyS') ? 1 : 0)
     const strafe = (this.keys.has('KeyD') ? 1 : 0) - (this.keys.has('KeyA') ? 1 : 0)
+    if (fwd || strafe) this.hasMoved = true
     if (fwd || strafe) {
       const speed = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight') ? RUN_SPEED : WALK_SPEED
       const norm = speed * dt / Math.hypot(fwd, strafe)
@@ -469,6 +522,13 @@ export class Nav {
       this.vy = 0
       this.grounded = true
     } else this.grounded = false
+
+    // smoothed velocity, for the avatar's locomotion clip selection
+    if (dt > 0) {
+      this.tmpV.copy(this.feet).sub(this.prevFeet).divideScalar(dt)
+      this.vel.lerp(this.tmpV, Math.min(1, dt * 12))
+    }
+    this.prevFeet.copy(this.feet)
 
     const cam = this.view.camera
     cam.position.set(this.feet.x, this.feet.y + EYE_HEIGHT, this.feet.z)

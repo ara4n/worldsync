@@ -9,6 +9,8 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { OutlinePass } from 'three/addons/postprocessing/OutlinePass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import type { EcsStore } from './ecs'
+import { AVATAR_PREFIX } from './types'
+import { Avatars } from './avatar'
 import { PropLayer } from './props'
 
 const IDENTITY = new THREE.Quaternion()
@@ -36,6 +38,8 @@ export class View {
    * mesh's TRS: frame() must not overwrite them from the sim */
   poseAuthorityEid: number | null = null
   props: PropLayer
+  /** the animated peer figures (cosmetic avatar plane; see avatar.ts) */
+  avatars: Avatars
   private geo = new THREE.BoxGeometry(1, 1, 1)
   private mats = new Map<number, THREE.MeshStandardMaterial>()
   /** cosmetic line entities keyed "author/lineId"; scripts animate them.
@@ -167,6 +171,9 @@ export class View {
     this.props = new PropLayer(m => this.patchMaterial(m))
     this.props.group.name = 'props'
     this.scene.add(this.props.group)
+
+    this.avatars = new Avatars(m => this.patchMaterial(m))
+    this.scene.add(this.avatars.group)
 
     this.scriptRoot.name = 'script-gltf'
     this.scene.add(this.scriptRoot)
@@ -562,6 +569,9 @@ export class View {
   syncBodies(liveNetIds: Iterable<string>) {
     const live = new Set<number>()
     for (const id of liveNetIds) {
+      // avatar collider bodies are invisible: their figure is the avatar
+      // layer's, driven by the cosmetic plane, not a box
+      if (id.startsWith(AVATAR_PREFIX)) continue
       const eid = this.ecs.entityFor(id)
       if (eid === undefined) continue
       live.add(eid)
@@ -638,6 +648,7 @@ export class View {
       }
     }
     this.props.update(now)
+    this.avatars.update(now)
     // walk mode disables the orbit controls and drives the camera itself;
     // update() would snap the camera back onto the orbit sphere
     if (this.controls.enabled) this.controls.update()

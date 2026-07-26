@@ -36,9 +36,25 @@ export interface Quat { x: number; y: number; z: number; w: number }
 // 'resize' reshapes a box's cuboid collider (dims = full extents): folded
 // state like everything else, read back out of the physics world itself
 // (snapshots serialise colliders), so no side table exists to drift.
+// 'avatar' spawns a peer's avatar COLLIDER: a kinematic box (netId
+// 'avatar:<peer>') entered into the grab table with its owner as holder,
+// so the proven pose plane drives its precise position (streamPose ->
+// pinAndStep) with zero new determinism machinery. Everything else about
+// avatars - the rendered figure, animation, head/hand aim - is cosmetic
+// (the 'avatar' DcMessage below) and never touches the timeline. Removal
+// is a plain 'despawn' (the primary emits it when the peer leaves).
 export type InteractionType =
   'spawn' | 'grab' | 'release' | 'boot' | 'scene'
   | 'prop' | 'despawn' | 'claim' | 'unclaim' | 'move' | 'paint' | 'data' | 'resize'
+  | 'avatar'
+
+/** netIds of avatar collider bodies: 'avatar:' + the owning peer's id.
+ * Avatar-ness is derived from the id, so no side table has to cross
+ * snapshots, folds or boot seams. */
+export const AVATAR_PREFIX = 'avatar:'
+export const avatarNetId = (peer: string) => AVATAR_PREFIX + peer
+/** avatar collider extents: a box, roughly the figure (1.8m tall) */
+export const AVATAR_DIMS: Vec3 = { x: 0.6, y: 1.7, z: 0.6 }
 
 /** prop state carried by boot seams (and 'prop' spawns, minus claim) */
 export interface PropInfo {
@@ -120,6 +136,16 @@ export type DcMessage =
   // points removes the line; a departed peer's lines go with it.
   | { kind: 'line'; peer: string; id: string; points: Vec3[]; color: number; opacity: number; width: number
       worldUnits: boolean }
+  // The cosmetic avatar plane: latest-wins presentation state for a
+  // peer's figure - feet position, view yaw/pitch, velocity (drives
+  // locomotion clip selection on every peer), grounded, nav mode (walk
+  // heads track the view; orbit is out-of-body and leaves the figure
+  // alone) and the current selection's world point (the left hand aims
+  // at it). Never folded, never hashed; the avatar's physics footprint
+  // travels separately (the 'avatar' op + the pose plane). A departed
+  // peer's figure goes with it.
+  | { kind: 'avatar'; peer: string; pos: Vec3; yaw: number; pitch: number; vel: Vec3
+      grounded: boolean; mode: 'walk' | 'orbit'; aim?: Vec3 }
   // Ephemeral MIDI event from a peer's connected device (world.onmidi):
   // cosmetic like lines - never folded, never hashed. d is the raw 2-3 byte
   // channel message [status, data1, data2]; every peer's script hears every

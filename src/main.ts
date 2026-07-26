@@ -1,6 +1,6 @@
-import { Raycaster, Vector2, Vector3, type Object3D } from 'three'
+import { Box3, Raycaster, Vector2, Vector3, type Object3D } from 'three'
 import sanitizeHtml from 'sanitize-html'
-import { BOOT_LEAD_TICKS, Sim } from './sim'
+import { BOOT_LEAD_TICKS, Sim, TICK_MS } from './sim'
 import { peerColor } from './color'
 import { cachedScene, cacheScene, configureGlbLoader, parseGlb, parseGltfJson } from './scene'
 import { fetchWorldAsset, mediaUploadLimit, SCRIPT_STATE_TYPES, uploadWorldAsset } from './matrix/world'
@@ -12,7 +12,7 @@ import { View } from './render'
 import { Input, type Emitter } from './input'
 import { Nav } from './nav'
 import { UI } from './ui'
-import { wallNow, type DcMessage } from './types'
+import { AVATAR_DIMS, AVATAR_PREFIX, avatarNetId, wallNow, type DcMessage, type Vec3 } from './types'
 import { widgetParams } from './matrix/params'
 import { initWidgetClient, requestScriptStateCapabilities } from './matrix/widget'
 
@@ -51,6 +51,13 @@ async function main() {
   const view = new View(document.body, sim.ecs)
   view.dimsFor = id => sim.boxDims(id)
   configureGlbLoader(view.renderer)
+  // world.avatars: scripts hide the figures (dots); the collider
+  // lifecycle in avatarSync follows the same flag
+  let avatarsOn = true
+  const setAvatarsOn = (on: boolean) => {
+    avatarsOn = on
+    view.avatars.setEnabled(on)
+  }
   // The world's own sound: plays the active scene's KHR_audio samples
   // from the cosmetic midi plane (see the WebMIDI section below).
   const audio = new AudioEngine()
@@ -235,16 +242,28 @@ async function main() {
         msg.color, msg.opacity, msg.width, msg.worldUnits)
       return
     }
+    if (msg.kind === 'avatar') {
+      view.avatars.apply(msg.peer, {
+        pos: msg.pos, yaw: msg.yaw, pitch: msg.pitch, vel: msg.vel,
+        grounded: msg.grounded, mode: msg.mode, aim: msg.aim ?? null,
+      })
+      return
+    }
     session.receive(from, msg)
   }
-  // A departed peer takes its shared lines with it, and the primary clears
-  // any claims it left behind (its own session can no longer unclaim them).
+  // A departed peer takes its shared lines and its avatar with it, and the
+  // primary clears any claims it left behind (its own session can no
+  // longer unclaim them) and retires its avatar collider.
   const onLeft = (id: string) => {
     session.peerLeft(id)
     view.removeLines(`${id}/`)
+    view.avatars.remove(id)
     if (isRoot()) {
       for (const [pid, p] of sim.props) {
         if (p.claim === id) session.emit('unclaim', pid, { pos: { x: 0, y: 0, z: 0 }, force: true })
+      }
+      if (sim.bodies.has(avatarNetId(id))) {
+        session.emit('despawn', avatarNetId(id), { pos: { x: 0, y: 0, z: 0 } })
       }
     }
   }
@@ -863,6 +882,9 @@ async function main() {
       if (mode === 'walk' || mode === 'orbit') nav.setScriptMode(mode)
       else log(`world.navigation: unknown mode '${mode}' (use 'walk' or 'orbit')`)
     },
+    // world.avatars: board worlds (dots) hide the figures and retire the
+    // colliders; back on (the default) when the script stops
+    setAvatars: on => setAvatarsOn(on),
     // world.sendMidi: the script PERFORMS - its bytes take the exact
     // hardware path (own script + audio engine + broadcast), so a clicked
     // piano key sounds and moves on every peer. Deferred a microtask so
@@ -953,6 +975,7 @@ async function main() {
     restoreSceneNodes() // scene nodes it moved go back where the glb put them
     scriptInteractables.clear()
     nav.setScriptMode(null) // its navigation pin goes with it
+    setAvatarsOn(true) // avatars come back if it hid them
     view.setOutline([]) // its hover/selection glow goes with it
     if (videoWanted) {
       videoWanted = false
@@ -1103,12 +1126,131 @@ async function main() {
     },
     nextNetId: () => session.nextNetId(),
     emit: (type, netId, data) => session.emit(type, netId, data),
-    streamPose: (netId, pos) => session.streamPose(netId, pos),
+    // rot rides along: the gizmo streams it while precision-rotating
+    // (this wrapper used to drop it, leaving streamed rotation dead)
+    streamPose: (netId, pos, rot) => session.streamPose(netId, pos, rot),
   }
   const nav = new Nav(view, out, document.body)
   nav.keysClaimedByScript = () => !!script && scriptKeysOn
   const input = new Input(view, out, nav)
   input.scriptPointer = scriptPointerDelegate
+
+  // --- avatars: the figure rides the cosmetic plane, the collider rides
+  // the timeline (one 'avatar' op) + the pose plane (streamPose pins it
+  // like a held box). Each peer owns exactly its own; scene ops reset
+  // the world and take the body with them, so the spawn self-heals. ---
+  view.avatars.log = log
+  let avatarPlaced = false
+  let avatarSceneFor: string | null = null // scene the placement used
+  let avatarLastOp = 0
+  let avatarLastPose = 0
+  let avatarLastSent = 0
+  let avatarLastKey = ''
+  const avatarStreamed = new Vector3(NaN, NaN, NaN)
+  const aimPoint = (): Vec3 | undefined => {
+    const sel = nav.selection
+    if (!sel) return undefined
+    const p = (sel.kind === 'box' ? sel.mesh : sel.obj).getWorldPosition(new Vector3())
+    return { x: p.x, y: p.y, z: p.z }
+  }
+  // Spawn slots: an arc around the world's centre of interest - the
+  // scene's bounding-box centre when there is one, the origin otherwise -
+  // shoulder-to-shoulder by join rank (0, +1, -1, +2, -2 ... slots ~1.4m
+  // apart), everyone facing the centre. Similar but non-overlapping.
+  const spawnSlot = () => {
+    const target = new Vector3(0, 0.5, 0)
+    let radius = 8
+    const cached = sim.sceneUrl ? cachedScene(sim.sceneUrl) : null
+    if (cached) {
+      const box = new Box3().setFromObject(cached.object)
+      if (!box.isEmpty()) {
+        box.getCenter(target)
+        radius = Math.min(18, Math.max(3.5,
+          Math.hypot(box.max.x - box.min.x, box.max.z - box.min.z) / 2 + 2.5))
+      }
+    }
+    let rank = 0
+    for (const p of session.peers.values()) if (p.order < session.order) rank++
+    const offset = Math.ceil(rank / 2) * (rank % 2 === 1 ? 1 : -1)
+    const a = offset * (1.4 / radius)
+    return {
+      x: target.x + Math.sin(a) * radius, z: target.z + Math.cos(a) * radius,
+      yaw: a, fromY: target.y + 4,
+    }
+  }
+  const avatarSync = (now: number) => {
+    if (!session.ready()) return
+    view.avatars.localId = session.id
+    const myId = avatarNetId(session.id)
+    // placement: provisional immediately, refined once a pending scene
+    // arrives - unless the user already set off on foot
+    const url = sim.sceneUrl
+    const sceneNow = url && cachedScene(url) ? url : null
+    if (!avatarPlaced || sceneNow !== avatarSceneFor) {
+      if (!avatarPlaced || !nav.hasMoved) {
+        const s = spawnSlot()
+        nav.spawnAt(s.x, s.z, s.yaw, s.fromY)
+      }
+      avatarPlaced = true
+      avatarSceneFor = sceneNow
+    }
+    const st = nav.avatarState
+    const center = { x: st.pos.x, y: st.pos.y + AVATAR_DIMS.y / 2, z: st.pos.z }
+    // collider lifecycle follows world.avatars (self-healing re-spawn:
+    // a scene op deterministically resets the world, body included)
+    const have = sim.bodies.has(myId)
+    if (now - avatarLastOp > 500) {
+      if (avatarsOn && !have) {
+        avatarLastOp = now
+        session.emit('avatar', myId, { pos: center, dims: AVATAR_DIMS, color: peerColor(session.id) })
+        avatarStreamed.set(center.x, center.y, center.z)
+      } else if (!avatarsOn && have) {
+        avatarLastOp = now
+        session.emit('despawn', myId, { pos: { x: 0, y: 0, z: 0 } })
+      } else if (isRoot()) {
+        // ghost sweep: an avatar body whose peer is gone and whose
+        // despawn nobody sent (the previous primary died with it)
+        for (const netId of sim.bodies.keys()) {
+          if (!netId.startsWith(AVATAR_PREFIX)) continue
+          const peer = netId.slice(AVATAR_PREFIX.length)
+          if (peer !== session.id && !session.peers.has(peer)) {
+            avatarLastOp = now
+            session.emit('despawn', netId, { pos: { x: 0, y: 0, z: 0 } })
+            break
+          }
+        }
+      }
+    }
+    const mode: 'walk' | 'orbit' = nav.effective() === 'walk' ? 'walk' : 'orbit'
+    // the collider follows the pose plane while on foot; out of body the
+    // pin simply holds the last streamed target
+    if (avatarsOn && have && mode === 'walk' && now - avatarLastPose >= TICK_MS
+      && avatarStreamed.distanceToSquared(new Vector3(center.x, center.y, center.z)) > 1e-6) {
+      avatarLastPose = now
+      avatarStreamed.set(center.x, center.y, center.z)
+      session.streamPose(myId, center)
+    }
+    // the figure: ours updates locally every frame (orbit shows it);
+    // peers get the latest-wins broadcast at tick rate on change, with a
+    // 1s keepalive so late joiners fill in without asking
+    const pose = {
+      pos: st.pos, yaw: st.yaw, pitch: st.pitch, vel: st.vel,
+      grounded: st.grounded, mode, aim: aimPoint(),
+    }
+    view.avatars.apply(session.id, { ...pose, aim: pose.aim ?? null })
+    view.avatars.firstPerson = mode === 'walk'
+    if (now - avatarLastSent >= TICK_MS) {
+      const key = JSON.stringify(pose)
+      if (key !== avatarLastKey || now - avatarLastSent > 1000) {
+        avatarLastKey = key
+        avatarLastSent = now
+        net.broadcast({
+          kind: 'avatar', peer: session.id, pos: pose.pos, yaw: pose.yaw, pitch: pose.pitch,
+          vel: pose.vel, grounded: pose.grounded, mode, ...(pose.aim ? { aim: pose.aim } : {}),
+        })
+      }
+    }
+  }
 
   // Voice, muted by default: the mic is never captured or published until
   // the first unmute (M toggles it), so joining a world never prompts for
@@ -1229,6 +1371,7 @@ async function main() {
     syncScript()
     syncPersist(now)
     nav.update(now)  // walk-mode camera first...
+    avatarSync(now)  // ...then the avatar reads the fresh walker state...
     input.tick(now)  // ...then carried boxes retarget off the fresh view ray
     const alpha = session.calibrated
       ? Math.min(Math.max(session.tickTimeNow(now) - sim.tick, 0), 1)
@@ -1265,6 +1408,7 @@ async function main() {
     syncScene() // scene fetches must not stall while the tab is hidden
     syncScript() // nor the script, if the hidden tab is the root
     syncPersist(wallNow()) // nor checkpoints, ditto
+    avatarSync(wallNow()) // nor the collider self-heal / ghost sweep
   }
 
   // Hooks for automated smoke tests and console poking.
@@ -1309,6 +1453,8 @@ async function main() {
     // audio engine, and broadcast to peers exactly like the real thing
     midi: (status: number, d1?: number, d2?: number) => onMidiBytes([status, d1 ?? 0, d2 ?? 0]),
     audio: () => audio.stats(),
+    // avatar layer state: per-peer dominant clip, presented feet, visibility
+    avatars: () => view.avatars.debug(),
   }
 }
 

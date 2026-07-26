@@ -1,5 +1,5 @@
 import RAPIER from '@dimforge/rapier3d-deterministic-compat'
-import { type BootEntity, type Interaction, type PropInfo, type Quat, type Vec3 } from './types'
+import { AVATAR_PREFIX, type BootEntity, type Interaction, type PropInfo, type Quat, type Vec3 } from './types'
 import { createEcsStore } from './ecs'
 
 export const TICK_HZ = 60
@@ -419,7 +419,15 @@ export class Sim {
   }
 
   holdsAny(peer: string): boolean {
-    for (const g of this.grabs.values()) if (g.holder === peer) return true
+    for (const [netId, g] of this.grabs) {
+      // avatar pins are permanent: without this skip, every beat from
+      // every peer would heal-fold an idle room forever. A sample-less
+      // window pins to the persisted g.target on every peer identically,
+      // so nothing needs healing; windows the avatar actually moved in
+      // are caught by posesFrom like any drag.
+      if (netId.startsWith(AVATAR_PREFIX)) continue
+      if (g.holder === peer) return true
+    }
     return false
   }
 
@@ -909,6 +917,25 @@ export class Sim {
         this.ecs.ensureEntity(i.netId, i.color ?? 0xffffff)
         return
       }
+      case 'avatar': {
+        // A peer's avatar collider: a kinematic box owned (held) by its
+        // peer from birth, so the pose plane drives it exactly like a
+        // grabbed box - streamed positions pin it via pinAndStep, folds
+        // and boot seams carry it in the grab table, 'despawn' removes
+        // it. netId must be 'avatar:<peer>' (avatar-ness is derived from
+        // the id everywhere: rendering skips the box mesh, persistence
+        // skips the body, holdsAny skips the permanent grab).
+        if (ctx.bodies.has(i.netId) || !i.netId.startsWith(AVATAR_PREFIX)) return
+        const body = ctx.world.createRigidBody(
+          RAPIER.RigidBodyDesc.kinematicPositionBased().setCanSleep(false)
+            .setTranslation(i.pos.x, i.pos.y, i.pos.z)
+            .setRotation(i.rot ?? { x: 0, y: 0, z: 0, w: 1 }))
+        ctx.world.createCollider(boxCollider(i.dims), body)
+        ctx.bodies.set(i.netId, body.handle)
+        ctx.grabs.set(i.netId, { holder: i.peer, order: i.order, target: { ...i.pos }, since: tick })
+        this.ecs.ensureEntity(i.netId, i.color ?? 0xffffff)
+        return
+      }
       case 'grab': {
         const b = bodyOf(ctx, i.netId)
         if (!b) return
@@ -1156,6 +1183,11 @@ export class Sim {
     const out: BootEntity[] = []
     const world = RAPIER.World.restoreSnapshot(rec.snap)
     for (const [netId, h] of rec.bodies) {
+      // persistence checkpoints (grabs=false) outlive every session, and
+      // avatar bodies die with their peers: keep them out. Boot seams
+      // (grabs=true) carry them whole - the grab table entry makes the
+      // generic boot path recreate them kinematic, dims and all.
+      if (!grabs && netId.startsWith(AVATAR_PREFIX)) continue
       const b = world.getRigidBody(h)
       const eid = this.ecs.entityFor(netId)
       if (!b || eid === undefined) continue
