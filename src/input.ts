@@ -76,6 +76,9 @@ export class Input {
   /** installed by main once a world script with pointer handlers is running */
   scriptPointer: ScriptPointer | null = null
   private captured = false
+  /** last cursor position of a script-captured gesture, so walk mode can
+   * keep steering the view during it (see onMove) */
+  private capturedLast: { x: number; y: number } | null = null
   private drag: Drag | null = null
   private pending: Pending | null = null
   /** pointer-lock-less walk (nav.lockBroken): dragging empty space turns
@@ -124,7 +127,11 @@ export class Input {
       return
     }
     // the world script gets first refusal (it consumes when a prop is hit)
-    if (this.scriptPointer?.down(e)) { this.captured = true; return }
+    if (this.scriptPointer?.down(e)) {
+      this.captured = true
+      this.capturedLast = { x: e.clientX, y: e.clientY }
+      return
+    }
     const hit = this.pickBox(e)
     const mesh = hit ? hit.object as THREE.Mesh : null
     this.pending = {
@@ -174,7 +181,22 @@ export class Input {
   }
 
   private onMove(e: PointerEvent) {
-    if (this.captured) { this.scriptPointer?.move(e); return }
+    if (this.captured) {
+      // a script-captured gesture (piano key held) must not freeze the
+      // walker's view: keep steering - mouselook when locked, drag-look
+      // otherwise - while the script still gets its moves (sweeping the
+      // crosshair across keys is how glissando works here). Orbit mode
+      // stays hands-off: dots-style chain drags need a still camera.
+      if (this.nav.effective() === 'walk') {
+        if (this.nav.locked) this.nav.look(e.movementX, e.movementY)
+        else if (this.capturedLast) {
+          this.nav.look(this.capturedLast.x - e.clientX, this.capturedLast.y - e.clientY)
+          this.capturedLast = { x: e.clientX, y: e.clientY }
+        }
+      }
+      this.scriptPointer?.move(e)
+      return
+    }
     // pointer-lock mouselook, drag or not: carrying steers by looking
     if (this.nav.locked) this.nav.look(e.movementX, e.movementY)
     if (this.lookDrag) {
@@ -255,6 +277,7 @@ export class Input {
   private onUp(e: PointerEvent) {
     if (this.captured) {
       this.captured = false
+      this.capturedLast = null
       this.scriptPointer?.up(e)
       return
     }

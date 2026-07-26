@@ -171,6 +171,36 @@ await waitUp(b.frame, 86, 'b glissando key up')
 const spawned = await a.frame.evaluate(() => window.__jig.sim.bodies.size)
 if (spawned !== 0) fail(`click was not captured: ${spawned} box(es) spawned`)
 
+// walk mode without pointer lock (Element Web's iframe): dragging from a
+// key must still steer the view (drag-look) while the note plays - a
+// captured gesture must not freeze the walker's camera
+console.log('walk-mode drag from a key...')
+await a.frame.evaluate(() => {
+  window.__jig.nav.setUserMode('walk')
+  window.__jig.nav.lockBroken = true
+})
+await a.frame.waitForFunction(() => Math.abs(window.__jig.view.camera.position.y - 1.6) < 0.1, null, { timeout: 4000 })
+const sw = await a.frame.evaluate(() => {
+  const key = window.__jig.view.scene.getObjectByName('key_84')
+  const p = key.getWorldPosition(key.position.clone())
+  return window.__jig.screenOfWorld(p.x, 0.745, 0.3)
+})
+const yaw0 = await a.frame.evaluate(() => window.__jig.view.camera.rotation.y)
+await a.page.mouse.move(off.x + sw.x, off.y + sw.y)
+await a.page.mouse.down()
+await waitDown(a.frame, 84, 'a walk-mode key down')
+await a.page.mouse.move(off.x + sw.x + 250, off.y + sw.y, { steps: 8 })
+await a.page.mouse.up()
+const yaw1 = await a.frame.evaluate(() => window.__jig.view.camera.rotation.y)
+if (Math.abs(yaw1 - yaw0) < 0.2) {
+  fail(`captured drag froze the walker's view (turned ${(yaw1 - yaw0).toFixed(2)}rad)`)
+}
+console.log(`walk-mode drag from a key turned the view ${(yaw1 - yaw0).toFixed(2)}rad`)
+await a.frame.evaluate(() => {
+  window.__jig.nav.lockBroken = false
+  window.__jig.nav.setUserMode('orbit')
+})
+
 // nothing folds in this world: no props, no script-seeded colliders
 const props = await a.frame.evaluate(() => window.__jig.sim.props.size)
 if (props !== 0) fail(`expected no folded props, found ${props}`)
