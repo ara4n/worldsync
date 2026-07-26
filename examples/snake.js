@@ -80,7 +80,7 @@ let border = null
 
 world.onload = () => {
   world.env({ background: 0x151b24, ground: false })
-  world.navigation('orbit') // a board world: pin orbit so walkers never fall into the void
+  world.navigation('orbit') // floorless: default out-of-body (the toggle still allows walking)
   world.camera({ x: 0, y: 15.5, z: 8.5 }, { x: 0, y: 0, z: 0 })
 }
 

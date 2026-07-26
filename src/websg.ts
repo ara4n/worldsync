@@ -169,9 +169,9 @@ export interface ScriptHost {
   removeLabel(id: string): void
   setEnv(json: string): void
   setCamera(x: number, y: number, z: number, tx: number, ty: number, tz: number): void
-  /** pin the navigation mode: 'orbit' (board worlds - dots, chess - where
-   * a first-person walker makes no sense) or 'walk' (explorable worlds).
-   * Cleared when the script stops; selection still borrows orbit. */
+  /** suggest a navigation mode: 'orbit' (floorless board worlds - dots,
+   * snake) or 'walk' (explorable worlds). A one-shot default the user's
+   * toggle can override; selection still borrows orbit. */
   setNavMode(mode: string): void
   /** show or hide peer avatars (on by default; board worlds like dots
    * turn them off). Hides every figure AND retires this peer's own
@@ -516,8 +516,8 @@ const PRELUDE = `
       const p = vec(pos), t = vec(target)
       H.setCamera(p.x, p.y, p.z, t.x, t.y, t.z)
     },
-    // pin the navigation mode ('orbit' for board worlds, 'walk' for
-    // explorable ones); the user's toggle yields while pinned
+    // suggest a navigation mode ('orbit' for floorless board worlds,
+    // 'walk' for explorable ones); a default the user's toggle overrides
     navigation(mode) { H.setNavMode(String(mode)) },
     // show/hide peer avatars (on by default; dots turns them off)
     avatars(on) { H.setAvatars(on !== false) },

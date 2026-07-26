@@ -18,10 +18,17 @@ import type { Emitter } from './input'
  * for rotate) + release; scale lands as one 'resize' op on drag end.
  * Esc or an empty click deselects, returning to the previous mode.
  *
- * A world script can force a mode with world.navigation('orbit'|'walk') -
- * top-down board worlds (dots, chess...) pin orbit so the walker never
- * falls into their void. Selection still overrides to orbit; the HUD
- * toggle yields while a script holds the mode.
+ * A world script can suggest a mode with world.navigation('orbit'|'walk')
+ * - a one-shot default, not a pin: it switches the mode when set (floorless
+ * board worlds - dots, snake - open out-of-body), and the HUD toggle can
+ * override it afterwards. Selection still overrides to orbit.
+ *
+ * The avatar is steerable in EVERY mode: walk is first-person, and in
+ * orbit WASD walks the figure third-person style - headings are relative
+ * to the orbit camera (W walks away from it) and the figure turns to face
+ * its motion. Switching orbit -> walk therefore rejoins the figure (the
+ * camera snaps to its eyes); the figure never teleports to wherever the
+ * orbit view drifted.
  *
  * The avatar is pure camera - local cosmetics, never sim state: walking
  * feeds nothing into the timeline, so determinism is untouched. Floor
@@ -71,8 +78,11 @@ export class Nav {
 
   // walk is the default (thirdroom-style avatars want you IN the world);
   // ?nav=orbit restores the classic jig view - the scripted-test estate
-  // rides on it, and board-world scripts pin orbit anyway
+  // rides on it, and floorless board-world scripts default to orbit anyway
   private userMode: NavMode = 'walk'
+  // what the script last passed to world.navigation: a dedupe memory only
+  // (the call applies its mode once as a default; effective() never
+  // consults this, so the user's toggle wins afterwards)
   private scriptMode: NavMode | null = null
   private applied: NavMode = 'orbit'
   private selected: Selection | null = null
@@ -152,23 +162,15 @@ export class Nav {
     const params = new URLSearchParams(location.search)
     const nv = params.get('nav')
     if (nv === 'walk' || nv === 'orbit') this.userMode = nv
-    if (this.userMode === 'walk') {
-      // starting on foot: skip applyMode's adopt-the-camera handover (the
-      // classic orbit position would drop the walker from mid-air) and
-      // stand at the default feet, facing the origin; the avatar spawn
-      // placement (main) repositions once the session knows its slot
-      this.applied = 'walk'
-      this.view.controls.enabled = false
-      this.view.camera.position.set(this.feet.x, this.feet.y + EYE_HEIGHT, this.feet.z)
-      this.view.camera.rotation.order = 'YXZ'
-      this.view.camera.rotation.set(0, 0, 0)
-    }
+    // starting on foot, applyMode stands the camera at the default feet,
+    // facing the origin; the avatar spawn placement (main) repositions
+    // once the session knows its slot
     this.applyMode()
   }
 
   effective(): NavMode {
     if (this.selected) return 'orbit'
-    return this.scriptMode ?? this.userMode
+    return this.userMode
   }
 
   setUserMode(m: NavMode) {
@@ -176,12 +178,20 @@ export class Nav {
     this.applyMode()
   }
 
-  /** world.navigation: a script pins the mode; null (script stopped)
-   * hands it back to the user's toggle */
+  /** the O key and the HUD button: flip walk <-> orbit; entering walk
+   * wants the triggering user gesture so mouselock can engage right away */
+  toggleMode() {
+    this.setUserMode(this.userMode === 'walk' ? 'orbit' : 'walk')
+    if (this.effective() === 'walk') this.requestLock()
+  }
+
+  /** world.navigation: the script suggests a default - applied once per
+   * distinct value, and the user's toggle can override it afterwards;
+   * null (script stopped) just clears the memory, the mode stands */
   setScriptMode(m: NavMode | null) {
     if (m === this.scriptMode) return
     this.scriptMode = m
-    this.applyMode()
+    if (m) this.setUserMode(m)
   }
 
   /** world.camera while walking: adopt the pose as the avatar's (eye at
@@ -420,7 +430,12 @@ export class Nav {
       return
     }
     if (e.metaKey || e.ctrlKey || e.altKey) return
-    if (this.effective() !== 'walk') return
+    // O toggles walk <-> orbit (the HUD button's keyboard twin); a held
+    // selection owns the mode, so the toggle waits for deselect
+    if (e.code === 'KeyO' && !e.repeat && !this.selected) {
+      this.toggleMode()
+      return
+    }
     // shift is a modifier, not a movement key: track it here or the
     // held-keys set never learns about it and running never engages
     if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
@@ -430,7 +445,12 @@ export class Nav {
     const scriptOwned = this.keysClaimedByScript()
       && ['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)
     if (scriptOwned) return
-    if (['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)) {
+    // the figure is steerable in every mode; the arrows stay look keys in
+    // walk only (orbit leaves them to game scripts and the browser)
+    const codes = this.effective() === 'walk'
+      ? ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight']
+      : ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'Space']
+    if (codes.includes(e.code)) {
       e.preventDefault()
       this.keys.add(e.code)
       // jump on the press itself: a quick tap can come and go entirely
@@ -447,15 +467,12 @@ export class Nav {
       const cam = this.view.camera
       if (mode === 'walk') {
         this.view.controls.enabled = false
-        // adopt the current camera as the avatar: eyes where the view was,
-        // facing the same way; gravity then finds the floor
-        const d = cam.getWorldDirection(this.tmpV)
-        this.yaw = Math.atan2(-d.x, -d.z)
-        this.pitch = THREE.MathUtils.clamp(Math.asin(THREE.MathUtils.clamp(d.y, -1, 1)), -PITCH_MAX, PITCH_MAX)
-        this.feet.copy(cam.position)
-        this.feet.y = Math.max(0, cam.position.y - EYE_HEIGHT)
-        this.prevFeet.copy(this.feet)
-        this.vy = 0
+        // the camera rejoins the avatar: eyes in the figure's head, facing
+        // its way (Matthew: the figure stays put however far the orbit
+        // view roamed; it must never teleport under the camera)
+        cam.position.set(this.feet.x, this.feet.y + EYE_HEIGHT, this.feet.z)
+        cam.rotation.order = 'YXZ'
+        cam.rotation.set(this.pitch, this.yaw, 0)
       } else {
         if (this.locked) document.exitPointerLock()
         this.view.controls.enabled = true
@@ -469,7 +486,8 @@ export class Nav {
     this.renderHud()
   }
 
-  /** per-frame: walk physics, selection liveness, crosshair */
+  /** per-frame: avatar physics (every mode - orbit steers the figure
+   * third-person), selection liveness, crosshair */
   update(nowMs: number) {
     const dt = Math.min((nowMs - this.lastMs) / 1000, 0.1)
     this.lastMs = nowMs
@@ -484,33 +502,46 @@ export class Nav {
         if (p !== this.view.scene) this.deselect()
       }
     }
-    if (this.effective() !== 'walk') {
-      this.crosshair.style.display = 'none'
-      this.vel.set(0, 0, 0) // out of body: the figure stands still
-      this.prevFeet.copy(this.feet)
-      return
+    const walk = this.effective() === 'walk'
+    this.crosshair.style.display = walk && this.locked ? 'block' : 'none'
+
+    // cursor-key look (the pointer-free path); walk only - orbit leaves
+    // the arrows to game scripts
+    if (walk) {
+      if (this.keys.has('ArrowLeft')) this.yaw += KEY_LOOK_SPEED * dt
+      if (this.keys.has('ArrowRight')) this.yaw -= KEY_LOOK_SPEED * dt
+      if (this.keys.has('ArrowUp')) this.pitch = Math.min(PITCH_MAX, this.pitch + KEY_LOOK_SPEED * dt)
+      if (this.keys.has('ArrowDown')) this.pitch = Math.max(-PITCH_MAX, this.pitch - KEY_LOOK_SPEED * dt)
     }
-    this.crosshair.style.display = this.locked ? 'block' : 'none'
 
-    // cursor-key look (the pointer-free path)
-    if (this.keys.has('ArrowLeft')) this.yaw += KEY_LOOK_SPEED * dt
-    if (this.keys.has('ArrowRight')) this.yaw -= KEY_LOOK_SPEED * dt
-    if (this.keys.has('ArrowUp')) this.pitch = Math.min(PITCH_MAX, this.pitch + KEY_LOOK_SPEED * dt)
-    if (this.keys.has('ArrowDown')) this.pitch = Math.max(-PITCH_MAX, this.pitch - KEY_LOOK_SPEED * dt)
-
-    // WASD in the yaw plane; shift runs
+    // WASD; shift runs. Walking first-person steers by the view's yaw;
+    // out-of-body the ORBIT CAMERA's heading steers (third-person: W walks
+    // away from the camera) and the figure turns to face its motion.
     const fwd = (this.keys.has('KeyW') ? 1 : 0) - (this.keys.has('KeyS') ? 1 : 0)
     const strafe = (this.keys.has('KeyD') ? 1 : 0) - (this.keys.has('KeyA') ? 1 : 0)
-    if (fwd || strafe) this.hasMoved = true
     if (fwd || strafe) {
+      this.hasMoved = true
+      let yaw = this.yaw
+      if (!walk) {
+        const d = this.view.camera.getWorldDirection(this.tmpV)
+        yaw = Math.atan2(-d.x, -d.z)
+      }
       const speed = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight') ? RUN_SPEED : WALK_SPEED
       const norm = speed * dt / Math.hypot(fwd, strafe)
-      const sin = Math.sin(this.yaw), cos = Math.cos(this.yaw)
+      const sin = Math.sin(yaw), cos = Math.cos(yaw)
       // rotateY(yaw): forward (0,0,-1) -> (-sin, 0, -cos); right (1,0,0)
       // -> (cos, 0, -sin). The right vector's z is NEGATIVE sin: a +sin
       // here once mirrored strafing over half the compass.
-      this.feet.x += (-sin * fwd + cos * strafe) * norm
-      this.feet.z += (-cos * fwd - sin * strafe) * norm
+      const dx = (-sin * fwd + cos * strafe) * norm
+      const dz = (-cos * fwd - sin * strafe) * norm
+      this.feet.x += dx
+      this.feet.z += dz
+      // face the motion, head level: this is also the pose walk mode
+      // rejoins at, so the handover reads as stepping into the figure
+      if (!walk) {
+        this.yaw = Math.atan2(-dx, -dz)
+        this.pitch = 0
+      }
     }
 
     // gravity and floor snap (jumps fire on the Space keydown itself)
@@ -530,10 +561,12 @@ export class Nav {
     }
     this.prevFeet.copy(this.feet)
 
-    const cam = this.view.camera
-    cam.position.set(this.feet.x, this.feet.y + EYE_HEIGHT, this.feet.z)
-    cam.rotation.order = 'YXZ'
-    cam.rotation.set(this.pitch, this.yaw, 0)
+    if (walk) {
+      const cam = this.view.camera
+      cam.position.set(this.feet.x, this.feet.y + EYE_HEIGHT, this.feet.z)
+      cam.rotation.order = 'YXZ'
+      cam.rotation.set(this.pitch, this.yaw, 0)
+    }
   }
 
   private floorAt(x: number, z: number, fromY: number): number {
@@ -591,17 +624,12 @@ export class Nav {
           : 'drag: orbit · click empty / esc: deselect'))
       return
     }
-    const forced = this.scriptMode !== null
     const mode = this.effective()
     btn(mode === 'walk' ? 'walk' : 'orbit', mode === 'walk',
-      () => {
-        this.setUserMode(this.userMode === 'walk' ? 'orbit' : 'walk')
-        // the button click is a user gesture: enter mouselook right away
-        if (this.effective() === 'walk') this.requestLock()
-      },
-      forced ? 'the world script pins the navigation mode'
-        : 'toggle first-person walking (WASD / shift / space) vs orbit view')
-    if (forced) (h.lastChild as HTMLButtonElement).disabled = true
+      // the button click is a user gesture: toggleMode enters mouselook
+      // right away when it lands on walk
+      () => this.toggleMode(),
+      'toggle first-person walking (WASD / shift / space) vs orbit view (O)')
     if (mode === 'walk') {
       hint(this.locked
         ? 'WASD move · shift run · space jump · 1: spawn · drag box: carry · click: select · esc: cursor'
@@ -609,7 +637,7 @@ export class Nav {
           ? 'drag: look around · WASD move · shift run · space jump · 1: spawn'
           : 'click the world to look around · WASD move · shift run · space jump · 1: spawn')
     } else {
-      hint('drag: orbit · drag box: move · click: select · 1: spawn box')
+      hint('drag: orbit · WASD: walk the figure · drag box: move · click: select · 1: spawn box · O: walk')
     }
   }
 }

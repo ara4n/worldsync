@@ -61,7 +61,7 @@ export class UI {
         <button id="script">load world script (.js)</button>
         <input id="scriptfile" type="file" accept=".js,text/javascript" style="display:none">
         <button id="editscript">edit world script</button>
-        <button id="inspect">inspect scene</button>
+        <button id="inspect" title="toggle the scene tree inspector (\`)">inspect scene</button>
         <label><input id="persist" type="checkbox"> persist world</label>
       </div>
       <div id="status"></div>

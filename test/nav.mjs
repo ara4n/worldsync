@@ -331,6 +331,62 @@ await b.evaluate(() => window.__jig.nav.setUserMode('orbit'))
 await b.waitForFunction(() => window.__jig.view.controls.enabled, null, { timeout: 2000 })
 console.log('back to orbit')
 
+// -- two-finger pan is screen-space: with a near-level gaze, a vertical
+// wheel delta must move the camera vertically (the old ground-plane
+// slide kept y frozen and dollied instead) --
+{
+  const bvp = b.viewportSize()
+  await b.mouse.move(bvp.width / 2, bvp.height / 2)
+  const y0 = await b.evaluate(() => window.__jig.view.camera.position.y)
+  await b.mouse.wheel(0, 300)
+  await b.waitForTimeout(200)
+  const y1 = await b.evaluate(() => window.__jig.view.camera.position.y)
+  console.log(`wheel pan moved camera.y by ${(y1 - y0).toFixed(2)}m`)
+  if (Math.abs(y1 - y0) < 0.15) fail(`wheel pan is not screen-space (dy ${(y1 - y0).toFixed(3)}m)`)
+  await b.waitForTimeout(400) // let orbit damping settle before the next check
+}
+
+// -- orbit mode: WASD steers the figure (camera-relative heading) while
+// the camera itself stays put --
+const oc0 = await camPose()
+const av0 = await b.evaluate(() => ({ ...window.__jig.nav.avatarState.pos }))
+await b.keyboard.down('KeyW')
+await b.waitForTimeout(500)
+await b.keyboard.up('KeyW')
+const oc1 = await camPose()
+const av1 = await b.evaluate(() => ({ ...window.__jig.nav.avatarState.pos }))
+const drove = Math.hypot(av1.x - av0.x, av1.z - av0.z)
+console.log(`orbit WASD drove the figure ${drove.toFixed(2)}m`)
+if (drove < 1) fail(`orbit WASD drove the figure ${drove.toFixed(2)}m, expected ~2`)
+if (poseDelta(oc0, oc1) > 0.02) fail('orbit WASD moved the camera')
+
+// -- orbit -> walk rejoins the figure: the camera snaps to its eyes; the
+// figure must never teleport to wherever the orbit view drifted --
+await b.evaluate(() => window.__jig.nav.setUserMode('walk'))
+await b.waitForTimeout(100)
+const av2 = await b.evaluate(() => ({ ...window.__jig.nav.avatarState.pos }))
+const cam2 = await b.evaluate(() => window.__jig.view.camera.position.toArray())
+if (Math.hypot(av2.x - av1.x, av2.z - av1.z) > 0.05) fail('entering walk teleported the figure')
+if (Math.hypot(cam2[0] - av2.x, cam2[1] - (av2.y + 1.6), cam2[2] - av2.z) > 0.05) {
+  fail(`entering walk left the camera away from the figure (cam ${cam2.map(n => n.toFixed(1))}, figure ${JSON.stringify(av2)})`)
+}
+console.log('walk entry rejoined the figure')
+
+// -- O toggles the mode; backtick toggles the scene inspector --
+await b.keyboard.press('KeyO')
+await b.waitForFunction(() => window.__jig.view.controls.enabled, null, { timeout: 2000 })
+await b.keyboard.press('KeyO')
+await b.waitForFunction(() => !window.__jig.view.controls.enabled, null, { timeout: 2000 })
+console.log('O toggled orbit and back')
+await b.keyboard.press('Backquote')
+await b.waitForFunction(() => {
+  const el = document.querySelector('#inspector')
+  return !!el && el.style.display !== 'none'
+}, null, { timeout: 5000 })
+await b.keyboard.press('Backquote')
+await b.waitForFunction(() => document.querySelector('#inspector').style.display === 'none', null, { timeout: 2000 })
+console.log('backtick toggled the inspector')
+
 // -- the sims must still agree after all of it --
 await a.waitForTimeout(1000)
 // avatar ops excluded: a's own spawn predates b's join (b gets it as a

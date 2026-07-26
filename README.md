@@ -51,8 +51,16 @@ unlocking move/rotate/scale gizmos - drag an axis to transform along it, or
 the center section for all axes. Edits replicate live through the ordinary
 protocol (grab + pose stream + release; scale lands as one `resize` op).
 Click empty space or press esc to deselect and return to where you were.
-World scripts can pin the mode with `world.navigation('orbit'|'walk')` -
-the board worlds (dots, chess, tetrix...) pin orbit.
+Press `O` (or the HUD toggle) to flip between walk and orbit. The avatar
+stays steerable while in orbit: WASD walks the figure third-person
+(headings relative to the camera - W walks away from it), shift runs,
+space jumps, and switching back to walk rejoins it (the camera snaps to
+the figure's eyes; the figure never teleports to the camera). Two-finger
+pan in orbit is screen-space: up/down and left/right relative to the
+view. Backtick (`` ` ``) toggles the scene inspector.
+World scripts can suggest a starting mode with
+`world.navigation('orbit'|'walk')` - the floorless board worlds (dots,
+snake) open in orbit; the toggle can always override.
 
 Avatars (thirdroom-style, on by default): every peer is an animated
 silver Mixamo figure - Idle/Walk/Run/strafe/turn/fall clips picked from
@@ -204,9 +212,10 @@ beside the protocol - never folded, never hashed - while local ones
 never leave the client (`world.me.color` is each peer's deterministic
 accent color for drawing in) - plus `world.env` (background/fog/ground),
 `world.camera` (a framing hint in orbit; the avatar's pose while walking)
-and `world.navigation('orbit'|'walk')`, which pins the navigation mode
-for worlds where one regime makes no sense (a dots board is no place for
-a first-person walker). Prop motion is animated client-side (bounce drops,
+and `world.navigation('orbit'|'walk')`, which suggests a starting
+navigation mode for worlds where one regime fits best (a floating dots
+board is no place to open on foot); the user's toggle can override it.
+Prop motion is animated client-side (bounce drops,
 fade-in spawns, pop-out despawns): the sim stores logical poses,
 renderers add the juice.
 

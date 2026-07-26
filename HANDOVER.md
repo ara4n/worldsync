@@ -375,9 +375,16 @@ for precision manipulation instead of carrying it around. Decisions:
   snapshots - no side table to drift); they join the per-body hash, cross
   boot seams/checkpoints when non-default, and render reads sim.boxDims
   into mesh.scale each frame.
-- world.navigation('orbit') pins orbit in the board worlds (dots, chess,
-  four-in-a-row, snake, tetrix, videoconf); selection still borrows
-  orbit; the pin clears when the script stops.
+- world.navigation('orbit') started as a hard pin in every board world;
+  since 2026-07-26 it is a one-shot DEFAULT instead (the HUD toggle and
+  the O key can always override) and only the floorless worlds (dots,
+  snake - ground: false) still call it. Selection still borrows orbit.
+- Avatar steering works in EVERY mode (2026-07-26): in orbit, WASD walks
+  the figure third-person (camera-relative headings, figure faces its
+  motion, collider streams along), and orbit -> walk snaps the camera to
+  the figure - never the figure to the camera. Orbit two-finger pan is
+  screen-space (camera right/up axes; top-down it degrades to the old
+  ground slide). Backtick toggles the scene inspector.
 - Selection outline shares the OutlinePass with the inspector and
   world.highlight: last caller wins, fine for a jig.
 - POINTER LOCK (bug Matthew hit in the piano room, fixed 2026-07-26):

@@ -304,11 +304,11 @@ declare const world: {
   /** one-shot camera framing hint (use from onload). While the user is
    * walking, the pose becomes the avatar's (eye at pos, facing target). */
   camera(pos: Vec3Like, target: Vec3Like): void
-  /** pin the navigation mode: 'orbit' for board worlds (dots, chess -
-   * a first-person walker makes no sense there), 'walk' for explorable
-   * ones. The user's walk/orbit toggle yields while pinned; cleared when
-   * the script stops. Selecting a box still borrows orbit for precision
-   * manipulation. */
+  /** suggest a navigation mode: 'orbit' for floorless board worlds
+   * (dots, snake), 'walk' for explorable ones. A one-shot default - it
+   * switches the mode when set, and the user's walk/orbit toggle can
+   * override it afterwards. Selecting a box still borrows orbit for
+   * precision manipulation. */
   navigation(mode: 'orbit' | 'walk'): void
   /** show or hide peer avatars (ON by default: every walking peer is an
    * animated figure, with a collider, for everyone). Board worlds (dots)

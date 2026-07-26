@@ -404,7 +404,6 @@ const drawBorder = () => {
   }
   // the frame includes the ghosts and name planes floating above the top
   const cx = (xL + xR) / 2, cy = (yB + yT + (GAP + 3.7) * CELL) / 2
-  world.navigation('orbit') // a board world: pin orbit so walkers never fall into the void
   world.camera({ x: cx, y: cy, z: Math.max(19, (xR - xL) * 1.15) }, { x: cx, y: cy, z: 0 })
 }
 

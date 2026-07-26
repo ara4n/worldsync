@@ -142,16 +142,7 @@ async function main() {
       })
       editor.toggle()
     },
-    onInspectScene: async () => {
-      const { SceneInspector } = await import('./inspector')
-      inspector ??= new SceneInspector(document.body, {
-        root: () => view.scene,
-        gltfRoot: () => sim.sceneUrl ? cachedScene(sim.sceneUrl)?.object ?? null : null,
-        url: () => sim.sceneUrl,
-        setOutline: objs => view.setOutline(objs),
-      })
-      inspector.toggle()
-    },
+    onInspectScene: () => toggleInspector(),
     // org.worldsync.checkpoint: opt-in world persistence. The flag is room
     // state, so every peer's checkbox follows; whoever is root does the
     // writing. Toggling OFF clears the checkpoint - ephemeral is the
@@ -171,6 +162,23 @@ async function main() {
   })
   let editor: import('./editor').ScriptEditor | null = null
   let inspector: import('./inspector').SceneInspector | null = null
+  const toggleInspector = async () => {
+    const { SceneInspector } = await import('./inspector')
+    inspector ??= new SceneInspector(document.body, {
+      root: () => view.scene,
+      gltfRoot: () => sim.sceneUrl ? cachedScene(sim.sceneUrl)?.object ?? null : null,
+      url: () => sim.sceneUrl,
+      setOutline: objs => view.setOutline(objs),
+    })
+    inspector.toggle()
+  }
+  // ` is the HUD button's keyboard twin for the scene inspector
+  addEventListener('keydown', e => {
+    if (e.code !== 'Backquote' || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return
+    const t = e.target as HTMLElement | null
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+    toggleInspector()
+  })
   // Shared by the file picker and the editor's Save & Run; throws so the
   // editor can show the failure, after it has been logged here.
   const uploadScript = async (file: File) => {
@@ -877,8 +885,9 @@ async function main() {
     },
     setEnv: json => view.setEnvironment(JSON.parse(json)),
     setCamera: (x, y, z, tx, ty, tz) => nav.setCameraPose({ x, y, z }, { x: tx, y: ty, z: tz }),
-    // world.navigation: the script pins the camera regime - board worlds
-    // (dots, chess) force orbit so the walker never falls into their void.
+    // world.navigation: the script suggests a camera regime - floorless
+    // board worlds (dots, snake) open in orbit. A one-shot default: the
+    // user's toggle can override it afterwards.
     setNavMode: mode => {
       if (mode === 'walk' || mode === 'orbit') nav.setScriptMode(mode)
       else log(`world.navigation: unknown mode '${mode}' (use 'walk' or 'orbit')`)
@@ -975,7 +984,7 @@ async function main() {
     for (const id of [...scriptLabels]) scriptHost.removeLabel(id) // and its labels
     restoreSceneNodes() // scene nodes it moved go back where the glb put them
     scriptInteractables.clear()
-    nav.setScriptMode(null) // its navigation pin goes with it
+    nav.setScriptMode(null) // clears its default memory; the mode stands
     setAvatarsOn(true) // avatars come back if it hid them
     view.setOutline([]) // its hover/selection glow goes with it
     if (videoWanted) {
@@ -1223,9 +1232,9 @@ async function main() {
       }
     }
     const mode: 'walk' | 'orbit' = nav.effective() === 'walk' ? 'walk' : 'orbit'
-    // the collider follows the pose plane while on foot; out of body the
-    // pin simply holds the last streamed target
-    if (avatarsOn && have && mode === 'walk' && now - avatarLastPose >= TICK_MS
+    // the collider follows the figure in every mode (orbit WASD steers it
+    // third-person); standing still, the change check keeps the wire quiet
+    if (avatarsOn && have && now - avatarLastPose >= TICK_MS
       && avatarStreamed.distanceToSquared(new Vector3(center.x, center.y, center.z)) > 1e-6) {
       avatarLastPose = now
       avatarStreamed.set(center.x, center.y, center.z)
