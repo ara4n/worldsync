@@ -171,6 +171,19 @@ await waitUp(b.frame, 86, 'b glissando key up')
 const spawned = await a.frame.evaluate(() => window.__jig.sim.bodies.size)
 if (spawned !== 0) fail(`click was not captured: ${spawned} box(es) spawned`)
 
+// clicking the piano BODY (not a key) selects the scene node - and must
+// not spawn a box through it onto the ground plane behind
+console.log('clicking the piano body...')
+const bodyPt = await a.frame.evaluate(() => window.__jig.screenOfWorld(0.6925, 0.8, 0.22)) // treble cheek top
+await a.page.mouse.click(off.x + bodyPt.x, off.y + bodyPt.y)
+await a.frame.waitForFunction(() => window.__jig.nav.selection?.kind === 'scene', null, { timeout: 2000 })
+  .catch(() => fail('body click did not select a scene node'))
+const selName = await a.frame.evaluate(() => window.__jig.nav.selection?.name)
+console.log(`selected scene node: ${selName}`)
+if (await a.frame.evaluate(() => window.__jig.sim.bodies.size) !== 0) fail('body click spawned a box')
+await a.page.keyboard.press('Escape')
+await a.frame.waitForFunction(() => !window.__jig.nav.selection, null, { timeout: 2000 })
+
 // walk mode without pointer lock (Element Web's iframe): dragging from a
 // key must still steer the view (drag-look) while the note plays - a
 // captured gesture must not freeze the walker's camera

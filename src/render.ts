@@ -369,13 +369,21 @@ export class View {
     })
   }
 
+  /** Scene geometry pickable for selection: the glTF world plus any
+   * script-instantiated glTF. The default ground is deliberately absent -
+   * clicking it spawns boxes instead. */
+  pickRoots(): THREE.Object3D[] {
+    const out: THREE.Object3D[] = []
+    if (this.sceneRoot) out.push(this.sceneRoot)
+    if (this.scriptRoot.children.length) out.push(this.scriptRoot)
+    return out
+  }
+
   /** What the walk-mode avatar stands on: the glTF scene when present
    * (plus any script-instantiated glTF), else the default ground plane.
    * Raycast targets only - the avatar is a camera, not sim state. */
   floorObjects(): THREE.Object3D[] {
-    const out: THREE.Object3D[] = []
-    if (this.sceneRoot) out.push(this.sceneRoot)
-    if (this.scriptRoot.children.length) out.push(this.scriptRoot)
+    const out = this.pickRoots()
     if (this.ground.visible) out.push(this.ground)
     return out
   }

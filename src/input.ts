@@ -73,6 +73,9 @@ interface Pending {
   mesh: THREE.Mesh | null
   hitPoint: THREE.Vector3 | null
   downPresented: THREE.Vector3 | null
+  /** boxes missed but glTF scene geometry was hit: a click selects the
+   * node, a drag moves the viewpoint, and neither spawns through it */
+  sceneObj: THREE.Object3D | null
 }
 
 export class Input {
@@ -118,6 +121,19 @@ export class Input {
     return hits[0] ?? null
   }
 
+  /** nearest named glTF scene node under the last-cast ray (call after
+   * pickBox: it reuses the ray). Unnamed submeshes climb to their nearest
+   * named ancestor, so a piano's rim selects as 'rim'. */
+  private pickScene(): THREE.Object3D | null {
+    const roots = this.view.pickRoots()
+    if (!roots.length) return null
+    const hit = this.ray.intersectObjects(roots, true)[0]
+    if (!hit) return null
+    let o: THREE.Object3D = hit.object
+    while (o.parent && !o.name) o = o.parent
+    return o
+  }
+
   private onDown(e: PointerEvent) {
     // cmd/ctrl-drag belongs to the orbit controls
     if (e.button !== 0 || e.metaKey || e.ctrlKey || !this.out.ready()) return
@@ -145,6 +161,7 @@ export class Input {
       mesh,
       hitPoint: hit ? hit.point.clone() : null,
       downPresented: mesh ? mesh.position.clone() : null,
+      sceneObj: mesh ? null : this.pickScene(),
     }
   }
 
@@ -318,9 +335,15 @@ export class Input {
     if (performance.now() - p.t > CLICK_MAX_MS) return
     const moved = this.nav.locked ? p.moved : Math.hypot(e.clientX - p.x, e.clientY - p.y)
     if (moved > CLICK_MAX_PX) return
-    // a clean click: select a box, else deselect, else spawn
+    // a clean click: select a box, else a scene node, else deselect,
+    // else spawn (scene geometry blocks the ground plane behind it, so a
+    // click on the piano's body never spawns a box through it)
     if (p.eid !== null && p.mesh && this.view.meshes.has(p.eid)) {
       this.nav.clickedBox(p.eid, p.netId!, p.mesh)
+      return
+    }
+    if (p.sceneObj) {
+      this.nav.clickedScene(p.sceneObj)
       return
     }
     if (this.nav.clickedEmpty()) return

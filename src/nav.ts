@@ -44,7 +44,12 @@ const PITCH_MAX = Math.PI / 2 - 0.05
 const STEP_UP = 1.0        // tallest ledge the walker steps straight onto
 const DOWN = new THREE.Vector3(0, -1, 0)
 
-export interface Selection { netId: string; eid: number; mesh: THREE.Mesh }
+/** What a click selected: a physics box (edits replicate as ops) or a
+ * glTF scene node (edits are local previews, like the inspector's - the
+ * baked trimesh collider never moves). */
+export type Selection =
+  | { kind: 'box'; netId: string; eid: number; mesh: THREE.Mesh }
+  | { kind: 'scene'; name: string; obj: THREE.Object3D }
 
 const v3 = (v: { x: number; y: number; z: number }) => ({ x: v.x, y: v.y, z: v.z })
 const q4 = (q: THREE.Quaternion) => ({ x: q.x, y: q.y, z: q.z, w: q.w })
@@ -188,8 +193,14 @@ export class Nav {
 
   /** a short click landed on a box: select it (toggle off if reselected) */
   clickedBox(eid: number, netId: string, mesh: THREE.Mesh) {
-    if (this.selected?.eid === eid) { this.deselect(); return }
-    this.select({ netId, eid, mesh })
+    if (this.selected?.kind === 'box' && this.selected.eid === eid) { this.deselect(); return }
+    this.select({ kind: 'box', netId, eid, mesh })
+  }
+
+  /** a short click landed on glTF scene geometry: select the node */
+  clickedScene(obj: THREE.Object3D) {
+    if (this.selected?.kind === 'scene' && this.selected.obj === obj) { this.deselect(); return }
+    this.select({ kind: 'scene', name: obj.name || `(${obj.type})`, obj })
   }
 
   /** a short click hit nothing: consume it as a deselect when something is
@@ -233,15 +244,24 @@ export class Nav {
     c.maxPolarAngle = THREE.MathUtils.clamp(Math.max(Math.PI / 2 - 0.05, polar + 0.02), 0, Math.PI - 0.01)
   }
 
+  /** the selected Object3D, whatever its kind */
+  private selObj(): THREE.Object3D | null {
+    return this.selected ? (this.selected.kind === 'box' ? this.selected.mesh : this.selected.obj) : null
+  }
+
+  private selWorldPos(): THREE.Vector3 {
+    return this.selObj()!.getWorldPosition(new THREE.Vector3())
+  }
+
   private select(sel: Selection) {
     this.selected = sel
     this.editOn = false
     this.detachGizmo()
     // selection outline shares the view's OutlinePass with the inspector
     // and world.highlight: last caller wins, which is fine for a jig
-    this.view.setOutline([sel.mesh])
+    this.view.setOutline([this.selObj()!])
     this.applyMode() // walk hands over to orbit
-    this.setOrbitPivot(this.orbitTargetFor(sel.mesh.position))
+    this.setOrbitPivot(this.orbitTargetFor(this.selWorldPos()))
     this.renderHud()
   }
 
@@ -265,10 +285,10 @@ export class Nav {
     this.editOn = on
     if (on) {
       const tc = this.ensureGizmo()
-      tc.attach(this.selected.mesh)
+      tc.attach(this.selObj()!)
       // refresh the pivot depth (the box may have been dragged since
       // selection) without moving the camera
-      this.setOrbitPivot(this.orbitTargetFor(this.selected.mesh.position))
+      this.setOrbitPivot(this.orbitTargetFor(this.selWorldPos()))
     } else this.detachGizmo()
     this.renderHud()
   }
@@ -291,15 +311,18 @@ export class Nav {
     return tc
   }
 
-  // Gizmo drags ride the normal interaction protocol, so every peer sees
-  // the precision edit live: grab pins the box kinematic, the pose stream
-  // carries position (and rotation, in rotate mode), release hands it back
-  // to physics. Scale is not streamed - the box holds still under the grab
-  // and one 'resize' op lands with the final extents on drag end.
+  // Gizmo drags on a BOX ride the normal interaction protocol, so every
+  // peer sees the precision edit live: grab pins the box kinematic, the
+  // pose stream carries position (and rotation, in rotate mode), release
+  // hands it back to physics. Scale is not streamed - the box holds still
+  // under the grab and one 'resize' op lands with the final extents on
+  // drag end. Scene-node selections skip all of it: their edits are local
+  // previews (the object moves in place, nothing folds, colliders stay).
   private beginGizmoDrag() {
     const sel = this.selected
-    if (!sel || !this.out.ready()) return
+    if (!sel) return
     this.view.controls.enabled = false
+    if (sel.kind !== 'box' || !this.out.ready()) return
     this.gizmoEid = sel.eid
     this.view.poseAuthorityEid = sel.eid
     this.view.errors.delete(sel.eid)
@@ -308,7 +331,7 @@ export class Nav {
 
   private streamGizmo() {
     const sel = this.selected
-    if (this.gizmoEid === null || !sel || !this.tc || this.tc.mode === 'scale') return
+    if (this.gizmoEid === null || sel?.kind !== 'box' || !this.tc || this.tc.mode === 'scale') return
     const now = performance.now()
     if (now - this.gizmoLastSent < TICK_MS) return
     this.gizmoLastSent = now
@@ -318,7 +341,7 @@ export class Nav {
 
   private endGizmoDrag() {
     const sel = this.selected
-    if (sel && this.tc && this.gizmoEid !== null) {
+    if (sel?.kind === 'box' && this.tc && this.gizmoEid !== null) {
       const m = sel.mesh
       if (this.tc.mode === 'scale') {
         const c = (n: number) => Math.min(DIMS_MAX, Math.max(DIMS_MIN, n))
@@ -332,8 +355,8 @@ export class Nav {
         pos: v3(m.position), vel: { x: 0, y: 0, z: 0 },
         rot: this.tc.mode === 'rotate' ? q4(m.quaternion) : undefined,
       })
-      this.setOrbitPivot(this.orbitTargetFor(m.position))
     }
+    if (sel) this.setOrbitPivot(this.orbitTargetFor(this.selWorldPos()))
     this.gizmoEid = null
     this.view.poseAuthorityEid = null
     this.view.controls.enabled = this.effective() === 'orbit'
@@ -388,7 +411,7 @@ export class Nav {
         this.view.controls.enabled = true
         // pivot along the current view ray so the handover never pops
         this.setOrbitPivot(this.selected
-          ? this.orbitTargetFor(this.selected.mesh.position)
+          ? this.orbitTargetFor(this.selWorldPos())
           : cam.position.clone().add(cam.getWorldDirection(this.tmpV).multiplyScalar(6)))
         this.view.controls.update()
       }
@@ -400,8 +423,17 @@ export class Nav {
   update(nowMs: number) {
     const dt = Math.min((nowMs - this.lastMs) / 1000, 0.1)
     this.lastMs = nowMs
-    // a selected box can despawn under us (scene swap, another peer)
-    if (this.selected && !this.view.meshes.has(this.selected.eid)) this.deselect()
+    // the selection can vanish under us: a box despawns (scene swap,
+    // another peer), a scene node's world gets replaced
+    if (this.selected) {
+      if (this.selected.kind === 'box') {
+        if (!this.view.meshes.has(this.selected.eid)) this.deselect()
+      } else {
+        let p: THREE.Object3D | null = this.selected.obj
+        while (p && p !== this.view.scene) p = p.parent
+        if (p !== this.view.scene) this.deselect()
+      }
+    }
     if (this.effective() !== 'walk') {
       this.crosshair.style.display = 'none'
       return
@@ -477,11 +509,14 @@ export class Nav {
       h.appendChild(s)
     }
     if (this.selected) {
+      const box = this.selected.kind === 'box'
       const label = document.createElement('span')
-      label.textContent = this.selected.netId
+      label.textContent = box ? (this.selected as { netId: string }).netId
+        : `${(this.selected as { name: string }).name} · scene node`
       h.appendChild(label)
       btn('edit', this.editOn, () => this.setEdit(!this.editOn),
-        'precision move/rotate/scale gizmos on the selection')
+        box ? 'precision move/rotate/scale gizmos on the selection'
+          : 'move/rotate/scale gizmos - local preview only, like the inspector')
       if (this.editOn) {
         const tc = this.ensureGizmo()
         for (const m of ['translate', 'rotate', 'scale'] as const) {
@@ -489,8 +524,11 @@ export class Nav {
             `drag an axis for one-axis ${m}; the center section uses all axes`)
         }
       }
-      hint(this.editOn ? 'drag: orbit · drag box: reposition · esc: deselect'
-        : 'drag: orbit · drag box: reposition · click empty / esc: deselect')
+      hint(box
+        ? (this.editOn ? 'drag: orbit · drag box: reposition · esc: deselect'
+          : 'drag: orbit · drag box: reposition · click empty / esc: deselect')
+        : (this.editOn ? 'edits are local previews · esc: deselect'
+          : 'drag: orbit · click empty / esc: deselect'))
       return
     }
     const forced = this.scriptMode !== null
