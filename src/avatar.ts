@@ -11,8 +11,8 @@ import type { Vec3 } from './types'
  * the pose plane like any held box; what you SEE here is presentation:
  * smoothed feet positions, thirdroom's velocity-driven locomotion clip
  * blending, and two bits of bone-level behaviour thirdroom never had -
- * the head pitching to the peer's view angle (walk mode only; orbit is
- * the out-of-body view and leaves the figure alone) and an arm pointing
+ * the head pitching to the peer's view angle (held across a switch to
+ * orbit rather than snapping back to neutral) and an arm pointing
  * at the peer's aim target - its selection, the box it is dragging, or
  * a script's world.aim - using whichever arm is nearer the target.
  *
@@ -375,10 +375,11 @@ export class Avatars {
     // -- bone-level overrides, after the mixer so they win --
     rig.group.updateMatrixWorld(true)
 
-    // head tracks the peer's view pitch while walking; orbit is the
-    // out-of-body view, so the figure's head is left to the clips
-    const wantPitch = t.mode === 'walk' ? t.pitch : 0
-    a.headPitch += (wantPitch - a.headPitch) * (1 - Math.exp(-HEAD_K * dt))
+    // head tracks the peer's view pitch in every mode: going out-of-body
+    // keeps the look pose held at the switch (the broadcast pitch freezes
+    // at its last walk value; Matthew: no reset to neutral) - third-person
+    // steering levels it anyway, since nav zeroes pitch on figure motion
+    a.headPitch += (t.pitch - a.headPitch) * (1 - Math.exp(-HEAD_K * dt))
     if (Math.abs(a.headPitch) > 1e-3) {
       // world right axis of the facing, so the nod is a pure pitch
       const right = tmpV.set(Math.cos(a.yaw), 0, -Math.sin(a.yaw))
