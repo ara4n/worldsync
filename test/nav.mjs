@@ -186,6 +186,24 @@ console.log(`ran ${ran.toFixed(2)}m in 0.4s`)
 // walk (a lenient bound here once masked shift never registering at all)
 if (ran < 2.2) fail(`shift-run covered ${ran.toFixed(2)}m in 0.4s, expected ~3.6 (run), not ~1.6 (walk)`)
 
+// -- strafe must be relative to facing: look down -x, D must move -z
+// (right vector (cos yaw, 0, -sin yaw); a sign slip here once mirrored
+// strafing over half the compass) --
+await b.evaluate(() => {
+  const c = window.__jig.view.camera.position
+  window.__jig.nav.setCameraPose({ x: c.x, y: c.y, z: c.z }, { x: c.x - 5, y: c.y, z: c.z })
+})
+await b.waitForTimeout(150)
+const s0 = await camXZ(b)
+await b.keyboard.down('KeyD')
+await b.waitForTimeout(400)
+await b.keyboard.up('KeyD')
+const s1 = await camXZ(b)
+console.log(`strafe D while facing -x: dx=${(s1.x - s0.x).toFixed(2)} dz=${(s1.z - s0.z).toFixed(2)}`)
+if (s1.z - s0.z > -1 || Math.abs(s1.x - s0.x) > 0.5) {
+  fail(`strafe is not facing-relative (expected dz ~ -1.6, dx ~ 0)`)
+}
+
 await b.keyboard.press('Space')
 let apex = 0
 for (let i = 0; i < 14; i++) {

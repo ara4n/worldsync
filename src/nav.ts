@@ -403,8 +403,11 @@ export class Nav {
       const speed = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight') ? RUN_SPEED : WALK_SPEED
       const norm = speed * dt / Math.hypot(fwd, strafe)
       const sin = Math.sin(this.yaw), cos = Math.cos(this.yaw)
+      // rotateY(yaw): forward (0,0,-1) -> (-sin, 0, -cos); right (1,0,0)
+      // -> (cos, 0, -sin). The right vector's z is NEGATIVE sin: a +sin
+      // here once mirrored strafing over half the compass.
       this.feet.x += (-sin * fwd + cos * strafe) * norm
-      this.feet.z += (-cos * fwd + sin * strafe) * norm
+      this.feet.z += (-cos * fwd - sin * strafe) * norm
     }
 
     // gravity and floor snap (jumps fire on the Space keydown itself)
