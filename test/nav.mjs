@@ -72,14 +72,6 @@ await a.waitForFunction(() => window.__jig.sim.bodies.size === 2, null, { timeou
 console.log('spawning still works with nothing selected')
 
 // -- reselect, enable edit, drag the gizmo's center section --
-pt = await a.evaluate(id => window.__jig.screenPos(id), netId)
-await a.mouse.click(pt.x, pt.y)
-await a.waitForFunction(() => !!window.__jig.nav.selection, null, { timeout: 2000 })
-await a.click('#navhud >> text=edit')
-await a.waitForFunction(() =>
-  [...document.querySelectorAll('#navhud button')].some(b => b.textContent === 'rotate'), null, { timeout: 2000 })
-console.log('edit HUD shows move/rotate/scale')
-
 const aCamPose = () => a.evaluate(() => ({
   p: window.__jig.view.camera.position.toArray(),
   q: window.__jig.view.camera.quaternion.toArray(),
@@ -87,6 +79,20 @@ const aCamPose = () => a.evaluate(() => ({
 const aPoseDelta = (u, v) => Math.max(
   Math.hypot(...u.p.map((n, i) => n - v.p[i])),
   1 - Math.abs(u.q.reduce((s, n, i) => s + n * v.q[i], 0)))
+
+pt = await a.evaluate(id => window.__jig.screenPos(id), netId)
+await a.mouse.click(pt.x, pt.y)
+await a.waitForFunction(() => !!window.__jig.nav.selection, null, { timeout: 2000 })
+// entering edit mode must not recenter on the selection either
+const e0 = await aCamPose()
+await a.click('#navhud >> text=edit')
+await a.waitForFunction(() =>
+  [...document.querySelectorAll('#navhud button')].some(b => b.textContent === 'rotate'), null, { timeout: 2000 })
+await a.waitForTimeout(400)
+const e1 = await aCamPose()
+if (aPoseDelta(e0, e1) > 0.01) fail(`enabling edit popped the camera (delta ${aPoseDelta(e0, e1).toFixed(4)})`)
+console.log('edit HUD shows move/rotate/scale; camera untouched')
+
 const g0 = await aCamPose()
 pt = await a.evaluate(id => window.__jig.screenPos(id), netId)
 await a.mouse.move(pt.x, pt.y) // hover arms the gizmo's center (XYZ) handle

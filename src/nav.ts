@@ -250,7 +250,9 @@ export class Nav {
     if (on) {
       const tc = this.ensureGizmo()
       tc.attach(this.selected.mesh)
-      this.view.controls.target.copy(this.selected.mesh.position)
+      // refresh the pivot depth (the box may have been dragged since
+      // selection) without moving the camera
+      this.setOrbitPivot(this.orbitTargetFor(this.selected.mesh.position))
     } else this.detachGizmo()
     this.renderHud()
   }
