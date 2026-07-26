@@ -16,6 +16,10 @@ const MAX_THROW = 18
 // carry distance while walking: the grabbed box rides the view ray
 const CARRY_MIN = 1.3
 const CARRY_MAX = 12
+// plane drags near the horizon turn pixels into kilometres (the ray runs
+// almost parallel to the drag plane); cap how far from the camera a drag
+// can send a box, or it vanishes into the fog mid-gesture
+const DRAG_RANGE = 120
 const PALETTE = [0xe63946, 0xf4a261, 0xe9c46a, 0x2a9d8f, 0x64b5f6, 0x9b5de5, 0xf15bb5, 0x80ed99]
 
 export interface Emitter {
@@ -249,6 +253,13 @@ export class Input {
     if (!this.ray.ray.intersectPlane(d.plane!, hitP)) return
     d.target.copy(hitP.sub(d.offset!))
     d.target.y = Math.max(this.minY(d.eid), d.target.y)
+    const cam = this.view.camera.position
+    const dx = d.target.x - cam.x, dz = d.target.z - cam.z
+    const range = Math.hypot(dx, dz)
+    if (range > DRAG_RANGE) {
+      d.target.x = cam.x + dx * DRAG_RANGE / range
+      d.target.z = cam.z + dz * DRAG_RANGE / range
+    }
     const now = performance.now()
     d.trail.push({ t: now, p: d.target.clone() })
     while (d.trail.length > 1 && now - d.trail[0].t > 150) d.trail.shift()

@@ -373,8 +373,17 @@ export class Sim {
     const rate = Math.hypot(sa.pos.x - prev.pos.x, sa.pos.y - prev.pos.y, sa.pos.z - prev.pos.z)
       / (sa.tick - prev.tick)
     const d = Math.hypot(sa.pos.x - g.target.x, sa.pos.y - g.target.y, sa.pos.z - g.target.z)
-    if (d <= rate || rate === 0) return sa.pos
-    return mix(g.target, sa.pos, rate / d)
+    // Floor the catch-up step at d/8: hand rate alone strands the pin
+    // when a burst leaves it far from the track and the hand then slows
+    // (a near-horizon fling turns pixels into hundreds of metres; a slow
+    // drag back would reel the box in at centimetres per tick, and it
+    // hangs in the distance until release). d/8 closes any gap within a
+    // few ticks, exponentially; in steady tracking d ~ rate, so the
+    // hand-rate limit (the anti-phantom-velocity rule above) still
+    // governs. Same pure function of samples on every peer and replay.
+    const step = Math.max(rate, d / 8)
+    if (d <= step) return sa.pos
+    return mix(g.target, sa.pos, step / d)
   }
 
   /** The rotation pin for a held body at `tick`: the newest sample at or

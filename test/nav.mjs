@@ -136,6 +136,36 @@ await a.keyboard.press('Escape')
 await a.waitForFunction(() => !window.__jig.nav.selection, null, { timeout: 2000 })
 console.log('esc deselected')
 
+// -- stranded-pin regression: fling a box toward the horizon, then drag
+// slowly back; the sim pose must follow the hand home instead of hanging
+// in the distance until release (pin catch-up floor + drag range cap) --
+{
+  const start = await a.evaluate(id => window.__jig.screenPos(id), netId)
+  await a.mouse.move(start.x, start.y)
+  await a.mouse.down()
+  const far = await a.evaluate(() => {
+    const cam = window.__jig.view.camera
+    const dir = cam.getWorldDirection(cam.position.clone().set(0, 0, 0))
+    dir.y = 0
+    dir.normalize()
+    const p = cam.position.clone().addScaledVector(dir, 250)
+    return window.__jig.screenOfWorld(p.x, 0.5, p.z)
+  })
+  await a.mouse.move(far.x, far.y, { steps: 4 })
+  await a.waitForTimeout(400)
+  const back = await a.evaluate(() => window.__jig.screenOfGround(3, 3))
+  for (let i = 1; i <= 12; i++) {
+    await a.mouse.move(far.x + ((back.x - far.x) * i) / 12, far.y + ((back.y - far.y) * i) / 12)
+    await a.waitForTimeout(80)
+  }
+  const held = await a.evaluate(id => window.__jig.pos(id), netId)
+  const lag = Math.hypot(held.x - 3, held.z - 3)
+  await a.mouse.up()
+  console.log(`slow drag back from the horizon: box ${lag.toFixed(1)}m from the hand while held`)
+  if (lag > 20) fail(`box stranded ${lag.toFixed(1)}m out during a slow drag back`)
+  await a.waitForTimeout(800)
+}
+
 // -- resize op: replicated extents on both peers, meshes scaled --
 await a.evaluate(id => {
   const p = window.__jig.pos(id)
