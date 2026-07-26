@@ -395,6 +395,28 @@ for precision manipulation instead of carrying it around. Decisions:
   untestable headlessly (no movementX on synthetic events); drag-look is
   covered in test/nav.mjs instead.
 
+## Element Web/Desktop host gotchas (2026-07-26)
+
+Both found running worldsync as a real widget; both patched in Matthew's
+element-web checkout (uncommitted there; upstream candidates):
+
+- Pointer lock: AppTile's iframe sandbox lacks allow-pointer-lock (see
+  the walk-mode section above).
+- Capability re-prompt ping-pong (tetrix, not piano): EW's
+  ElementWidgetDriver.validateCapabilities REPLACES the remembered
+  capability set (localStorage widget_<id>_approved_caps) with
+  intersection(allowed, requested) - but an MSC2974 renegotiation only
+  passes the NEWLY requested capabilities (ClientWidgetApi filters to
+  the delta), so remembering the highscore grant clobbers the
+  remembered boot-handshake grants, and the next boot's remember
+  clobbers the highscore grant back: full-permissions prompt + state
+  prompt on every open, forever (EW has a TODO on the exact line).
+  Piano never calls the state APIs, never renegotiates, never clobbers.
+  Patch: merge into the remembered set instead of replacing. Worldsync
+  keeps its lazy MSC2974 request by design (worlds that never touch
+  room state never prompt); folding SCRIPT_STATE_TYPES into the boot
+  handshake would mask the EW bug at the cost of prompting everyone.
+
 ## Known gaps / next-step candidates
 
 - Cross-machine wall-clock skew shifts tick binning (same-machine tabs are
