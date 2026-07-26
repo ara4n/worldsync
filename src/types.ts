@@ -140,7 +140,7 @@ export type DcMessage =
   // peer's figure - feet position, view yaw/pitch, velocity (drives
   // locomotion clip selection on every peer), grounded, nav mode (walk
   // heads track the view; orbit is out-of-body and leaves the figure
-  // alone) and the current selection's world point (the left hand aims
+  // alone) and the current aim target's world point (the nearer hand aims
   // at it). Never folded, never hashed; the avatar's physics footprint
   // travels separately (the 'avatar' op + the pose plane). A departed
   // peer's figure goes with it.

@@ -36,7 +36,7 @@ test mid-flight; finish edits first.
   CDP synthetic events carry no movementX/Y.
 - `node test/avatar.mjs`: the animated avatars e2e: walk-by-default, two
   peers grow figures + collider bodies, locomotion clips replicate from
-  velocity (Walk/Run/Idle/Fall1), head pitch + left-arm aim replicate,
+  velocity (Walk/Run/Idle/Fall1), head pitch + nearer-arm aim replicate,
   the collider shoves a box bit-equal on both peers, hashes agree, a
   departed peer's figure and collider go with it.
 
@@ -394,7 +394,7 @@ for precision manipulation instead of carrying it around. Decisions:
   flight (gravity off, W/S along the full look ray, A/D level, floor
   stops a downward glide). Both flags survive orbit round-trips.
 - world.aim({x,y,z}|null) (2026-07-26): scripts point the local
-  figure's left hand at a world point; it rides the avatar-plane
+  figure's nearer hand at a world point; it rides the avatar-plane
   broadcast (same field the point-at-selection uses, script wins while
   set) so every peer sees it. Piano points at the hovered key
   (onpointermove ev.point), tetrix at the piece being steered; cleared
@@ -465,7 +465,7 @@ Two planes, deliberately separate:
   Fall1 airborne, Fall2 below -12m/s. On top, two behaviours thirdroom
   never had, both post-mixer world-space bone edits (rotateBoneWorld):
   head+neck pitch to the peer's view angle (walk mode only; orbit =
-  out-of-body, figure left alone), and the left arm two-bone-aimed at
+  out-of-body, figure left alone), and the nearer arm two-bone-aimed at
   the peer's selection while one exists (aim point rides the broadcast).
   Your own figure hides when the camera sits inside it (proximity, not
   a first-person flag, so going out-of-body un-hides it as you swing

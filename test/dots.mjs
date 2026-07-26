@@ -126,16 +126,19 @@ for (const [name, t] of [['a', a], ['b', b]]) {
 }
 console.log('chain cleared, refills landed: 27 dots on both tabs')
 
-// dots is a board world: world.avatars(false) must hide every figure and
-// retire the avatar collider bodies on both tabs
+// the avatar layer follows the script's world.avatars choice on both
+// tabs (dots currently experiments with figures ON; if the script calls
+// world.avatars(false) again, figures and collider bodies must go)
+const wantsAvatars = !readFileSync(new URL('../examples/dots.js', import.meta.url), 'utf8')
+  .match(/^\s*world\.avatars\(false\)/m)
 for (const [name, t] of [['a', a], ['b', b]]) {
-  const off = await t.frame.waitForFunction(() =>
-    window.__jig.view.avatars.enabled === false
-    && ![...window.__jig.sim.bodies.keys()].some(k => k.startsWith('avatar:')),
-    null, { timeout: 15000 }).then(() => true).catch(() => false)
-  if (!off) fail(`${name}: world.avatars(false) left figures or colliders behind`)
+  const ok = await t.frame.waitForFunction(want =>
+    window.__jig.view.avatars.enabled === want
+    && [...window.__jig.sim.bodies.keys()].some(k => k.startsWith('avatar:')) === want,
+    wantsAvatars, { timeout: 15000 }).then(() => true).catch(() => false)
+  if (!ok) fail(`${name}: avatar layer does not match the script's world.avatars choice (want ${wantsAvatars})`)
 }
-console.log('avatars hidden and colliders retired (world.avatars(false))')
+console.log(`avatar layer follows the script (avatars ${wantsAvatars ? 'on' : 'off'})`)
 
 // convergence: wait for a settled-hash comparison, no divergence latched
 for (const [name, t] of [['a', a], ['b', b]]) {

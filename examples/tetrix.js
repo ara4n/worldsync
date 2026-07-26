@@ -502,7 +502,7 @@ world.onupdate = (dt, time) => {
     }
   }
 
-  // the avatar's left hand tracks the piece we're steering (every peer
+  // the avatar's hand tracks the piece we're steering (every peer
   // sees the pointing; the hand comes down between pieces). world.aim
   // guarded: stale host bundles predate it, and erroring here would
   // kill the script.

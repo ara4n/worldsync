@@ -168,20 +168,43 @@ console.log('esc deselected')
 // -- the polar range is fully open: orbiting can swing below the horizon
 // to look up from underneath (the old clamp stopped ~5deg above level) --
 {
+  // save the vantage: the later drag segments compute screen points and
+  // fling targets from the camera, and a swung-around camera makes the
+  // fling's mouse-down miss the box (the gesture silently degrades to an
+  // orbit drag and the assertions test nothing)
+  const saved = await a.evaluate(() => ({
+    p: window.__jig.view.camera.position.toArray(),
+    t: window.__jig.view.controls.target.toArray(),
+  }))
   const below = await a.evaluate(() => {
     for (let i = 0; i < 40; i++) window.__jig.nav.orbitBy(0, -12)
     return window.__jig.view.camera.position.y - window.__jig.view.controls.target.y
   })
   console.log(`orbit swung to ${below.toFixed(2)}m below the pivot plane`)
   if (below > -0.5) fail(`orbit cannot swing below the horizon (dy ${below.toFixed(2)})`)
-  // swing back to a high vantage so the later drag tests see the boxes
-  await a.evaluate(() => { for (let i = 0; i < 30; i++) window.__jig.nav.orbitBy(0, 10) })
+  await a.evaluate(s => {
+    const v = window.__jig.view
+    v.camera.position.fromArray(s.p)
+    v.controls.target.fromArray(s.t)
+    v.camera.lookAt(v.controls.target)
+  }, saved)
 }
 
 // -- stranded-pin regression: fling a box toward the horizon, then drag
 // slowly back; the sim pose must follow the hand home instead of hanging
 // in the distance until release (pin catch-up floor + drag range cap) --
 {
+  // frame the box first: earlier segments (orbit swings, pans) leave the
+  // camera wherever they ended, and a box outside the frustum projects to
+  // bogus screen coords - the fling would silently become an orbit drag
+  await a.evaluate(id => {
+    const v = window.__jig.view
+    const p = window.__jig.pos(id)
+    v.camera.position.set(p.x + 9, 9, p.z + 13)
+    v.controls.target.set(p.x, 0.5, p.z)
+    v.camera.lookAt(v.controls.target)
+  }, netId)
+  await a.waitForTimeout(200)
   const start = await a.evaluate(id => window.__jig.screenPos(id), netId)
   await a.mouse.move(start.x, start.y)
   await a.mouse.down()
@@ -202,6 +225,15 @@ console.log('esc deselected')
   }
   const held = await a.evaluate(id => window.__jig.pos(id), netId)
   const lag = Math.hypot(held.x - 3, held.z - 3)
+  // mid-drag (this gesture is a genuine engaged drag - draggedEid set)
+  // the figure's nearer arm aims at the carried box
+  const dragAim = await a.evaluate(() => ({
+    w: window.__jig.view.avatars.debug()[window.__jig.session.id]?.aimWeight ?? -1,
+    draggedEid: window.__jig.input.draggedEid,
+  }))
+  if (dragAim.draggedEid === null) fail('stranded-pin drag never engaged the box')
+  else if (dragAim.w < 0.5) fail(`dragging did not aim the hand (weight ${dragAim.w.toFixed(2)})`)
+  else console.log('dragging points the hand at the carried box')
   await a.mouse.up()
   console.log(`slow drag back from the horizon: box ${lag.toFixed(1)}m from the hand while held`)
   if (lag > 20) fail(`box stranded ${lag.toFixed(1)}m out during a slow drag back`)

@@ -67,7 +67,7 @@ const orphanSince = {}
 world.onload = () => {
   world.env({ background: 0xffffff, fog: { color: 0xffffff, near: 4.5, far: 11 }, ground: false })
   world.navigation('orbit') // floorless: default out-of-body (the toggle still allows walking)
-  world.avatars(false) // no figures loitering around a floating board
+  // world.avatars(false) // no figures loitering around a floating board
   world.camera({ x: 0, y: ORG.y + 1, z: 5.2 }, { x: 0, y: ORG.y + 1, z: 0 })
   // one guide per unit edge (not per full row), so the guide under a
   // chained link can hide: the wire is coincident with it and they z-fight
@@ -362,6 +362,9 @@ world.onpointerdown = (ev) => {
 }
 
 world.onpointermove = (ev) => {
+  // the avatar's hand tracks the hovered dot (guarded: stale host
+  // bundles predate world.aim, and erroring here would kill the script)
+  if (world.aim) world.aim(ev.entity ? ev.point : null)
   if (!drawing) return
   if (ev.entity && sel.length) {
     const q = world.prop(ev.entity)

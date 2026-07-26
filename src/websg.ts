@@ -177,7 +177,7 @@ export interface ScriptHost {
    * turn them off). Hides every figure AND retires this peer's own
    * avatar collider; restored when the script stops. */
   setAvatars(on: boolean): void
-  /** point the local avatar's left hand at a world point (rides the
+  /** point the local avatar's nearer hand at a world point (rides the
    * avatar plane to every peer); clearAim lowers it again */
   setAim(x: number, y: number, z: number): void
   clearAim(): void
@@ -525,7 +525,7 @@ const PRELUDE = `
     navigation(mode) { H.setNavMode(String(mode)) },
     // show/hide peer avatars (on by default; dots turns them off)
     avatars(on) { H.setAvatars(on !== false) },
-    // point the avatar's left hand at a world-space point (a hovered
+    // point the avatar's nearer hand at a world-space point (a hovered
     // piano key, the piece being steered); replicated to every peer,
     // overrides the built-in point-at-selection; null lowers the hand
     aim(p) {

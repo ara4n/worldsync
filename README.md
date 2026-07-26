@@ -75,8 +75,9 @@ its velocity, exactly thirdroom's animation brain - visible to everyone
 (you see your own only when out of body; it hides while the camera is
 inside it). Peers spawn shoulder-to-shoulder on an arc facing the scene's
 centre, ~1.4m apart. While you walk, your figure's HEAD tracks your view
-pitch on every peer's screen; while you have something selected, its LEFT
-ARM points at the selection. Avatars are solid: a kinematic box collider
+pitch on every peer's screen; while you have something selected (or are
+dragging a box, or a world script calls `world.aim`), the NEARER ARM
+points at it, crossfading arms if the target crosses your midline. Avatars are solid: a kinematic box collider
 (0.6 x 1.7 x 0.6) that shoves dynamic boxes identically on every peer.
 The figure itself rides a cosmetic latest-wins broadcast (never folded,
 never hashed); only the collider touches the timeline (one spawn op; its
@@ -222,7 +223,7 @@ accent color for drawing in) - plus `world.env` (background/fog/ground),
 and `world.navigation('orbit'|'walk')`, which suggests a starting
 navigation mode for worlds where one regime fits best (a floating dots
 board is no place to open on foot); the user's toggle can override it.
-`world.aim({x,y,z})` points the avatar's left hand at a world-space
+`world.aim({x,y,z})` points the avatar's nearer hand at a world-space
 point - piano aims it at the key under your cursor, tetrix at the piece
 you're steering - visible to every peer; `world.aim(null)` lowers it.
 Prop motion is animated client-side (bounce drops,

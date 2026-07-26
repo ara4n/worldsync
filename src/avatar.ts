@@ -12,8 +12,9 @@ import type { Vec3 } from './types'
  * smoothed feet positions, thirdroom's velocity-driven locomotion clip
  * blending, and two bits of bone-level behaviour thirdroom never had -
  * the head pitching to the peer's view angle (walk mode only; orbit is
- * the out-of-body view and leaves the figure alone) and the left arm
- * pointing at whatever object the peer has selected.
+ * the out-of-body view and leaves the figure alone) and an arm pointing
+ * at the peer's aim target - its selection, the box it is dragging, or
+ * a script's world.aim - using whichever arm is nearer the target.
  *
  * Nothing binds to a particular character: any GLB whose skin rides the
  * standard mixamorig skeleton drops in (setUrl), and clips resolve by
@@ -93,6 +94,9 @@ interface Rig {
   lArm: THREE.Object3D | null
   lForeArm: THREE.Object3D | null
   lHand: THREE.Object3D | null
+  rArm: THREE.Object3D | null
+  rForeArm: THREE.Object3D | null
+  rHand: THREE.Object3D | null
 }
 
 class PeerAvatar {
@@ -101,7 +105,11 @@ class PeerAvatar {
   yaw = 0
   yawVel = 0 // smoothed, for turn-in-place detection
   headPitch = 0 // smoothed applied head pitch
-  aimWeight = 0
+  // per-arm aim weights: the nearer arm points, and a genuine side
+  // switch crossfades (one arm eases down while the other rises)
+  aimWeightL = 0
+  aimWeightR = 0
+  aimSide: 'l' | 'r' = 'l'
   aimPoint = new THREE.Vector3()
   rig: Rig | null = null
 
@@ -189,7 +197,7 @@ export class Avatars {
   /** dominant clip name per peer plus override state, for tests/console */
   debug(): Record<string, {
     clip: string; weight: number; pos: Vec3; visible: boolean
-    headPitch: number; aimWeight: number; bones: boolean
+    headPitch: number; aimWeight: number; aimSide: 'l' | 'r'; bones: boolean
     headWorldY: number | null
   }> {
     const out: ReturnType<Avatars['debug']> = {}
@@ -207,8 +215,10 @@ export class Avatars {
         clip, weight,
         pos: { x: a.pos.x, y: a.pos.y, z: a.pos.z },
         visible: !!a.rig?.group.visible && this.enabled,
-        headPitch: a.headPitch, aimWeight: a.aimWeight,
-        bones: !!(a.rig?.head && a.rig.lArm && a.rig.lForeArm),
+        headPitch: a.headPitch,
+        // combined for tests/inspection: whichever arm is up
+        aimWeight: Math.max(a.aimWeightL, a.aimWeightR), aimSide: a.aimSide,
+        bones: !!(a.rig?.head && a.rig.lArm && a.rig.lForeArm && a.rig.rArm),
         headWorldY,
       }
     }
@@ -283,6 +293,7 @@ export class Avatars {
       group, mixer, actions,
       head: bone(root, 'Head'), neck: bone(root, 'Neck'),
       lArm: bone(root, 'LeftArm'), lForeArm: bone(root, 'LeftForeArm'), lHand: bone(root, 'LeftHand'),
+      rArm: bone(root, 'RightArm'), rForeArm: bone(root, 'RightForeArm'), rHand: bone(root, 'RightHand'),
     }
   }
 
@@ -376,19 +387,36 @@ export class Avatars {
       if (rig.head) rotateBoneWorld(rig.head, tmpQ2.setFromAxisAngle(right, a.headPitch * 0.65), 1)
     }
 
-    // left arm points at the peer's selection (or world.aim) while set.
-    // The weight eases the arm up and down; the POINT eases too - a
-    // stepping target (the tetris piece, hover hopping keys) would
-    // otherwise pop the arm - except when the arm is still down, where
-    // chasing from a stale point would read as a sweep in from nowhere.
-    a.aimWeight += ((t.aim ? 1 : 0) - a.aimWeight) * (1 - Math.exp(-AIM_K * dt))
+    // An arm points at the peer's aim target (selection, carried box, or
+    // world.aim) while one is set - whichever arm is NEARER the target's
+    // side, with a hysteresis band so a target dithering on the midline
+    // does not flap the arms. The weights ease the arms up and down (a
+    // genuine side switch crossfades); the POINT eases too - a stepping
+    // target (the tetris piece, hover hopping keys) would otherwise pop
+    // the arm - except while both arms are still down, where chasing
+    // from a stale point would read as a sweep in from nowhere.
+    const down = a.aimWeightL < 0.05 && a.aimWeightR < 0.05
     if (t.aim) {
-      if (a.aimWeight < 0.05) a.aimPoint.set(t.aim.x, t.aim.y, t.aim.z)
+      if (down) a.aimPoint.set(t.aim.x, t.aim.y, t.aim.z)
       else a.aimPoint.lerp(tmpV.set(t.aim.x, t.aim.y, t.aim.z), 1 - Math.exp(-AIM_PT_K * dt))
+      // signed offset toward the figure's right: rotateY(yaw) * (1,0,0)
+      const rightOff = (a.aimPoint.x - a.pos.x) * Math.cos(a.yaw)
+        - (a.aimPoint.z - a.pos.z) * Math.sin(a.yaw)
+      if (down) a.aimSide = rightOff >= 0 ? 'r' : 'l'
+      else if (a.aimSide === 'l' ? rightOff > 0.25 : rightOff < -0.25) {
+        a.aimSide = a.aimSide === 'l' ? 'r' : 'l'
+      }
     }
-    if (a.aimWeight > 0.01 && rig.lArm && rig.lForeArm && rig.lHand) {
-      this.aimLimb(rig.lArm, rig.lForeArm, a.aimPoint, a.aimWeight)
-      this.aimLimb(rig.lForeArm, rig.lHand, a.aimPoint, a.aimWeight)
+    const ak = 1 - Math.exp(-AIM_K * dt)
+    a.aimWeightL += ((t.aim && a.aimSide === 'l' ? 1 : 0) - a.aimWeightL) * ak
+    a.aimWeightR += ((t.aim && a.aimSide === 'r' ? 1 : 0) - a.aimWeightR) * ak
+    if (a.aimWeightL > 0.01 && rig.lArm && rig.lForeArm && rig.lHand) {
+      this.aimLimb(rig.lArm, rig.lForeArm, a.aimPoint, a.aimWeightL)
+      this.aimLimb(rig.lForeArm, rig.lHand, a.aimPoint, a.aimWeightL)
+    }
+    if (a.aimWeightR > 0.01 && rig.rArm && rig.rForeArm && rig.rHand) {
+      this.aimLimb(rig.rArm, rig.rForeArm, a.aimPoint, a.aimWeightR)
+      this.aimLimb(rig.rForeArm, rig.rHand, a.aimPoint, a.aimWeightR)
     }
   }
 

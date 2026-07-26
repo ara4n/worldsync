@@ -310,7 +310,7 @@ declare const world: {
    * override it afterwards. Selecting a box still borrows orbit for
    * precision manipulation. */
   navigation(mode: 'orbit' | 'walk'): void
-  /** point the avatar's left hand at a world-space point - a hovered
+  /** point the avatar's nearer hand at a world-space point - a hovered
    * piano key, the tetris piece being steered - visible to every peer
    * (it rides the avatar plane). Overrides the built-in
    * point-at-selection while set; null lowers the hand again, as does

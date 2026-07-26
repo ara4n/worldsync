@@ -172,9 +172,12 @@ async function main() {
     })
     inspector.toggle()
   }
-  // ` is the HUD button's keyboard twin for the scene inspector
+  // ` is the HUD button's keyboard twin for the scene inspector. Match
+  // e.key, not e.code: code 'Backquote' is the PHYSICAL key left of 1,
+  // which on ISO (UK) Mac keyboards is section-sign - the backtick key
+  // there sits left of Z and reports code 'IntlBackslash'.
   addEventListener('keydown', e => {
-    if (e.code !== 'Backquote' || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return
+    if (e.key !== '`' || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return
     const t = e.target as HTMLElement | null
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
     toggleInspector()
@@ -897,7 +900,7 @@ async function main() {
     // world.avatars: board worlds (dots) hide the figures and retire the
     // colliders; back on (the default) when the script stops
     setAvatars: on => setAvatarsOn(on),
-    // world.aim: the script points the local figure's left hand (a
+    // world.aim: the script points the local figure's nearer hand (a
     // hovered piano key, the piece being steered). It rides the avatar
     // plane broadcast exactly like the built-in point-at-selection,
     // which it overrides while set.
@@ -1167,10 +1170,13 @@ async function main() {
   let avatarLastKey = ''
   const avatarStreamed = new Vector3(NaN, NaN, NaN)
   const aimPoint = (): Vec3 | undefined => {
-    if (scriptAim) return scriptAim // world.aim outranks the selection
-    const sel = nav.selection
-    if (!sel) return undefined
-    const p = (sel.kind === 'box' ? sel.mesh : sel.obj).getWorldPosition(new Vector3())
+    if (scriptAim) return scriptAim // world.aim outranks the built-ins
+    // a click-dragged box: the hand tracks the carry
+    const dragged = input.draggedEid !== null ? view.meshes.get(input.draggedEid) : null
+    const obj = dragged
+      ?? (nav.selection ? (nav.selection.kind === 'box' ? nav.selection.mesh : nav.selection.obj) : null)
+    if (!obj) return undefined
+    const p = obj.getWorldPosition(new Vector3())
     return { x: p.x, y: p.y, z: p.z }
   }
   // Spawn slots: an arc around the world's centre of interest - the
