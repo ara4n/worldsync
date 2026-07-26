@@ -191,6 +191,32 @@ export class Nav {
     return this.editOn && !!this.tc && (this.tc.dragging || this.tc.axis !== null)
   }
 
+  /** An orbit pivot that does NOT move the camera: the point on the
+   * current view ray at the object's depth. Selecting must not pop the
+   * view (Matthew: keep the camera exactly where it is); orbiting then
+   * swings around the selection's distance. */
+  private orbitTargetFor(p: THREE.Vector3): THREE.Vector3 {
+    const cam = this.view.camera
+    const dir = cam.getWorldDirection(this.tmpV)
+    const depth = Math.max(0.5, p.x * dir.x + p.y * dir.y + p.z * dir.z
+      - cam.position.dot(dir))
+    return cam.position.clone().addScaledVector(dir, depth)
+  }
+
+  /** Point the orbit controls at target without moving the camera: the
+   * target sits on the view ray (orbitTargetFor), and the polar clamp is
+   * widened to the current gaze - a walker looking level or upward sits
+   * outside the default limit, and OrbitControls would otherwise snap
+   * the camera to it (the pop this exists to kill). Recomputed at every
+   * handover, so a downward gaze tightens it back to the default. */
+  private setOrbitPivot(target: THREE.Vector3) {
+    const c = this.view.controls
+    c.target.copy(target)
+    const off = this.view.camera.position.clone().sub(target)
+    const polar = Math.acos(THREE.MathUtils.clamp(off.y / (off.length() || 1), -1, 1))
+    c.maxPolarAngle = THREE.MathUtils.clamp(Math.max(Math.PI / 2 - 0.05, polar + 0.02), 0, Math.PI - 0.01)
+  }
+
   private select(sel: Selection) {
     this.selected = sel
     this.editOn = false
@@ -199,7 +225,7 @@ export class Nav {
     // and world.highlight: last caller wins, which is fine for a jig
     this.view.setOutline([sel.mesh])
     this.applyMode() // walk hands over to orbit
-    this.view.controls.target.copy(sel.mesh.position) // orbit pivots the selection
+    this.setOrbitPivot(this.orbitTargetFor(sel.mesh.position))
     this.renderHud()
   }
 
@@ -288,7 +314,7 @@ export class Nav {
         pos: v3(m.position), vel: { x: 0, y: 0, z: 0 },
         rot: this.tc.mode === 'rotate' ? q4(m.quaternion) : undefined,
       })
-      this.view.controls.target.copy(m.position)
+      this.setOrbitPivot(this.orbitTargetFor(m.position))
     }
     this.gizmoEid = null
     this.view.poseAuthorityEid = null
@@ -305,6 +331,12 @@ export class Nav {
     }
     if (e.metaKey || e.ctrlKey || e.altKey) return
     if (this.effective() !== 'walk') return
+    // shift is a modifier, not a movement key: track it here or the
+    // held-keys set never learns about it and running never engages
+    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') {
+      this.keys.add(e.code)
+      return
+    }
     const scriptOwned = this.keysClaimedByScript()
       && ['Space', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.code)
     if (scriptOwned) return
@@ -336,10 +368,10 @@ export class Nav {
       } else {
         if (this.locked) document.exitPointerLock()
         this.view.controls.enabled = true
-        const target = this.selected
-          ? this.selected.mesh.position.clone()
-          : cam.position.clone().add(cam.getWorldDirection(this.tmpV).multiplyScalar(6))
-        this.view.controls.target.copy(target)
+        // pivot along the current view ray so the handover never pops
+        this.setOrbitPivot(this.selected
+          ? this.orbitTargetFor(this.selected.mesh.position)
+          : cam.position.clone().add(cam.getWorldDirection(this.tmpV).multiplyScalar(6)))
         this.view.controls.update()
       }
     }

@@ -182,7 +182,9 @@ await b.keyboard.up('ShiftLeft')
 const w2 = await camXZ(b)
 const ran = Math.hypot(w2.x - w1.x, w2.z - w1.z)
 console.log(`ran ${ran.toFixed(2)}m in 0.4s`)
-if (ran < walked * 0.6) fail(`shift-run covered ${ran.toFixed(2)}m in 0.4s, not faster than walking`)
+// walking covers ~1.6m in 0.4s, running ~3.6m: demand clearly more than a
+// walk (a lenient bound here once masked shift never registering at all)
+if (ran < 2.2) fail(`shift-run covered ${ran.toFixed(2)}m in 0.4s, expected ~3.6 (run), not ~1.6 (walk)`)
 
 await b.keyboard.press('Space')
 let apex = 0
@@ -213,6 +215,34 @@ await b.mouse.up()
 const dl1 = await b.evaluate(() => window.__jig.view.camera.rotation.y)
 if (Math.abs(dl1 - dl0) < 0.3) fail(`drag-look turned ${(dl1 - dl0).toFixed(2)}rad, expected ~0.66`)
 console.log(`drag-look turned ${(dl1 - dl0).toFixed(2)}rad`)
+
+// -- selecting while walking must NOT pop the camera (and deselecting
+// must hand back to walk equally seamlessly) --
+await b.evaluate(id => {
+  const cam = window.__jig.view.camera.position
+  window.__jig.nav.setCameraPose({ x: cam.x, y: cam.y, z: cam.z }, window.__jig.pos(id))
+}, netId)
+await b.waitForTimeout(200)
+const camPose = () => b.evaluate(() => ({
+  p: window.__jig.view.camera.position.toArray(),
+  q: window.__jig.view.camera.quaternion.toArray(),
+}))
+const poseDelta = (u, v) => Math.max(
+  Math.hypot(...u.p.map((n, i) => n - v.p[i])),
+  1 - Math.abs(u.q.reduce((s, n, i) => s + n * v.q[i], 0)))
+const c0 = await camPose()
+const spt = await b.evaluate(id => window.__jig.screenPos(id), netId)
+await b.mouse.click(spt.x, spt.y)
+await b.waitForFunction(() => !!window.__jig.nav.selection, null, { timeout: 2000 })
+await b.waitForTimeout(500) // damping and clamps get a chance to misbehave
+const c1 = await camPose()
+if (poseDelta(c0, c1) > 0.01) fail(`selecting while walking popped the camera (delta ${poseDelta(c0, c1).toFixed(4)})`)
+await b.keyboard.press('Escape')
+await b.waitForFunction(() => !window.__jig.nav.selection, null, { timeout: 2000 })
+await b.waitForTimeout(300)
+const c2 = await camPose()
+if (poseDelta(c0, c2) > 0.01) fail(`deselecting popped the camera (delta ${poseDelta(c0, c2).toFixed(4)})`)
+console.log('select and deselect left the camera untouched')
 await b.evaluate(() => { window.__jig.nav.lockBroken = false })
 
 await b.evaluate(() => window.__jig.nav.setUserMode('orbit'))
