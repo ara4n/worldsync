@@ -52,7 +52,7 @@ const HEAD_K = 10
 const AIM_K = 6
 const AIM_PT_K = 10 // the point itself chases too, or the arm pops per step
 
-const DEFAULT_URL = `${import.meta.env.BASE_URL}avatar-default.glb`
+const DEFAULT_URL = `${import.meta.env.BASE_URL}avatar-robot.glb`
 
 /** find a mixamo bone whether or not the loader stripped the ':' */
 const bone = (root: THREE.Object3D, name: string): THREE.Object3D | null =>
