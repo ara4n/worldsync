@@ -347,6 +347,8 @@ async function main() {
   let scriptMoveOn = false
   let scriptKeysOn = false
   let scriptMidiOn = false
+  // world.aim: the script's left-hand point target for the local figure
+  let scriptAim: Vec3 | null = null
   // Arrow keys go to the script while it defines world.onkeydown; typing
   // in the panel or the monaco editor keeps them (same guard as M/V).
   addEventListener('keydown', e => {
@@ -895,6 +897,12 @@ async function main() {
     // world.avatars: board worlds (dots) hide the figures and retire the
     // colliders; back on (the default) when the script stops
     setAvatars: on => setAvatarsOn(on),
+    // world.aim: the script points the local figure's left hand (a
+    // hovered piano key, the piece being steered). It rides the avatar
+    // plane broadcast exactly like the built-in point-at-selection,
+    // which it overrides while set.
+    setAim: (x, y, z) => { scriptAim = { x, y, z } },
+    clearAim: () => { scriptAim = null },
     // world.sendMidi: the script PERFORMS - its bytes take the exact
     // hardware path (own script + audio engine + broadcast), so a clicked
     // piano key sounds and moves on every peer. Deferred a microtask so
@@ -984,6 +992,7 @@ async function main() {
     for (const id of [...scriptLabels]) scriptHost.removeLabel(id) // and its labels
     restoreSceneNodes() // scene nodes it moved go back where the glb put them
     scriptInteractables.clear()
+    scriptAim = null // the hand comes down with the script
     nav.setScriptMode(null) // clears its default memory; the mode stands
     setAvatarsOn(true) // avatars come back if it hid them
     view.setOutline([]) // its hover/selection glow goes with it
@@ -1158,6 +1167,7 @@ async function main() {
   let avatarLastKey = ''
   const avatarStreamed = new Vector3(NaN, NaN, NaN)
   const aimPoint = (): Vec3 | undefined => {
+    if (scriptAim) return scriptAim // world.aim outranks the selection
     const sel = nav.selection
     if (!sel) return undefined
     const p = (sel.kind === 'box' ? sel.mesh : sel.obj).getWorldPosition(new Vector3())

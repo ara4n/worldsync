@@ -193,6 +193,13 @@ await a.frame.evaluate(() => {
   window.__jig.nav.lockBroken = true
 })
 await a.frame.waitForFunction(() => Math.abs(window.__jig.view.camera.position.y - 1.6) < 0.1, null, { timeout: 4000 })
+// entering walk rejoins the figure at its spawn slot, which is too far
+// from the keyboard for the projected key point to land on the key
+// mesh; step up to it like a player would (the pose grounds the walker)
+await a.frame.evaluate(() => {
+  window.__jig.nav.setCameraPose({ x: 0, y: 2, z: 2.5 }, { x: 0, y: 0.745, z: 0.3 })
+})
+await a.page.waitForTimeout(200)
 const sw = await a.frame.evaluate(() => {
   const key = window.__jig.view.scene.getObjectByName('key_84')
   const p = key.getWorldPosition(key.position.clone())

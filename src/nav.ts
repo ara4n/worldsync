@@ -31,9 +31,9 @@ import type { Emitter } from './input'
  * orbit view drifted.
  *
  * Walk mode has two thirdroom-style toggles: V swings the camera out to
- * an over-the-shoulder boom (same mouselook, the figure in view), and F
+ * an over-the-shoulder boom (same mouselook, the figure in view), and B
  * toggles flight - gravity off, W/S along the full LOOK ray (look up and
- * press W to gain height), A/D still level. Landing is F again; the
+ * press W to gain height), A/D still level. Landing is B again; the
  * floor stops a downward glide either way.
  *
  * The avatar is pure camera - local cosmetics, never sim state: walking
@@ -105,7 +105,7 @@ export class Nav {
   private pitch = 0
   private vy = 0
   private grounded = false
-  // walk-mode camera + flight toggles (V and F); both survive mode
+  // walk-mode camera + flight toggles (V and B); both survive mode
   // round-trips, so orbit detours keep your chosen viewpoint and altitude
   private shoulder = false
   private flying = false
@@ -225,14 +225,17 @@ export class Nav {
     if (m) this.setUserMode(m)
   }
 
-  /** world.camera while walking: adopt the pose as the avatar's (eye at
-   * pos, facing target); orbit keeps the classic framing hint */
+  /** world.camera while walking: the framing hint GROUNDS the avatar -
+   * feet on the floor beneath pos, eyes aimed at target. (Adopting an
+   * elevated hint verbatim used to hang the walker in mid-air and drop
+   * it into the scene.) Orbit keeps the classic framing verbatim. */
   setCameraPose(pos: { x: number; y: number; z: number }, target: { x: number; y: number; z: number }) {
     if (this.effective() !== 'walk') { this.view.setCameraPose(pos, target); return }
-    this.feet.set(pos.x, pos.y - EYE_HEIGHT, pos.z)
+    this.feet.set(pos.x, this.floorAt(pos.x, pos.z, pos.y), pos.z)
     this.prevFeet.copy(this.feet) // a teleport is not motion: no velocity spike
     this.vy = 0
-    const d = this.tmpV.set(target.x - pos.x, target.y - pos.y, target.z - pos.z).normalize()
+    const eyeY = this.feet.y + EYE_HEIGHT
+    const d = this.tmpV.set(target.x - pos.x, target.y - eyeY, target.z - pos.z).normalize()
     this.yaw = Math.atan2(-d.x, -d.z)
     this.pitch = THREE.MathUtils.clamp(Math.asin(THREE.MathUtils.clamp(d.y, -1, 1)), -PITCH_MAX, PITCH_MAX)
   }
@@ -463,13 +466,13 @@ export class Nav {
       this.toggleMode()
       return
     }
-    // V: over-the-shoulder camera; F: flight - walk-mode toggles, like
-    // thirdroom's
+    // V: over-the-shoulder camera; B: flight - walk-mode toggles, with
+    // thirdroom's key bindings
     if (e.code === 'KeyV' && !e.repeat && this.effective() === 'walk') {
       this.shoulder = !this.shoulder
       return
     }
-    if (e.code === 'KeyF' && !e.repeat && this.effective() === 'walk') {
+    if (e.code === 'KeyB' && !e.repeat && this.effective() === 'walk') {
       this.flying = !this.flying
       this.vy = 0 // lift or land from rest either way
       this.renderHud()
@@ -678,7 +681,7 @@ export class Nav {
       () => this.toggleMode(),
       'toggle first-person walking (WASD / shift / space) vs orbit view (O)')
     if (mode === 'walk') {
-      const fv = `${this.flying ? 'F: land' : 'F: fly'} · V: shoulder cam`
+      const fv = `${this.flying ? 'B: land' : 'B: fly'} · V: shoulder cam`
       hint(this.locked
         ? `WASD move · shift run · space jump · ${fv} · 1: spawn · drag box: carry · click: select · esc: cursor`
         : this.lockBroken

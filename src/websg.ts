@@ -177,6 +177,10 @@ export interface ScriptHost {
    * turn them off). Hides every figure AND retires this peer's own
    * avatar collider; restored when the script stops. */
   setAvatars(on: boolean): void
+  /** point the local avatar's left hand at a world point (rides the
+   * avatar plane to every peer); clearAim lowers it again */
+  setAim(x: number, y: number, z: number): void
+  clearAim(): void
   /** send a raw MIDI channel message as if a local device played it:
    * echoed into our own world.onmidi and the audio engine, and broadcast
    * on the cosmetic midi plane, so a script-driven note (clicked piano
@@ -521,6 +525,13 @@ const PRELUDE = `
     navigation(mode) { H.setNavMode(String(mode)) },
     // show/hide peer avatars (on by default; dots turns them off)
     avatars(on) { H.setAvatars(on !== false) },
+    // point the avatar's left hand at a world-space point (a hovered
+    // piano key, the piece being steered); replicated to every peer,
+    // overrides the built-in point-at-selection; null lowers the hand
+    aim(p) {
+      if (p == null) H.clearAim()
+      else { const t = vec(p); H.setAim(t.x, t.y, t.z) }
+    },
     createBoxMesh: (p) => ({ __mesh: p }),
     createCollider: (p) => ({ __collider: p }),
     createMaterial: (p) => ({ __material: p }),
@@ -714,6 +725,11 @@ export class WorldScript {
     })
     fn('setNavMode', (m) => { host.setNavMode(ctx.getString(m)); return ctx.undefined })
     fn('setAvatars', (v) => { host.setAvatars(ctx.dump(v) === true); return ctx.undefined })
+    fn('setAim', (x, y, z) => {
+      host.setAim(ctx.getNumber(x), ctx.getNumber(y), ctx.getNumber(z))
+      return ctx.undefined
+    })
+    fn('clearAim', () => { host.clearAim(); return ctx.undefined })
     ctx.setProp(ctx.global, '__host', bridge)
     bridge.dispose()
   }

@@ -52,9 +52,9 @@ the center section for all axes. Edits replicate live through the ordinary
 protocol (grab + pose stream + release; scale lands as one `resize` op).
 Click empty space or press esc to deselect and return to where you were.
 In walk mode, `V` toggles an over-the-shoulder third-person camera
-(same mouselook, your figure in view) and `F` toggles flight,
+(same mouselook, your figure in view) and `B` toggles flight,
 thirdroom-style: gravity off, W/S along the full look direction - look
-up and press W to gain height - with A/D still level. Press `F` again
+up and press W to gain height - with A/D still level. Press `B` again
 to land.
 Press `O` (or the HUD toggle) to flip between walk and orbit. The avatar
 stays steerable while in orbit: WASD walks the figure third-person
@@ -222,6 +222,9 @@ accent color for drawing in) - plus `world.env` (background/fog/ground),
 and `world.navigation('orbit'|'walk')`, which suggests a starting
 navigation mode for worlds where one regime fits best (a floating dots
 board is no place to open on foot); the user's toggle can override it.
+`world.aim({x,y,z})` points the avatar's left hand at a world-space
+point - piano aims it at the key under your cursor, tetrix at the piece
+you're steering - visible to every peer; `world.aim(null)` lowers it.
 Prop motion is animated client-side (bounce drops,
 fade-in spawns, pop-out despawns): the sim stores logical poses,
 renderers add the juice.

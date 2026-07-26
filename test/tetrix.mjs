@@ -63,6 +63,15 @@ ps = cellsOf(await props(a.frame)).filter((p) => p.claim)
 if (!ps.length || Math.max(...ps.map((p) => p.y)) >= y0) fail('piece did not fall under gravity')
 else console.log('spawn + gravity: ok')
 
+// world.aim: while steering a piece the local figure's left hand points
+// at it (the same avatar-plane field the point-at-selection uses)
+const aimed = await a.frame.waitForFunction(() => {
+  const d = window.__jig.view.avatars.debug()[window.__jig.session.id]
+  return !!d && d.aimWeight > 0.5
+}, null, { timeout: 10000 }).then(() => true).catch(() => false)
+if (!aimed) fail('avatar hand does not aim at the falling piece (world.aim)')
+else console.log('avatar hand points at the falling piece: ok')
+
 // the next-piece ghost: four preview cells (size PREV=0.26), opaque but
 // dimmed to 70% of the piece colour's RGB, hover above the well top, and
 // a name plane labels the lane

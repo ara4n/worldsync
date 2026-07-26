@@ -390,9 +390,32 @@ for precision manipulation instead of carrying it around. Decisions:
   ~5..85deg clamp and setOrbitPivot's clamp-widening dance are gone).
   Backtick toggles the scene inspector.
 - Walk-mode toggles (2026-07-26, thirdroom semantics): V = over-the-
-  shoulder boom (SHOULDER_BACK/RIGHT in nav.ts, floor-clamped), F =
+  shoulder boom (SHOULDER_BACK/RIGHT in nav.ts, floor-clamped), B =
   flight (gravity off, W/S along the full look ray, A/D level, floor
   stops a downward glide). Both flags survive orbit round-trips.
+- world.aim({x,y,z}|null) (2026-07-26): scripts point the local
+  figure's left hand at a world point; it rides the avatar-plane
+  broadcast (same field the point-at-selection uses, script wins while
+  set) so every peer sees it. Piano points at the hovered key
+  (onpointermove ev.point), tetrix at the piece being steered; cleared
+  on script stop. Example scripts GUARD the call (if (world.aim)):
+  scripts live in room state and outlive app bundles in cached host
+  iframes, and an undefined world API errors the script dead after
+  MAX_CONSECUTIVE_ERRORS dispatches - which then makes clicks fall
+  through to selection ("clicking keys selects them" = stale bundle).
+- Loop-wrap head flicker (2026-07-26, found by frame-sampling probes):
+  Mixamo clips start at frame 1 (t=1/30), and while a looping action's
+  time sits before the first keyframe the mixer leaves bones UNWRITTEN,
+  so the post-mixer head-pitch/aim overrides compounded frame over
+  frame (head visibly spun for ~4 frames per loop at 120Hz). Fix in
+  avatar.ts ensureAsset: shift every clip's tracks to start at 0.
+  Caveat that bit during the fix: glTF tracks SHARE times arrays
+  (samplers reuse input accessors) - shift each ARRAY once, not per
+  track, or shared arrays shift many times and clips collapse.
+- world.camera while walking grounds the avatar (2026-07-26): the
+  framing hint's feet drop to the floor beneath pos and the eyes aim at
+  target; adopting an elevated hint verbatim used to hang the walker
+  mid-air and drop it into the scene.
 - Selection outline shares the OutlinePass with the inspector and
   world.highlight: last caller wins, fine for a jig.
 - POINTER LOCK (bug Matthew hit in the piano room, fixed 2026-07-26):

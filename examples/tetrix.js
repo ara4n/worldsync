@@ -502,6 +502,21 @@ world.onupdate = (dt, time) => {
     }
   }
 
+  // the avatar's left hand tracks the piece we're steering (every peer
+  // sees the pointing; the hand comes down between pieces). world.aim
+  // guarded: stale host bundles predate it, and erroring here would
+  // kill the script.
+  if (world.aim) {
+    if (piece) {
+      let ax = 0, ay = 0
+      for (const [c, r] of blocksFor(piece.type, piece.x, piece.y, piece.rot)) {
+        ax += wx(c) / 4
+        ay += wy(r) / 4
+      }
+      world.aim({ x: ax, y: ay, z: 0 })
+    } else world.aim(null)
+  }
+
   // our score prop: adopt a survivor from a previous session (the claim
   // is ours across reloads, keeping the score), else spawn one; if ours
   // vanished (a sweep race), let it respawn

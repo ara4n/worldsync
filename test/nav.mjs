@@ -442,8 +442,8 @@ await b.waitForTimeout(120)
 if (await eyeDist() > 0.05) fail('second V did not return to first person')
 console.log('V toggled the shoulder cam and back')
 
-// -- F: flight - look up, W climbs along the look ray; F again lands --
-await b.keyboard.press('KeyF')
+// -- B: flight - look up, W climbs along the look ray; B again lands --
+await b.keyboard.press('KeyB')
 await b.keyboard.down('ArrowUp') // pitch the gaze well up
 await b.waitForTimeout(700)
 await b.keyboard.up('ArrowUp')
@@ -453,9 +453,9 @@ await b.keyboard.up('KeyW')
 const flew = await b.evaluate(() => window.__jig.nav.avatarState.pos.y)
 console.log(`flew to ${flew.toFixed(2)}m`)
 if (flew < 0.5) fail(`flying W while looking up climbed only ${flew.toFixed(2)}m`)
-await b.keyboard.press('KeyF') // land
+await b.keyboard.press('KeyB') // land
 await b.waitForFunction(() => window.__jig.nav.avatarState.pos.y < 0.5, null, { timeout: 3000 })
-console.log('F landed the walker')
+console.log('B landed the walker')
 
 // -- the sims must still agree after all of it --
 await a.waitForTimeout(1000)

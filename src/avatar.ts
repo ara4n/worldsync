@@ -29,7 +29,7 @@ export interface AvatarPose {
   vel: Vec3 // m/s world space; drives locomotion clip selection
   grounded: boolean
   mode: 'walk' | 'orbit'
-  aim?: Vec3 | null // left-hand point target while the peer has a selection
+  aim?: Vec3 | null // left-hand point target (selection, or world.aim)
 }
 
 // thirdroom's animation.game.ts constants, thresholds re-tuned to this
@@ -219,6 +219,26 @@ export class Avatars {
     this.loading = true
     new GLTFLoader().load(this.url, gltf => {
       this.loading = false
+      // Mixamo tracks start at frame 1 (t=1/30). While a looping action's
+      // time sits BEFORE the first keyframe, the mixer leaves the bones
+      // unwritten - so the post-mixer head/aim overrides compound frame
+      // over frame and the head visibly spins for a frame or two at every
+      // loop wrap (worst on 120Hz displays). Shift every clip to start at
+      // 0 so there is no clamp zone; first and last keys are identical in
+      // these clips, so the loop stays seamless. glTF tracks SHARE their
+      // times arrays (samplers reuse input accessors), so shift each
+      // array instance once, not once per track.
+      const shifted = new Set<ArrayLike<number>>()
+      for (const clip of gltf.animations) {
+        const t0 = Math.min(...clip.tracks.map(tr => tr.times[0]))
+        if (!(t0 > 0) || !Number.isFinite(t0)) continue
+        for (const tr of clip.tracks) {
+          if (shifted.has(tr.times)) continue
+          shifted.add(tr.times)
+          for (let i = 0; i < tr.times.length; i++) tr.times[i] -= t0
+        }
+        clip.resetDuration()
+      }
       gltf.scene.traverse(node => {
         const mesh = node as THREE.Mesh
         if (!mesh.isMesh) return

@@ -99,6 +99,11 @@ world.onpointerdown = (ev) => {
   world.sendMidi(0x90, clicked, 100)
 }
 world.onpointermove = (ev) => {
+  // the avatar's left hand tracks the cursor across the keyboard
+  // (ev.point is the world-space hit; every peer sees the pointing).
+  // Guarded: scripts outlive app bundles in cached host iframes, and an
+  // undefined API here would error the script dead after three moves.
+  if (world.aim) world.aim(ev.entity && ev.entity.startsWith('key_') ? ev.point : null)
   if (!dragging) return
   const note = ev.entity && ev.entity.startsWith('key_') ? Number(ev.entity.slice(4)) : null
   if (note === clicked) return
