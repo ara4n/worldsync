@@ -22,8 +22,10 @@
 //
 // Upload with "load world script (.js)". Click the world once so keys
 // focus, then: left/right move, up rotates, down soft-drops, space
-// hard-drops. Foreground game, like snake: a throttled hidden tab
-// stamps its ops late and trips the divergence detector.
+// hard-drops, P pauses (for everyone - the well is shared, so a solo
+// freeze would just leave a piece hovering in play). Foreground game,
+// like snake: a throttled hidden tab stamps its ops late and trips the
+// divergence detector.
 
 const H = 24, LANE = 5
 const CELL = 0.6, CB = 0.29 // cell prop half-size: the "tetrix cell" tag
@@ -45,6 +47,9 @@ const X0 = -9, Y0 = 0.3     // world pos of column 0, bottom row (resting on the
 // name plane (local canvas-text labels, one per peer) floats above each
 // lane's ghost so you can see who is playing where.
 const SCORE = 0.27, LINES = 0.24
+// The pause flag is another hidden prop (unclaimed, size-tagged):
+// presence = paused, so late joiners load frozen and anyone can unpause
+const PAUSE = 0.22
 const PREV = 0.26 // next-piece ghost cells: dimmed boxes tagged by this size
 /** the ghost's colour: each RGB channel at 70% */
 const dim = (c) => (Math.floor(((c >> 16) & 0xff) * 0.7) << 16)
@@ -100,7 +105,7 @@ const wy = (r) => Y0 + (H - 1 - r) * CELL
 
 let me, W = 10
 let cells = [] // this frame's cell props: {id, c, r, claimedBy, color}
-let scoreProps = [], linesProp = null
+let scoreProps = [], linesProp = null, pauseProps = [], pauseFlipAt = -10
 let scoreId = null, scoreWait = -10, linesWait = -10, myScore = 0, hadLines = false
 let prevScore = null // last game's score, captured at the wipe; local
                      // only, so just our own HUD row shows it
@@ -128,7 +133,7 @@ world.onenter = () => { me = world.me }
 // -- derived state --
 
 const scan = () => {
-  cells = []; scoreProps = []; linesProp = null; previews = []
+  cells = []; scoreProps = []; linesProp = null; previews = []; pauseProps = []
   for (const p of world.props()) {
     if (p.kind === 'box' && p.size === PREV) {
       previews.push({ id: p.id, claimedBy: p.claimedBy })
@@ -144,6 +149,8 @@ const scan = () => {
       scoreProps.push(p)
     } else if (p.kind === 'sphere' && p.size === LINES) {
       linesProp = p
+    } else if (p.kind === 'sphere' && p.size === PAUSE) {
+      pauseProps.push(p)
     }
   }
 }
@@ -307,7 +314,18 @@ const spawnPiece = () => {
 }
 
 world.onkeydown = (ev) => {
-  if (!piece) return
+  // P toggles the shared pause flag; two peers racing the toggle can
+  // spawn twin flags, so unpause despawns them all. The 1s guard rides
+  // out the fold before our own flip shows up in world.props() (a
+  // double-tap would otherwise act on stale state and double-spawn).
+  if (ev.key === 'p' || ev.key === 'P') {
+    if (now - pauseFlipAt < 1) return
+    pauseFlipAt = now
+    if (pauseProps.length) for (const p of pauseProps) world.despawn(p.id)
+    else world.createSphere({ position: { x: 2, y: HIDE_Y, z: 0 }, color: 0, radius: PAUSE, unlit: true, bounce: false })
+    return
+  }
+  if (pauseProps.length || !piece) return
   switch (ev.key) {
     case 'ArrowUp': tryMove(piece.x, piece.y, (piece.rot + 1) % 4); break
     case 'ArrowLeft': tryMove(piece.x - 1, piece.y, piece.rot); break
@@ -448,7 +466,12 @@ world.onupdate = (dt, time) => {
     return now - lq.t < 5
   })
 
-  if (!piece && now >= respawnAt) spawnPiece()
+  // paused (the flag prop exists): pieces neither fall nor spawn, and
+  // the primary sits on its line clears; claim/unclaim housekeeping and
+  // the orphan sweeps keep running - protocol upkeep is not gameplay
+  const paused = pauseProps.length > 0
+
+  if (!piece && !paused && now >= respawnAt) spawnPiece()
   // the next-piece ghost: dimmed cells hovering GAP squares above
   // our lane so we can prepare for the roll; rebuilt whenever the roll
   // (or our lane, as players come and go) changes. Reload leftovers -
@@ -492,7 +515,7 @@ world.onupdate = (dt, time) => {
   for (const [id, l] of [...laneLabels]) {
     if (!ps.some((q) => q.id === id)) { l.label.despawn(); laneLabels.delete(id) }
   }
-  if (piece) {
+  if (piece && !paused) {
     gravAcc += dt
     if (gravAcc >= gravityS()) {
       gravAcc = 0
@@ -543,7 +566,8 @@ world.onupdate = (dt, time) => {
     .sort((a, b) => b.score - a.score)
   // markup stays inside the HUD's Matrix-subset allowlist: styles only
   // ride on span/font, so the highlight wraps the cells
-  let html = `<b>tetrix</b> · level ${level()} · ${linesProp ? linesProp.color : 0} lines<table>`
+  let html = `<b>tetrix</b> · level ${level()} · ${linesProp ? linesProp.color : 0} lines`
+    + (paused ? ' · <b>paused</b> (P resumes)' : '') + '<table>'
   for (const r of board) {
     const cell = (s) => (r.mine ? `<span style="color:#7fe0a0">${s}</span>` : s)
     const score = r.mine && prevScore !== null ? `${r.score} (prev ${prevScore})` : r.score
@@ -561,7 +585,7 @@ world.onupdate = (dt, time) => {
   }
   const landed = cells.filter((c) => c.claimedBy === '')
   if (pendingClear) {
-    if (now - pendingClear.t < 0.35) return
+    if (paused || now - pendingClear.t < 0.35) return
     // execute against a fresh scan: despawn the full rows, drop the rest
     const rows = pendingClear.rows
     for (const cell of landed) {
@@ -581,7 +605,7 @@ world.onupdate = (dt, time) => {
     ;(byRow[cell.r] ??= new Set()).add(cell.c)
   }
   const full = Object.keys(byRow).map(Number).filter((r) => byRow[r].size >= W)
-  if (full.length) {
+  if (full.length && !paused) {
     for (const cell of landed) if (full.includes(cell.r)) world.paint(cell.id, 0xffffff)
     pendingClear = { rows: full.sort((a, b) => a - b), t: now }
     console.log(`clearing ${full.length} line${full.length > 1 ? 's' : ''}`)

@@ -168,9 +168,9 @@ declare const world: {
   onpointerdown: ((ev: WorldPointerEvent) => void) | null
   onpointermove: ((ev: WorldPointerEvent) => void) | null
   onpointerup: ((ev: WorldPointerEvent) => void) | null
-  /** arrow-key and space presses (ev.key: 'ArrowUp' | 'ArrowDown' |
-   * 'ArrowLeft' | 'ArrowRight' | ' '), delivered only while this handler
-   * is defined */
+  /** arrow-key, space and P presses (ev.key: 'ArrowUp' | 'ArrowDown' |
+   * 'ArrowLeft' | 'ArrowRight' | ' ' | 'p' | 'P'), delivered only while
+   * this handler is defined */
   onkeydown: ((ev: { key: string }) => void) | null
   /** MIDI input from every peer's connected devices (WebMIDI). Defining
    * this handler is the subscription: the host only requests MIDI access

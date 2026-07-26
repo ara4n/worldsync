@@ -63,6 +63,28 @@ ps = cellsOf(await props(a.frame)).filter((p) => p.claim)
 if (!ps.length || Math.max(...ps.map((p) => p.y)) >= y0) fail('piece did not fall under gravity')
 else console.log('spawn + gravity: ok')
 
+// P pauses for everyone (a hidden shared flag prop): the HUD says so,
+// the piece freezes, and P again resumes the fall
+await a.frame.click('canvas', { position: { x: 40, y: 40 } })
+await a.page.keyboard.press('p')
+const pausedHud = await a.frame.waitForFunction(() =>
+  (document.getElementById('hud')?.innerHTML ?? '').includes('paused'),
+  null, { timeout: 10000 }).then(() => true).catch(() => false)
+if (!pausedHud) fail('HUD never showed paused after P')
+await a.page.waitForTimeout(500) // let any pre-pause gravity step fold
+ps = cellsOf(await props(a.frame)).filter((p) => p.claim)
+const yPause = Math.max(...ps.map((p) => p.y))
+await a.page.waitForTimeout(2500)
+ps = cellsOf(await props(a.frame)).filter((p) => p.claim)
+if (!ps.length || Math.max(...ps.map((p) => p.y)) < yPause - 0.01) fail('piece kept falling while paused')
+await a.page.keyboard.press('p')
+const resumed = await a.frame.waitForFunction((y) => {
+  const cs = window.__jig.props().filter((p) => p.claim && Math.abs(p.z) < 0.01 && p.y > 0 && p.y < 15)
+  return cs.length === 4 && Math.max(...cs.map((p) => p.y)) < y - 0.01
+}, yPause, { timeout: 10000 }).then(() => true).catch(() => false)
+if (!resumed) fail('piece did not resume falling after unpause')
+else console.log('P pause + resume: ok')
+
 // world.aim: while steering a piece the local figure's left hand points
 // at it (the same avatar-plane field the point-at-selection uses)
 const aimed = await a.frame.waitForFunction(() => {

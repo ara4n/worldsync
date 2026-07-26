@@ -352,11 +352,12 @@ async function main() {
   let scriptMidiOn = false
   // world.aim: the script's left-hand point target for the local figure
   let scriptAim: Vec3 | null = null
-  // Arrow keys go to the script while it defines world.onkeydown; typing
-  // in the panel or the monaco editor keeps them (same guard as M/V).
+  // Arrow keys (and space, and P - tetrix pauses on it) go to the script
+  // while it defines world.onkeydown; typing in the panel or the monaco
+  // editor keeps them (same guard as M/V).
   addEventListener('keydown', e => {
     if (!script || !scriptKeysOn || e.metaKey || e.ctrlKey || e.altKey) return
-    if (![' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return
+    if (![' ', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'p', 'P'].includes(e.key)) return
     const t = e.target as HTMLElement | null
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA')) return
     e.preventDefault()
