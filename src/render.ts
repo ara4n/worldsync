@@ -648,7 +648,7 @@ export class View {
       }
     }
     this.props.update(now)
-    this.avatars.update(now)
+    this.avatars.update(now, this.camera.position)
     // walk mode disables the orbit controls and drives the camera itself;
     // update() would snap the camera back onto the orbit sphere
     if (this.controls.enabled) this.controls.update()

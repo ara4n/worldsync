@@ -1238,7 +1238,6 @@ async function main() {
       grounded: st.grounded, mode, aim: aimPoint(),
     }
     view.avatars.apply(session.id, { ...pose, aim: pose.aim ?? null })
-    view.avatars.firstPerson = mode === 'walk'
     if (now - avatarLastSent >= TICK_MS) {
       const key = JSON.stringify(pose)
       if (key !== avatarLastKey || now - avatarLastSent > 1000) {

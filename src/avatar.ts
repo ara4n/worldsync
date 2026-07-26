@@ -115,10 +115,8 @@ export class Avatars {
   readonly group = new THREE.Group()
   /** world.avatars(false): board worlds hide the whole layer */
   enabled = true
-  /** the local peer id; its figure hides while it is first-person */
+  /** the local peer id; its figure hides while the camera is inside it */
   localId = ''
-  /** true while the local view is first-person walk (own figure hidden) */
-  firstPerson = false
 
   /** main wires this to the panel log */
   log: (line: string) => void = () => {}
@@ -168,8 +166,12 @@ export class Avatars {
 
   has(peer: string) { return this.avatars.has(peer) }
 
-  /** per-frame: smoothing, locomotion blending, head + arm overrides */
-  update(nowMs: number) {
+  /** per-frame: smoothing, locomotion blending, head + arm overrides.
+   * cameraPos hides the LOCAL figure whenever the camera is inside it -
+   * which covers first-person walking AND the moment just after going
+   * out-of-body (the orbit camera starts at the eyes; the figure fades
+   * back in once you swing away instead of filling the screen). */
+  update(nowMs: number, cameraPos: THREE.Vector3 | null = null) {
     const dt = Math.min((nowMs - this.lastMs) / 1000, 0.1)
     this.lastMs = nowMs
     if (!this.enabled) return
@@ -177,23 +179,36 @@ export class Avatars {
     for (const [peer, a] of this.avatars) {
       if (!a.rig) this.buildRig(a)
       const rig = a.rig!
-      rig.group.visible = !(peer === this.localId && this.firstPerson)
+      rig.group.visible = !(peer === this.localId && cameraPos
+        && cameraPos.distanceToSquared(tmpV.set(a.pos.x, a.pos.y + 1.6, a.pos.z)) < 1.44)
       this.animate(a, dt)
     }
   }
 
-  /** dominant clip name per peer, for tests and the console */
-  debug(): Record<string, { clip: string; weight: number; pos: Vec3; visible: boolean }> {
-    const out: Record<string, { clip: string; weight: number; pos: Vec3; visible: boolean }> = {}
+  /** dominant clip name per peer plus override state, for tests/console */
+  debug(): Record<string, {
+    clip: string; weight: number; pos: Vec3; visible: boolean
+    headPitch: number; aimWeight: number; bones: boolean
+    headWorldY: number | null
+  }> {
+    const out: ReturnType<Avatars['debug']> = {}
     for (const [peer, a] of this.avatars) {
       let clip = '', weight = 0
       for (const [name, action] of a.rig?.actions ?? []) {
         if (action.weight > weight) { weight = action.weight; clip = name }
       }
+      let headWorldY: number | null = null
+      if (a.rig?.head) {
+        a.rig.head.getWorldDirection(tmpV) // bone +Z in world
+        headWorldY = tmpV.y
+      }
       out[peer] = {
         clip, weight,
         pos: { x: a.pos.x, y: a.pos.y, z: a.pos.z },
         visible: !!a.rig?.group.visible && this.enabled,
+        headPitch: a.headPitch, aimWeight: a.aimWeight,
+        bones: !!(a.rig?.head && a.rig.lArm && a.rig.lForeArm),
+        headWorldY,
       }
     }
     return out
@@ -227,11 +242,12 @@ export class Avatars {
   private buildRig(a: PeerAvatar) {
     const root = cloneSkinned(this.asset!.scene)
     const group = new THREE.Group()
-    // mixamo figures face +Z in bind pose; the jig's yaw-0 forward is -Z
+    // mixamo figures face +Z in bind pose; the jig's yaw-0 forward is -Z,
+    // so the rig flips once inside the group and the group takes raw yaw
     root.rotation.y = Math.PI
     group.add(root)
     group.position.copy(a.pos)
-    group.rotation.y = a.yaw + Math.PI
+    group.rotation.y = a.yaw
     this.group.add(group)
     const mixer = new THREE.AnimationMixer(root)
     const actions = new Map<string, THREE.AnimationAction>()
@@ -299,7 +315,7 @@ export class Avatars {
     a.yaw += yawStep
     a.yawVel = dt > 0 ? a.yawVel * 0.8 + (yawStep / dt) * 0.2 : a.yawVel
     rig.group.position.copy(a.pos)
-    rig.group.rotation.y = a.yaw + Math.PI
+    rig.group.rotation.y = a.yaw
 
     // -- locomotion blending: fade everything out, chosen clips in,
     // phase-aligned so blends do not slide feet --
