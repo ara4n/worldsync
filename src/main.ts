@@ -535,14 +535,16 @@ async function main() {
   // OWN MXID as the state key (core auth rules bar writing anyone else's
   // @-prefixed key, so per-user events cannot clobber each other;
   // nothing stops lying in your own - no witnessing yet). The widget
-  // capabilities for these are NOT part of the boot handshake: they are
-  // renegotiated (MSC2974) on the first state API call, so worlds that
-  // never touch room state never prompt the user for it. Content is
-  // entirely the script's business - the example games keep top-10
-  // highscore lists in io.element.highscores - the host only stores,
-  // capping size and rate. Reads are local cosmetics for HUDs and never
-  // touch the sim. Outside widget mode an in-memory map stands in so
-  // scripts behave; it dies with the tab.
+  // capabilities for these are requested lazily (MSC2974) on the first
+  // state API call, so worlds that never touch room state never prompt -
+  // and the request flags the room in localStorage so FUTURE boots fold
+  // them into the boot handshake instead, keeping stock Element Web's
+  // capability memory intact (see initWidgetClient). Content is entirely
+  // the script's business - the example games keep top-10 highscore
+  // lists in io.element.highscores - the host only stores, capping size
+  // and rate. Reads are local cosmetics for HUDs and never touch the
+  // sim. Outside widget mode an in-memory map stands in so scripts
+  // behave; it dies with the tab.
   const scriptUser = () => wp ? wp.userId : session.id
   let stateCaps: Promise<void> | null = null
   // Events that PREDATE the grant need an explicit fetch: only hosts on a
@@ -553,7 +555,7 @@ async function main() {
   const ensureStateCaps = (): Promise<void> => {
     if (!wp) return Promise.resolve()
     const m = net as import('./matrix/net').MatrixNet
-    return stateCaps ??= requestScriptStateCapabilities(m.api, wp.userId)
+    return stateCaps ??= requestScriptStateCapabilities(m.api, wp.userId, wp.roomId)
       .then(async () => {
         for (const type of SCRIPT_STATE_TYPES) {
           try {

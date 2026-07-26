@@ -69,10 +69,25 @@ export async function initWidgetClient(p: WidgetParams): Promise<{ api: WidgetAp
   }
 
   // The SCRIPT_STATE_TYPES capabilities for world.getStateEvents /
-  // world.setStateEvent are deliberately absent above: they are
-  // renegotiated lazily (requestScriptStateCapabilities below) the first
-  // time a world script actually calls those APIs, so worlds that never
-  // touch room state never ask the user for them.
+  // world.setStateEvent are normally absent here: they are renegotiated
+  // lazily (requestScriptStateCapabilities below) the first time a world
+  // script actually calls those APIs, so worlds that never touch room
+  // state never ask the user for them.
+  //
+  // EXCEPT when this room is already known to want them (the localStorage
+  // flag, set by the first renegotiation): then they join the boot
+  // handshake, making the later renegotiation a no-op. This sidesteps a
+  // stock Element Web bug: EW remembers approved capabilities by
+  // REPLACING the stored set with what the current validation approved,
+  // and an MSC2974 renegotiation only validates the newly requested
+  // delta - so remembering the state grant clobbers the remembered boot
+  // grants and vice versa, re-prompting for BOTH on every open, forever.
+  // With the flag: open 1 prompts twice (lazy by design), open 2 prompts
+  // once for the combined set, every open after that is silent.
+  if (roomWantsStateCaps(p.roomId)) {
+    capabilities.sendState!.push(...SCRIPT_STATE_TYPES.map(t => ({ eventType: t, stateKey: p.userId })))
+    capabilities.receiveState!.push(...SCRIPT_STATE_TYPES.map(t => ({ eventType: t })))
+  }
   const client = createRoomWidgetClient(
     api, capabilities, p.roomId,
     {
@@ -102,11 +117,25 @@ export async function initWidgetClient(p: WidgetParams): Promise<{ api: WidgetAp
  * events land in the client without any extra backfill here. A DENIAL
  * still resolves (MSC2974 has no rejection path); it just leaves later
  * sends failing with a logged permission error and reads empty.
+ * When the boot handshake already carried these (the flag), the host
+ * filters the renegotiation to nothing and no prompt appears.
  */
-export async function requestScriptStateCapabilities(api: WidgetApi, userId: string): Promise<void> {
+export async function requestScriptStateCapabilities(api: WidgetApi, userId: string, roomId: string): Promise<void> {
+  // Remember that this room's world uses the state APIs, so the NEXT boot
+  // handshake requests them up front (see initWidgetClient). localStorage
+  // is per widget origin, so this never leaks across hosts; a denied
+  // write (storage-less iframe) just keeps the lazy path.
+  try { localStorage.setItem(stateCapsKey(roomId), '1') } catch { /* lazy path only */ }
   api.requestCapabilities(SCRIPT_STATE_TYPES.flatMap(t => [
     WidgetEventCapability.forStateEvent(EventDirection.Send, t, userId).raw,
     WidgetEventCapability.forStateEvent(EventDirection.Receive, t).raw,
   ]))
   await api.updateRequestedCapabilities()
 }
+
+const stateCapsKey = (roomId: string) => `worldsync_state_caps_${roomId}`
+
+function roomWantsStateCaps(roomId: string): boolean {
+  try { return localStorage.getItem(stateCapsKey(roomId)) === '1' } catch { return false }
+}
+

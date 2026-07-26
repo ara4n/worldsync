@@ -412,10 +412,15 @@ element-web checkout (uncommitted there; upstream candidates):
   clobbers the highscore grant back: full-permissions prompt + state
   prompt on every open, forever (EW has a TODO on the exact line).
   Piano never calls the state APIs, never renegotiates, never clobbers.
-  Patch: merge into the remembered set instead of replacing. Worldsync
-  keeps its lazy MSC2974 request by design (worlds that never touch
-  room state never prompt); folding SCRIPT_STATE_TYPES into the boot
-  handshake would mask the EW bug at the cost of prompting everyone.
+  EW-side patch (in the checkout): merge into the remembered set instead
+  of replacing. Worldsync-side workaround so STOCK EW behaves (Matthew
+  picked this over always-prompting up front): the first renegotiation
+  flags the room in localStorage (worldsync_state_caps_<roomId>), and
+  every later boot folds SCRIPT_STATE_TYPES into the boot handshake, so
+  the renegotiation filters to nothing and never prompts or clobbers
+  again. Open 1: two prompts (lazy by design); open 2: one combined
+  prompt; open 3+: silent. Worlds that never touch room state still
+  never prompt for it.
 
 ## Known gaps / next-step candidates
 
