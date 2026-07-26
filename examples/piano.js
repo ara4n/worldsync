@@ -146,5 +146,5 @@ function hud() {
   world.hud(
     '<h3 style="margin:0">pianola</h3>'
     + '<p style="margin:2px 0">plug in a MIDI keyboard or click a key - everyone sees and hears it</p>'
-    + `<p style="margin:2px 0;font-size:18px">${chord || (lastNote ? `last: ${lastNote}` : '&nbsp;')}</p>`)
+    + `<p style="margin:2px 0;font-size:18px">${chord}</p>`)
 }

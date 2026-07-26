@@ -49,6 +49,7 @@ const POS_K = 14
 const YAW_K = 12
 const HEAD_K = 10
 const AIM_K = 6
+const AIM_PT_K = 10 // the point itself chases too, or the arm pops per step
 
 const DEFAULT_URL = `${import.meta.env.BASE_URL}avatar-default.glb`
 
@@ -375,9 +376,16 @@ export class Avatars {
       if (rig.head) rotateBoneWorld(rig.head, tmpQ2.setFromAxisAngle(right, a.headPitch * 0.65), 1)
     }
 
-    // left arm points at the peer's selection for as long as it has one
+    // left arm points at the peer's selection (or world.aim) while set.
+    // The weight eases the arm up and down; the POINT eases too - a
+    // stepping target (the tetris piece, hover hopping keys) would
+    // otherwise pop the arm - except when the arm is still down, where
+    // chasing from a stale point would read as a sweep in from nowhere.
     a.aimWeight += ((t.aim ? 1 : 0) - a.aimWeight) * (1 - Math.exp(-AIM_K * dt))
-    if (t.aim) a.aimPoint.set(t.aim.x, t.aim.y, t.aim.z)
+    if (t.aim) {
+      if (a.aimWeight < 0.05) a.aimPoint.set(t.aim.x, t.aim.y, t.aim.z)
+      else a.aimPoint.lerp(tmpV.set(t.aim.x, t.aim.y, t.aim.z), 1 - Math.exp(-AIM_PT_K * dt))
+    }
     if (a.aimWeight > 0.01 && rig.lArm && rig.lForeArm && rig.lHand) {
       this.aimLimb(rig.lArm, rig.lForeArm, a.aimPoint, a.aimWeight)
       this.aimLimb(rig.lForeArm, rig.lHand, a.aimPoint, a.aimWeight)
