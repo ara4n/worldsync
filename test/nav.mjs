@@ -119,6 +119,18 @@ console.log(`gizmo translate moved ${moved.toFixed(2)}m (axis ${gizmoState.axis}
 if (moved < 0.5) fail('gizmo drag did not move the box')
 if (gizmoDist > 0.05) fail('peers diverged after gizmo translate')
 
+// -- with a selection active, dragging empty space must orbit the camera
+// (the viewpoint stays movable after clicking an object) --
+const o0 = await aCamPose()
+await a.mouse.move(300, 120) // sky, well clear of the box and its gizmo
+await a.mouse.down()
+await a.mouse.move(440, 180, { steps: 8 })
+await a.mouse.up()
+const o1 = await aCamPose()
+if (aPoseDelta(o0, o1) < 0.05) fail('empty-space drag did not orbit the camera while selected')
+if (!await a.evaluate(() => !!window.__jig.nav.selection)) fail('orbit drag lost the selection')
+console.log('empty-space drag orbits while selected')
+
 // -- esc deselects --
 await a.keyboard.press('Escape')
 await a.waitForFunction(() => !window.__jig.nav.selection, null, { timeout: 2000 })

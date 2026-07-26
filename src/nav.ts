@@ -170,6 +170,22 @@ export class Nav {
     this.pitch = THREE.MathUtils.clamp(this.pitch - my * MOUSE_SENS, -PITCH_MAX, PITCH_MAX)
   }
 
+  /** left-drag orbit on empty space (OrbitControls reserves LEFT for box
+   * gestures, so Input feeds us the drag): swing the camera around the
+   * current pivot, same feel and clamps as OrbitControls' own rotate.
+   * This is what keeps the viewpoint movable after selecting an object. */
+  orbitBy(dx: number, dy: number) {
+    const c = this.view.controls
+    const cam = this.view.camera
+    const off = cam.position.clone().sub(c.target)
+    const sph = new THREE.Spherical().setFromVector3(off)
+    const k = 2 * Math.PI / this.view.renderer.domElement.clientHeight
+    sph.theta -= dx * k
+    sph.phi = THREE.MathUtils.clamp(sph.phi - dy * k, 0.05, c.maxPolarAngle)
+    cam.position.copy(c.target).add(off.setFromSpherical(sph))
+    cam.lookAt(c.target)
+  }
+
   /** a short click landed on a box: select it (toggle off if reselected) */
   clickedBox(eid: number, netId: string, mesh: THREE.Mesh) {
     if (this.selected?.eid === eid) { this.deselect(); return }
@@ -473,7 +489,7 @@ export class Nav {
             `drag an axis for one-axis ${m}; the center section uses all axes`)
         }
       }
-      hint(this.editOn ? 'drag box: reposition · esc: deselect'
+      hint(this.editOn ? 'drag: orbit · drag box: reposition · esc: deselect'
         : 'drag: orbit · drag box: reposition · click empty / esc: deselect')
       return
     }
@@ -495,7 +511,7 @@ export class Nav {
           ? 'drag: look around · WASD move · shift run · space jump'
           : 'click the world to look around · WASD move · shift run · space jump')
     } else {
-      hint('drag box: move · click box: select · click ground: spawn · cmd/right-drag: orbit')
+      hint('drag: orbit · drag box: move · click box: select · click ground: spawn')
     }
   }
 }

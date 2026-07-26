@@ -81,6 +81,9 @@ export class Input {
   /** pointer-lock-less walk (nav.lockBroken): dragging empty space turns
    * the view, street-view style (drag right = the world swings right) */
   private lookDrag: { x: number; y: number } | null = null
+  /** orbit mode: left-dragging empty space orbits the camera (OrbitControls
+   * itself never sees LEFT - boxes and the gizmo have first claim) */
+  private orbitDrag: { x: number; y: number } | null = null
   private ray = new THREE.Raycaster()
   private ndc = new THREE.Vector2()
 
@@ -179,6 +182,11 @@ export class Input {
       this.lookDrag = { x: e.clientX, y: e.clientY }
       return
     }
+    if (this.orbitDrag) {
+      this.nav.orbitBy(e.clientX - this.orbitDrag.x, e.clientY - this.orbitDrag.y)
+      this.orbitDrag = { x: e.clientX, y: e.clientY }
+      return
+    }
     if (this.pending && this.nav.gizmoConsumes()) {
       // the gizmo won the gesture (its listener runs after ours, so a
       // fast click-on-handle can slip past onDown's check)
@@ -190,11 +198,15 @@ export class Input {
         ? this.pending.moved
         : Math.hypot(e.clientX - this.pending.x, e.clientY - this.pending.y)
       if (dist > CLICK_MAX_PX) {
-        // an empty-space drag while walking without pointer lock is the
-        // drag-look fallback; everything else becomes a real drag
+        // an empty-space drag moves the viewpoint: drag-look while walking
+        // without pointer lock, orbit otherwise; a drag on a box is a drag
         if (this.pending.eid === null && this.nav.effective() === 'walk' && !this.nav.locked) {
           this.pending = null
           this.lookDrag = { x: e.clientX, y: e.clientY }
+          this.view.renderer.domElement.style.cursor = 'grabbing'
+        } else if (this.pending.eid === null && this.nav.effective() === 'orbit') {
+          this.pending = null
+          this.orbitDrag = { x: e.clientX, y: e.clientY }
           this.view.renderer.domElement.style.cursor = 'grabbing'
         } else this.beginDrag()
       }
@@ -246,8 +258,9 @@ export class Input {
       this.scriptPointer?.up(e)
       return
     }
-    if (this.lookDrag) {
+    if (this.lookDrag || this.orbitDrag) {
       this.lookDrag = null
+      this.orbitDrag = null
       this.view.renderer.domElement.style.cursor = ''
       return
     }
