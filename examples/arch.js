@@ -50,6 +50,10 @@ world.onpointermove = (ev) => {
   if (!rig()) return
   const ent = ev.entity && (ev.entity.startsWith('pipe_') || ev.entity.startsWith('mod_')
     || ev.entity.startsWith('dep_')) ? ev.entity : null
+  // the avatar's hand tracks the hovered pipe/module (guarded: stale
+  // host bundles predate world.aim); before the ent===hovered return,
+  // so the point follows the pointer ALONG a pipe too
+  if (world.aim) world.aim(ent ? ev.point : null)
   if (ent === hovered) return
   hovered = ent
   if (!ent) {
@@ -118,7 +122,7 @@ function hud() {
   }
   world.hud(
     '<h3 style="margin:0">worldsync architecture '
-    + `<span style="font-size:11px;opacity:0.6">script v3 / glb v${(manifest && manifest.version) || '?'}</span></h3>`
+    + `<span style="font-size:11px;opacity:0.6">script v4 / glb v${(manifest && manifest.version) || '?'}</span></h3>`
     + `<p style="margin:2px 0">SPACE: ${mode === 'full' ? 'collapse to module skeleton' : 'expand member detail'}`
     + (queue.length ? ' (sweeping...)' : '')
     + '<br>slab = module (rim-framed = external pkg), blocks = its functions/state/types'

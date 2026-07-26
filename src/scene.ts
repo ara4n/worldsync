@@ -62,6 +62,12 @@ let loader: GLTFLoader | null = null
  * determinism too: every peer runs the same wasm on the same bytes, so
  * decoded POSITION streams (and thus colliders) stay bit-identical.
  */
+/** the shared loader, decoders included once configureGlbLoader has run.
+ * Avatar assets load through this too: a pipeline-compressed avatar GLB
+ * (KTX2 textures, meshopt/draco geometry) needs the same decoders as the
+ * scene, and a bare GLTFLoader refuses its extensionsRequired outright. */
+export const glbLoader = () => loader ?? new GLTFLoader()
+
 export function configureGlbLoader(renderer: THREE.WebGLRenderer) {
   if (loader) return
   const ktx2 = new KTX2Loader().setTranscoderPath(`${import.meta.env.BASE_URL}basis/`).detectSupport(renderer)

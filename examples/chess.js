@@ -393,6 +393,26 @@ const doMove = (d, c, r) => {
 
 // -- input: press a piece to lift it, drag, release to drop --
 
+// would a press on this entity DO anything right now? Mirrors
+// onpointerdown's gates: a seat always toggles, the turn puck restarts
+// a finished game for a seated player, and a piece lifts only when it
+// is the mover's own, on the board, mid-game, outside the say latch.
+// scan() runs every update, so the cached props are fresh enough here.
+function canAct(id) {
+  if (!id) return false
+  for (const color of [W, B]) {
+    const s = seats[color]
+    if (s && s.id === id) return true
+  }
+  if (turnProp && id === turnProp.id) {
+    return !!(gameOver && ((seats[W] && seats[W].mine) || (seats[B] && seats[B].mine)))
+  }
+  if (gameOver || now < localLatch + 1.5 || !turnProp) return false
+  const piece = pieces.find((p) => p.id === id)
+  return !!(piece && piece.side === turnProp.color && inb(piece.c, piece.r)
+    && seats[turnProp.color] && seats[turnProp.color].mine)
+}
+
 world.onpointerdown = (ev) => {
   if (!ev.entity) return
   scan()
@@ -435,6 +455,10 @@ world.onpointerdown = (ev) => {
 }
 
 world.onpointermove = (ev) => {
+  // the avatar's hand tracks whatever a press would act on - a seat,
+  // the restart puck, a liftable piece - and the wandering piece while
+  // dragging (guarded: stale host bundles predate world.aim)
+  if (world.aim && !drag) world.aim(canAct(ev.entity) ? ev.point : null)
   if (!drag) return
   const p = WebSG.rayPlane(ev.origin, ev.dir, { x: 0, y: LIFT, z: 0 }, { x: 0, y: 1, z: 0 })
   if (!p) return
@@ -443,6 +467,7 @@ world.onpointermove = (ev) => {
   drag.x = Math.max(-e, Math.min(e, p.x))
   drag.z = Math.max(-e, Math.min(e, p.z))
   updateHover(drag)
+  if (world.aim) world.aim({ x: drag.x, y: LIFT, z: drag.z }) // hand rides the lifted piece
   // throttled move ops: everyone watches the piece wander mid-drag
   if (now - drag.last > 0.07) {
     drag.last = now
@@ -459,6 +484,7 @@ world.onpointerup = (ev) => {
   scan()
   drag = null
   clearDragLines()
+  if (world.aim) world.aim(null) // dropped: the hand lowers until the next hover
   const p = WebSG.rayPlane(ev.origin, ev.dir, { x: 0, y: LIFT, z: 0 }, { x: 0, y: 1, z: 0 })
   const x = p ? p.x : d.x, z = p ? p.z : d.z
   const c = Math.round(x / CELL + 3.5), r = Math.round(3.5 - z / CELL)

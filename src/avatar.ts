@@ -1,6 +1,6 @@
 import * as THREE from 'three'
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js'
+import { glbLoader } from './scene'
 import type { Vec3 } from './types'
 
 /**
@@ -228,7 +228,7 @@ export class Avatars {
   private ensureAsset() {
     if (this.loading || this.loadFailed) return
     this.loading = true
-    new GLTFLoader().load(this.url, gltf => {
+    glbLoader().load(this.url, gltf => {
       this.loading = false
       // Mixamo tracks start at frame 1 (t=1/30). While a looping action's
       // time sits BEFORE the first keyframe, the mixer leaves the bones
