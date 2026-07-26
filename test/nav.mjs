@@ -80,6 +80,14 @@ await a.waitForFunction(() =>
   [...document.querySelectorAll('#navhud button')].some(b => b.textContent === 'rotate'), null, { timeout: 2000 })
 console.log('edit HUD shows move/rotate/scale')
 
+const aCamPose = () => a.evaluate(() => ({
+  p: window.__jig.view.camera.position.toArray(),
+  q: window.__jig.view.camera.quaternion.toArray(),
+}))
+const aPoseDelta = (u, v) => Math.max(
+  Math.hypot(...u.p.map((n, i) => n - v.p[i])),
+  1 - Math.abs(u.q.reduce((s, n, i) => s + n * v.q[i], 0)))
+const g0 = await aCamPose()
 pt = await a.evaluate(id => window.__jig.screenPos(id), netId)
 await a.mouse.move(pt.x, pt.y) // hover arms the gizmo's center (XYZ) handle
 await a.mouse.down()
@@ -93,6 +101,10 @@ for (let i = 1; i <= 10; i++) {
 }
 await a.mouse.up()
 await a.waitForTimeout(2000)
+// ending a gizmo drag re-anchors the orbit pivot, but must never move
+// or re-aim the camera onto the object
+const g1 = await aCamPose()
+if (aPoseDelta(g0, g1) > 0.01) fail(`gizmo drag end recentered the camera (delta ${aPoseDelta(g0, g1).toFixed(4)})`)
 const ga = await a.evaluate(id => window.__jig.pos(id), netId)
 const gb = await b.evaluate(id => window.__jig.pos(id), netId)
 const gizmoDist = Math.hypot(ga.x - gb.x, ga.y - gb.y, ga.z - gb.z)
