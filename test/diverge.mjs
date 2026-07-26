@@ -46,7 +46,8 @@ outer: while (Date.now() < deadline) {
       for (let gz = -3; gz <= 3; gz++) {
         const s = await a.evaluate(([x, z]) => window.__jig.screenOfGround(x, z),
           [gx * 1.7 + (round % 3) * 0.6, gz * 1.7 + (round % 2) * 0.9])
-        await a.mouse.click(s.x, s.y)
+        await a.mouse.move(s.x, s.y)
+        await a.keyboard.press('1') // spawn lives on the 1 key
         await a.waitForTimeout(45)
         if (await a.evaluate(() => [...window.__jig.session.peers.values()].some(x => x.divergedAt !== null))) break outer
       }

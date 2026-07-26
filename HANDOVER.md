@@ -50,10 +50,12 @@ test mid-flight; finish edits first.
 - `render.ts`: Three scene, mesh sync from ECS, fixed-timestep interpolation
   (prev->curr by alpha), rubber-band error offsets (View.errors), cmd/ctrl
   toggles left-drag orbit; cosmetic layers (screens, labels, script glTF).
-- `input.ts`: pointer gestures in both nav modes: click ground = spawn,
-  click box = select (grabs defer to the drag threshold so a click never
-  disturbs), drag box = grab/move@33ms/release with throw velocity
-  (presented-pose grab override); walk-locked drags carry on the view ray.
+- `input.ts`: pointer gestures in both nav modes: 1 = spawn under the
+  pointer (onto scene geometry or the ground plane; clicks never spawn),
+  click = select box or scene node (grabs defer to the drag threshold so
+  a click never disturbs), drag box = grab/move@33ms/release with throw
+  velocity (presented-pose grab override); walk-locked drags carry on
+  the view ray; empty-space drags move the viewpoint (orbit/drag-look).
 - `nav.ts`: navigation modes (orbit vs thirdroom-style walk: pointer-lock
   look, WASD/shift/space, floor raycast, pure camera - never sim state),
   selection, the bottom HUD, and the edit gizmo (TransformControls ->

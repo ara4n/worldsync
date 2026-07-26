@@ -544,12 +544,12 @@ export class Nav {
     if (forced) (h.lastChild as HTMLButtonElement).disabled = true
     if (mode === 'walk') {
       hint(this.locked
-        ? 'WASD move · shift run · space jump · drag box: carry · click box: select · esc: cursor'
+        ? 'WASD move · shift run · space jump · 1: spawn · drag box: carry · click: select · esc: cursor'
         : this.lockBroken
-          ? 'drag: look around · WASD move · shift run · space jump'
-          : 'click the world to look around · WASD move · shift run · space jump')
+          ? 'drag: look around · WASD move · shift run · space jump · 1: spawn'
+          : 'click the world to look around · WASD move · shift run · space jump · 1: spawn')
     } else {
-      hint('drag: orbit · drag box: move · click box: select · click ground: spawn')
+      hint('drag: orbit · drag box: move · click: select · 1: spawn box')
     }
   }
 }

@@ -38,9 +38,10 @@ const peered = page =>
 await Promise.all([peered(a), peered(b)])
 console.log('peers connected')
 
-// -- spawn a box and let it settle --
+// -- spawn a box (1 under the pointer) and let it settle --
 const vp = a.viewportSize()
-await a.mouse.click(vp.width / 2, vp.height / 2)
+await a.mouse.move(vp.width / 2, vp.height / 2)
+await a.keyboard.press('1')
 await a.waitForFunction(() => window.__jig.sim.bodies.size === 1, null, { timeout: 5000 })
 await b.waitForFunction(() => window.__jig.sim.bodies.size === 1, null, { timeout: 5000 })
 const netId = await a.evaluate(() => [...window.__jig.sim.bodies.keys()][0])
@@ -66,10 +67,11 @@ await a.waitForTimeout(400)
 if (await a.evaluate(() => window.__jig.sim.bodies.size) !== 1) fail('deselect click spawned a box')
 console.log('empty click deselected without spawning')
 
-// -- the next empty click spawns again --
-await a.mouse.click(empty.x, empty.y)
+// -- 1 spawns under the pointer --
+await a.mouse.move(empty.x, empty.y)
+await a.keyboard.press('1')
 await a.waitForFunction(() => window.__jig.sim.bodies.size === 2, null, { timeout: 3000 })
-console.log('spawning still works with nothing selected')
+console.log('1 spawned a box under the pointer')
 
 // -- reselect, enable edit, drag the gizmo's center section --
 const aCamPose = () => a.evaluate(() => ({

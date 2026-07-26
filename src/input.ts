@@ -97,20 +97,35 @@ export class Input {
   private ray = new THREE.Raycaster()
   private ndc = new THREE.Vector2()
 
+  /** where the pointer last was, and whether it was over the canvas: the
+   * 1-key spawn aims through it (crosshair when locked) */
+  private lastPointer = { x: innerWidth / 2, y: innerHeight / 2, onCanvas: false }
+
   constructor(private view: View, private out: Emitter, private nav: Nav) {
     view.renderer.domElement.addEventListener('pointerdown', e => this.onDown(e))
     addEventListener('pointermove', e => this.onMove(e))
     addEventListener('pointerup', e => this.onUp(e))
+    // 1 spawns a box under the pointer (clicks only select and interact)
+    addEventListener('keydown', e => {
+      if (e.key !== '1' || e.metaKey || e.ctrlKey || e.altKey || e.repeat) return
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+      this.spawnAtPointer()
+    })
   }
 
   /** ray through the pointer - or through the crosshair while the walker
    * holds pointer lock (the cursor is captured; clientX/Y are stale) */
   private castAt(e: PointerEvent | null) {
-    if (!e || this.nav.locked) {
-      this.ndc.set(0, 0)
-    } else {
+    if (!e || this.nav.locked) this.castClient(0, 0, true)
+    else this.castClient(e.clientX, e.clientY, false)
+  }
+
+  private castClient(x: number, y: number, center: boolean) {
+    if (center) this.ndc.set(0, 0)
+    else {
       const r = this.view.renderer.domElement.getBoundingClientRect()
-      this.ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1)
+      this.ndc.set(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1)
     }
     this.ray.setFromCamera(this.ndc, this.view.camera)
   }
@@ -254,6 +269,11 @@ export class Input {
         } else this.beginDrag()
       }
     }
+    if (!this.nav.locked) {
+      this.lastPointer.x = e.clientX
+      this.lastPointer.y = e.clientY
+      this.lastPointer.onCanvas = e.target === this.view.renderer.domElement
+    }
     if (!this.drag) {
       if (e.target === this.view.renderer.domElement) {
         if (!this.nav.locked) {
@@ -335,9 +355,8 @@ export class Input {
     if (performance.now() - p.t > CLICK_MAX_MS) return
     const moved = this.nav.locked ? p.moved : Math.hypot(e.clientX - p.x, e.clientY - p.y)
     if (moved > CLICK_MAX_PX) return
-    // a clean click: select a box, else a scene node, else deselect,
-    // else spawn (scene geometry blocks the ground plane behind it, so a
-    // click on the piano's body never spawns a box through it)
+    // a clean click: select a box, else a scene node, else deselect -
+    // clicks only select and interact; spawning lives on the 1 key
     if (p.eid !== null && p.mesh && this.view.meshes.has(p.eid)) {
       this.nav.clickedBox(p.eid, p.netId!, p.mesh)
       return
@@ -346,13 +365,33 @@ export class Input {
       this.nav.clickedScene(p.sceneObj)
       return
     }
-    if (this.nav.clickedEmpty()) return
-    this.castAt(e)
+    this.nav.clickedEmpty()
+  }
+
+  /** 1: spawn a box under the pointer (or the crosshair while locked),
+   * dropped onto whatever surface the ray hits - scene geometry first
+   * (a box lands ON the piano's stage, never through it), else the
+   * ground plane within its bounds. */
+  private spawnAtPointer() {
+    if (!this.out.ready()) return
+    if (this.nav.locked) this.castClient(0, 0, true)
+    else {
+      if (!this.lastPointer.onCanvas) return // pointer parked over the panel
+      this.castClient(this.lastPointer.x, this.lastPointer.y, false)
+    }
+    const sceneHit = this.view.pickRoots().length
+      ? this.ray.intersectObjects(this.view.pickRoots(), true)[0] : undefined
     const g = new THREE.Vector3()
-    if (!this.ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), g)) return
-    if (Math.abs(g.x) > GROUND_HALF || Math.abs(g.z) > GROUND_HALF) return
+    const planeHit = this.ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0), g)
+    let at: { x: number; y: number; z: number } | null = null
+    if (sceneHit && (!planeHit || sceneHit.distance <= this.ray.ray.origin.distanceTo(g))) {
+      at = sceneHit.point
+    } else if (planeHit && Math.abs(g.x) <= GROUND_HALF && Math.abs(g.z) <= GROUND_HALF) {
+      at = g
+    }
+    if (!at) return
     this.out.emit('spawn', this.out.nextNetId(), {
-      pos: { x: g.x, y: SPAWN_HEIGHT, z: g.z },
+      pos: { x: at.x, y: at.y + SPAWN_HEIGHT, z: at.z },
       color: PALETTE[Math.floor(Math.random() * PALETTE.length)],
     })
   }

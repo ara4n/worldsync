@@ -6,7 +6,8 @@ await page.goto(`${base}/?room=vm-${Math.random().toString(36).slice(2,8)}`)
 await page.waitForFunction(() => window.__jig && window.__jig.session && window.__jig.session.ready(), null, { timeout: 15000 })
 for (let gx = -2; gx <= 2; gx++) for (let gz = -1; gz <= 1; gz++) {
   const s = await page.evaluate(([x, z]) => window.__jig.screenOfGround(x, z), [gx * 1.6, gz * 1.6])
-  await page.mouse.click(s.x, s.y)
+  await page.mouse.move(s.x, s.y)
+  await page.keyboard.press('1') // spawn lives on the 1 key
   await page.waitForTimeout(40)
 }
 // pile is mid-fall / settling right now: verify replay against live

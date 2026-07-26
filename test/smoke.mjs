@@ -37,9 +37,10 @@ const peered = page =>
 await Promise.all([peered(a), peered(b)])
 console.log('peers connected')
 
-// Spawn a box from page A by clicking the middle of the ground.
+// Spawn a box from page A: point at the middle of the ground and press 1.
 const vp = a.viewportSize()
-await a.mouse.click(vp.width / 2, vp.height / 2)
+await a.mouse.move(vp.width / 2, vp.height / 2)
+await a.keyboard.press('1')
 await a.waitForFunction(() => window.__jig.sim.bodies.size === 1, null, { timeout: 5000 })
 await b.waitForFunction(() => window.__jig.sim.bodies.size === 1, null, { timeout: 5000 })
 console.log('spawn replicated')

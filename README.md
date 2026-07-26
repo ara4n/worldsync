@@ -30,9 +30,11 @@ server doubles as the WebRTC signaling server (`/signal`), so there is nothing
 else to start. `npm run build && npm run preview` serves the production build
 with the same signaling.
 
-Controls: click the ground to spawn a box, drag a box to move it (physics
-resumes on release, with throw velocity), cmd-drag or right-drag orbits,
-two-finger drag pans along the ground plane, pinch or ctrl-wheel zooms.
+Controls: press `1` to spawn a box under the pointer (it drops onto
+whatever surface you point at); clicks select and interact. Drag a box to
+move it (physics resumes on release, with throw velocity), drag empty
+space (or cmd-drag / right-drag) to orbit, two-finger drag pans along the
+ground plane, pinch or ctrl-wheel zooms.
 
 Navigation (bottom HUD, thirdroom-style): the `walk` toggle (or `?nav=walk`)
 switches to a first-person avatar - click the world to capture the mouse and
