@@ -1,7 +1,8 @@
 // MSC3815 script_url e2e under the mock widget host: tab a uploads a
-// WebSG-subset JS script; only the root peer (a) runs it, its spawns and
-// drags replicate to b as ordinary ops, and when a closes the root role
-// hands over and b restarts the script. Run the dev server first: npm run dev
+// WebSG-subset JS script. EVERY peer runs it, but its ambient loop is
+// guarded by world.me.primary, so only the primary (a) emits ops; when a
+// closes, primacy hands over and b's already-running instance takes up the
+// loop from its own state. Run the dev server first: npm run dev
 import { chromium } from 'playwright'
 
 const base = process.env.URL ?? 'http://localhost:5173'
@@ -20,6 +21,7 @@ const SCRIPT = `
 let phase = 'spawn', box = null, t0 = 0, n = 0
 world.onenter = () => console.log('script entered')
 world.onupdate = (dt, time) => {
+  if (!world.me.primary) return
   if (phase === 'spawn') {
     if (n >= 5) { phase = 'idle'; return }
     box = world.createNode({ translation: [(n % 3) - 1, 3, 0], color: 0x22ccff })
@@ -55,17 +57,17 @@ await a.page().waitForTimeout(1000)
 await a.setInputFiles('#scriptfile', {
   name: 'wave.js', mimeType: 'text/javascript', buffer: Buffer.from(SCRIPT),
 })
-console.log('a uploaded the script; only the root (a) should run it...')
+console.log('a uploaded the script; both run it, only the primary (a) should emit ops...')
 
 for (const [name, f] of [['a', a], ['b', b]]) {
   const ok = await f.waitForFunction(
-    () => window.__jig.sim.bodies.size >= 2,
+    () => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith("avatar:")).length >= 2,
     null, { timeout: 20000 }).then(() => true).catch(() => false)
   if (!ok) fail(`${name} never saw script-spawned boxes`)
 }
 
 const aId = await a.evaluate(() => window.__jig.session.id)
-const bIds = await b.evaluate(() => [...window.__jig.sim.bodies.keys()])
+const bIds = await b.evaluate(() => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith('avatar:')))
 console.log(`boxes on b: ${JSON.stringify(bIds)}`)
 if (!bIds.every(id => id.startsWith(aId))) fail(`non-root spawned boxes: ${bIds.filter(id => !id.startsWith(aId))}`)
 
@@ -83,17 +85,17 @@ for (const [name, f] of [['a', a], ['b', b]]) {
   if (s.anomalies.length) fail(`${name} anomalies: ${JSON.stringify(s.anomalies)}`)
 }
 
-const before = await b.evaluate(() => window.__jig.sim.bodies.size)
+const before = await b.evaluate(() => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith("avatar:")).length)
 console.log(`closing a (root) with ${before} boxes; b should take over the script...`)
 await a.page().close()
 
 const bId = await b.evaluate(() => window.__jig.session.id)
 const took = await b.waitForFunction(
-  (n) => [...window.__jig.sim.bodies.keys()].length > n,
+  (n) => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith('avatar:')).length > n,
   before, { timeout: 30000 }).then(() => true).catch(() => false)
 if (!took) fail('b never spawned boxes after taking over as root')
 else {
-  const ids = await b.evaluate(() => [...window.__jig.sim.bodies.keys()])
+  const ids = await b.evaluate(() => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith('avatar:')))
   const fresh = ids.filter(id => id.startsWith(bId))
   console.log(`b took over and spawned: ${JSON.stringify(fresh)}`)
   if (fresh.length === 0) fail('post-handover boxes not authored by b')

@@ -11,7 +11,7 @@ const browser = await chromium.launch({ headless: false })
 async function measure(query) {
   const page = await browser.newPage()
   const room = 'perf-' + Math.random().toString(36).slice(2, 8)
-  await page.goto(`${base}/?room=${room}&${query}`)
+  await page.goto(`${base}/?room=${room}&nav=orbit&${query}`)
   await page.waitForFunction(() => window.__jig && window.__jig.session && window.__jig.session.ready(), null, { timeout: 15000 })
   // Inject spawns straight into the sim (no peer, no pointer): a 1.05m grid
   // at three heights collapses into one contact-rich resting pile.

@@ -20,7 +20,56 @@ export interface Quat { x: number; y: number; z: number; w: number }
 // (Matrix media repo); the op just fixes WHICH tick the collider swap
 // happens on, so every peer rebuilds the trimesh at the same point in
 // history and rollbacks re-apply it like any other op.
-export type InteractionType = 'spawn' | 'grab' | 'release' | 'boot' | 'scene'
+// Props are the second entity family: kinematic, physics-free objects
+// (spheres for the dots demo) whose position/color/claim are plain folded
+// state. 'claim'/'unclaim' are the script-facing coordination primitive:
+// claim applies only to an unclaimed prop, so racing claims resolve
+// deterministically by (tick, order, seq) with no extra consensus, and a
+// sustained interaction (chaining dots) excludes rivals for its duration.
+// 'despawn' removes a prop or a box; 'move' teleports a prop (renderers
+// animate the hop cosmetically); 'paint' recolors one.
+// 'data' writes one entry of the shared key-value table (netId = key,
+// data = value; missing/empty data deletes). Plain folded state like a
+// prop: last write wins in timeline order, hashed for convergence,
+// booted across seams - the home for game state that no prop naturally
+// carries (chess castling rights, a match score, whose turn a round is).
+// 'resize' reshapes a box's cuboid collider (dims = full extents): folded
+// state like everything else, read back out of the physics world itself
+// (snapshots serialise colliders), so no side table exists to drift.
+// 'avatar' spawns a peer's avatar COLLIDER: a kinematic box (netId
+// 'avatar:<peer>') entered into the grab table with its owner as holder,
+// so the proven pose plane drives its precise position (streamPose ->
+// pinAndStep) with zero new determinism machinery. Everything else about
+// avatars - the rendered figure, animation, head/hand aim - is cosmetic
+// (the 'avatar' DcMessage below) and never touches the timeline. Removal
+// is a plain 'despawn' (the primary emits it when the peer leaves).
+export type InteractionType =
+  'spawn' | 'grab' | 'release' | 'boot' | 'scene'
+  | 'prop' | 'despawn' | 'claim' | 'unclaim' | 'move' | 'paint' | 'data' | 'resize'
+  | 'avatar'
+
+/** netIds of avatar collider bodies: 'avatar:' + the owning peer's id.
+ * Avatar-ness is derived from the id, so no side table has to cross
+ * snapshots, folds or boot seams. */
+export const AVATAR_PREFIX = 'avatar:'
+export const avatarNetId = (peer: string) => AVATAR_PREFIX + peer
+/** avatar collider extents: a box, roughly the figure (1.8m tall) */
+export const AVATAR_DIMS: Vec3 = { x: 0.6, y: 1.7, z: 0.6 }
+
+/** prop state carried by boot seams (and 'prop' spawns, minus claim) */
+export interface PropInfo {
+  kind: string
+  color: number
+  size: number
+  unlit: boolean
+  bounce?: boolean // false: discrete moves ease instead of bounce-dropping
+  pop?: boolean    // false: no spawn fade-in or despawn pop; appears/vanishes instantly
+  opacity?: number // < 1: rendered translucent (ghost previews)
+  claim: string | null
+  yaw?: number    // solid only: rotation about Y
+  dims?: Vec3     // solid only: cuboid extents
+  solid?: boolean // this prop carries a fixed collider in the physics world
+}
 
 export interface Interaction {
   peer: string
@@ -36,6 +85,19 @@ export interface Interaction {
   grab?: { holder: string; order: number; target: Vec3 } // boot only
   from?: number // boot only: tick of the snapshot the dump was read from
   color?: number
+  shape?: string  // prop only: 'sphere' | 'box' | 'collider' | a modelled kind (chess pieces)
+  size?: number   // prop only: radius / half-extent
+  unlit?: boolean // prop only: cosmetic hint, but folded state so it boots
+  bounce?: boolean // prop only: false = ease vertical falls, never bounce
+  pop?: boolean   // prop only: false = no spawn fade-in / despawn pop
+  opacity?: number // prop only: < 1 renders translucent (ghost previews)
+  yaw?: number    // prop only, solid: rotation about Y
+  dims?: Vec3     // solid prop / box resize / boot: cuboid full extents
+  solid?: boolean // prop only: create a fixed collider in the physics world
+  force?: boolean // unclaim only: clear someone else's claim (ghost cleanup)
+  prop?: PropInfo // boot only: this entity is a prop, not a rigid body
+  data?: string   // data op: the value (JSON text; absent/empty deletes);
+                  // boot: this entity is a kv entry (netId = key)
 }
 
 export interface BootEntity {
@@ -46,6 +108,9 @@ export interface BootEntity {
   linvel: Vec3
   angvel: Vec3
   grab?: { holder: string; order: number; target: Vec3 }
+  dims?: Vec3 // resized boxes only: cuboid full extents (default 1,1,1)
+  prop?: PropInfo
+  data?: string // this entity is a kv entry (netId = key)
 }
 
 export type DcMessage =
@@ -54,10 +119,38 @@ export type DcMessage =
   // fractional tick-clock reading at the same instant, the datum a joiner
   // calibrates its own tick clock against.
   | { kind: 'pong'; t0: number; t1: number; tt: number }
+  // Transport-level introduction: maps the sender's opaque SFU identity
+  // (LiveKit's modern token flow mints hashes) to its membership id, and
+  // carries its join order once known - so peers can mesh on transport
+  // presence alone, without waiting for membership state to crawl
+  // through a throttled host tab's sync. Consumed by MatrixNet; the
+  // Session never sees it.
+  | { kind: 'hello'; peer: string; order?: number; ack?: boolean }
   | { kind: 'i'; i: Interaction }
   // The pose plane: latest-wins continuous motion for a held entity.
   // Never rolls anyone back; recorded per author and read by replays.
-  | { kind: 'pose'; tick: number; peer: string; netId: string; pos: Vec3 }
+  // rot rides along when the holder is precision-rotating (edit gizmo).
+  | { kind: 'pose'; tick: number; peer: string; netId: string; pos: Vec3; rot?: Quat }
+  // Ephemeral cosmetic line entity: latest-wins full state per (author,
+  // id), purely cosmetic, never folded and never in the hash. Fewer than 2
+  // points removes the line; a departed peer's lines go with it.
+  | { kind: 'line'; peer: string; id: string; points: Vec3[]; color: number; opacity: number; width: number
+      worldUnits: boolean }
+  // The cosmetic avatar plane: latest-wins presentation state for a
+  // peer's figure - feet position, view yaw/pitch, velocity (drives
+  // locomotion clip selection on every peer), grounded, nav mode (walk
+  // heads track the view; orbit is out-of-body and leaves the figure
+  // alone) and the current aim target's world point (the nearer hand aims
+  // at it). Never folded, never hashed; the avatar's physics footprint
+  // travels separately (the 'avatar' op + the pose plane). A departed
+  // peer's figure goes with it.
+  | { kind: 'avatar'; peer: string; pos: Vec3; yaw: number; pitch: number; vel: Vec3
+      grounded: boolean; mode: 'walk' | 'orbit'; aim?: Vec3 }
+  // Ephemeral MIDI event from a peer's connected device (world.onmidi):
+  // cosmetic like lines - never folded, never hashed. d is the raw 2-3 byte
+  // channel message [status, data1, data2]; every peer's script hears every
+  // peer's device, so worlds can animate instruments (or jam) together.
+  | { kind: 'midi'; peer: string; d: number[] }
   // The heartbeat: attests the author's present (anything it stamps earlier
   // later is a provable history rewrite) and triggers the healing fold that
   // re-simulates the last interval against complete pose tracks.

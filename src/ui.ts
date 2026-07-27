@@ -13,6 +13,7 @@ export interface Stats {
   room: string
   id: string
   order: number
+  mic: string
   entities: number
   tick: number
   stepMs: number
@@ -31,17 +32,23 @@ export interface Hooks {
   onVerify(): void
   onSceneFile(f: File): void
   onScriptFile(f: File): void
+  onEditScript(): void
+  onInspectScene(): void
+  onPersist(on: boolean): void
 }
 
 export class UI {
   private statusEl: HTMLElement
   private logEl: HTMLElement
+  private persistEl: HTMLInputElement
   private lines: string[] = []
   private lastRender = 0
 
   constructor(root: HTMLElement, hooks: Hooks) {
+    // the commit stays visible even collapsed: it answers "is this build
+    // the one I just deployed?" at a glance
     root.innerHTML = `
-      <h1>worldsync <span class="caret">▾</span></h1>
+      <h1>worldsync <span class="commit">${esc(typeof __COMMIT__ === 'string' ? __COMMIT__ : 'dev')}</span> <span class="caret">▾</span></h1>
       <div id="body">
       <div class="controls">
         <label>fake latency <input id="lat" type="range" min="0" max="1000" step="25" value="0"> <span id="latv">0ms</span></label>
@@ -53,6 +60,9 @@ export class UI {
         <input id="scenefile" type="file" accept=".glb,model/gltf-binary" style="display:none">
         <button id="script">load world script (.js)</button>
         <input id="scriptfile" type="file" accept=".js,text/javascript" style="display:none">
+        <button id="editscript">edit world script</button>
+        <button id="inspect" title="toggle the scene tree inspector (\`)">inspect scene</button>
+        <label><input id="persist" type="checkbox"> persist world</label>
       </div>
       <div id="status"></div>
       <div id="log"></div>
@@ -87,7 +97,14 @@ export class UI {
     }
     filePick('#scene', '#scenefile', f => hooks.onSceneFile(f))
     filePick('#script', '#scriptfile', f => hooks.onScriptFile(f))
+    ;(root.querySelector('#editscript') as HTMLButtonElement).onclick = () => hooks.onEditScript()
+    ;(root.querySelector('#inspect') as HTMLButtonElement).onclick = () => hooks.onInspectScene()
+    this.persistEl = root.querySelector('#persist') as HTMLInputElement
+    this.persistEl.onchange = () => hooks.onPersist(this.persistEl.checked)
   }
+
+  /** reflect the room's persist flag without firing the hook */
+  setPersist(on: boolean) { this.persistEl.checked = on }
 
   log(line: string) {
     this.lines.push(line)
@@ -113,7 +130,7 @@ export class UI {
         <td>${p.excluded ? 'EXCLUDED' : p.connected ? 'ok' : 'connecting'}</td>
       </tr>`).join('')
     this.statusEl.innerHTML = `
-      <div>room <b>${esc(s.room)}</b> as <b>${esc(s.id || '...')}</b> (#${s.order})</div>
+      <div>room <b>${esc(s.room)}</b> as <b>${esc(s.id || '...')}</b> (#${s.order}) | mic <b>${esc(s.mic)}</b></div>
       <div class="hint">open this URL in another tab or browser to join (?room=name picks a room)</div>
       <div>entities ${s.entities} | tick ${s.tick} | step ${s.stepMs.toFixed(1)}ms
         (snap ${s.perf.snap.toFixed(1)} + ${esc(s.norm)} ${s.perf.norm.toFixed(1)} + phys ${s.perf.phys.toFixed(1)} + hash ${s.perf.hash.toFixed(1)})

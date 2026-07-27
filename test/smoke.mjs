@@ -19,7 +19,7 @@ async function open(name) {
     if (/favicon/.test(url) || /favicon/.test(m.text())) return
     errors.push(`${name}: ${m.text()} (${url})`)
   })
-  await page.goto(`${base}/?room=${room}`)
+  await page.goto(`${base}/?room=${room}&nav=orbit`)
   await page.waitForFunction(() => window.__jig && window.__jig.session && window.__jig.session.ready(), null, { timeout: 15000 })
   return page
 }
@@ -37,18 +37,19 @@ const peered = page =>
 await Promise.all([peered(a), peered(b)])
 console.log('peers connected')
 
-// Spawn a box from page A by clicking the middle of the ground.
+// Spawn a box from page A: point at the middle of the ground and press 1.
 const vp = a.viewportSize()
-await a.mouse.click(vp.width / 2, vp.height / 2)
-await a.waitForFunction(() => window.__jig.sim.bodies.size === 1, null, { timeout: 5000 })
-await b.waitForFunction(() => window.__jig.sim.bodies.size === 1, null, { timeout: 5000 })
+await a.mouse.move(vp.width / 2, vp.height / 2)
+await a.keyboard.press('1')
+await a.waitForFunction(() => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith("avatar:")).length === 1, null, { timeout: 5000 })
+await b.waitForFunction(() => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith("avatar:")).length === 1, null, { timeout: 5000 })
 console.log('spawn replicated')
 
 await a.waitForTimeout(1200) // let the box land and settle
 
 // Add artificial latency on A so its drag arrives late at B, forcing rollbacks.
 await a.evaluate(() => { window.__jig.net.sendDelayMs = 120 })
-const netId = await a.evaluate(() => [...window.__jig.sim.bodies.keys()][0])
+const netId = await a.evaluate(() => [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith("avatar:"))[0])
 const pt = await a.evaluate(id => window.__jig.screenPos(id), netId)
 await a.mouse.move(pt.x, pt.y)
 await a.mouse.down()
@@ -67,9 +68,13 @@ console.log(`a pos ${JSON.stringify(pa)}`)
 console.log(`b pos ${JSON.stringify(pb)}`)
 console.log(`divergence ${dist.toFixed(3)}m, rollbacks on b: ${rollbacksB}`)
 
+// avatar spawn ops are excluded: a's own predates b's join (b gets it as
+// a boot entity, not an op), so the raw logs legitimately differ there
 const getLog = page => page.evaluate(() =>
-  JSON.stringify([...window.__jig.sim.inputLog].sort((x, y) =>
-    x.tick - y.tick || x.order - y.order || x.seq - y.seq)))
+  JSON.stringify([...window.__jig.sim.inputLog]
+    .filter(e => !e.netId.startsWith('avatar:'))
+    .sort((x, y) =>
+      x.tick - y.tick || x.order - y.order || x.seq - y.seq)))
 const [logA, logB] = await Promise.all([getLog(a), getLog(b)])
 console.log(`input logs ${logA === logB ? 'identical' : 'DIFFER'} (${JSON.parse(logA).length} entries)`)
 

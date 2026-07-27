@@ -1,12 +1,13 @@
 import { Sim, TICK_MS } from './sim'
 import { Session } from './session'
 import type { DcMessage } from './types'
+import { decodeDc, encodeDc } from './wire'
 
 /**
  * Loopback "network" on a virtual clock: per-link one-way latency,
  * deterministic delivery order, no sockets, no browser. Messages take the
- * same JSON round-trip they would on the wire, so serialisation hazards
- * (-0, float formatting) are exercised, not hidden. A test drives virtual
+ * same CBOR round-trip they would on the wire (src/wire.ts), so
+ * serialisation hazards (-0, float precision) are exercised, not hidden. A test drives virtual
  * time with run(); each increment delivers due messages, then ticks every
  * peer, exactly like the rAF loop does live.
  */
@@ -31,7 +32,7 @@ export const createHub = (defaultLatencyMs = 0) => {
     queue.push({
       due: now + latency(from, target.id), n: sent++, from,
       to: target.session,
-      msg: JSON.parse(JSON.stringify(msg)),
+      msg: decodeDc(encodeDc(msg))!,
     })
   }
 

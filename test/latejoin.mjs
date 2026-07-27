@@ -11,7 +11,7 @@ const browser = await chromium.launch({ headless: false })
 
 async function open() {
   const page = await browser.newPage()
-  await page.goto(`${base}/?room=${room}`)
+  await page.goto(`${base}/?room=${room}&nav=orbit`)
   await page.waitForFunction(() => window.__jig && window.__jig.session && window.__jig.session.ready(), null, { timeout: 15000 })
   return page
 }
@@ -60,7 +60,8 @@ await b.waitForTimeout(8000) // several more hash exchanges to catch a late latc
 
 for (const [name, page] of [['a', a], ['b', b]]) {
   const s = await page.evaluate(() => ({
-    entities: window.__jig.sim.bodies.size,
+    // boxes only: each peer also carries an avatar collider body
+    entities: [...window.__jig.sim.bodies.keys()].filter(k => !k.startsWith('avatar:')).length,
     peers: [...window.__jig.session.peers.values()].map(p => ({ id: p.id, checked: p.checked, divergedAt: p.divergedAt })),
     anomalies: window.__jig.sim.anomalies,
     verify: window.__jig.sim.verifyReplay(60),

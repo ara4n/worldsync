@@ -1,5 +1,5 @@
 import RAPIER from '@dimforge/rapier3d-deterministic-compat'
-import { type BootEntity, type Interaction, type Quat, type Vec3 } from './types'
+import { AVATAR_PREFIX, type BootEntity, type Interaction, type PropInfo, type Quat, type Vec3 } from './types'
 import { createEcsStore } from './ecs'
 
 export const TICK_HZ = 60
@@ -28,10 +28,32 @@ export interface InputLogEntry {
   rot?: Quat
   angvel?: Vec3
   color?: number
+  dims?: Vec3
 }
 const ZERO: Vec3 = { x: 0, y: 0, z: 0 }
 
 interface Grab { holder: string; order: number; target: Vec3; since: number }
+/** Kinematic, physics-free entity (a dots-demo sphere): everything here is
+ * plain folded state, mutated only by ops, so it participates in rollback
+ * and the cross-peer hash like body poses do. `claim` is the coordination
+ * primitive: set by the first 'claim' op to arrive in timeline order. */
+export interface Prop {
+  kind: string; pos: Vec3; color: number; size: number; unlit: boolean; claim: string | null
+  /** false: a subdued board-game prop - the render layer eases discrete
+   * moves instead of the dots bounce-drop, and claims don't swell it
+   * (tetrix pieces slide and keep their seams; connect-4 discs bounce) */
+  bounce?: boolean
+  /** false: no spawn fade-in or despawn pop - the prop appears and
+   * vanishes instantly (snake segments: the body reads as one shape, so
+   * per-cell twinkling at both ends is just noise) */
+  pop?: boolean
+  /** < 1: rendered translucent (tetrix next-piece ghosts) */
+  opacity?: number
+  yaw?: number; dims?: Vec3; solid?: boolean
+  /** solid only: the fixed body's handle. Valid across snapshot restores
+   * (rapier serialization preserves handles); cleared with the world. */
+  handle?: number
+}
 /** Baked triangle soup for a glTF scene's fixed collider; every peer parses
  * it from the same GLB bytes, so the arrays are bit-identical everywhere. */
 export interface SceneGeometry { vertices: Float32Array; indices: Uint32Array }
@@ -39,12 +61,26 @@ export interface SceneGeometry { vertices: Float32Array; indices: Uint32Array }
  * trimesh body's handle (-1 while the geometry has not arrived yet), tick
  * is when the scene applied (the heal-fold target once it does arrive). */
 interface SceneRef { url: string; body: number; tick: number }
-interface HistoryRec { snap: Uint8Array; bodies: Map<string, number>; grabs: Map<string, Grab>; scene: SceneRef | null }
+interface HistoryRec {
+  snap: Uint8Array
+  bodies: Map<string, number>
+  grabs: Map<string, Grab>
+  props: Map<string, Prop>
+  data: Map<string, string>
+  scene: SceneRef | null
+}
 interface Entry { tick: number; order: number; seq: number; i: Interaction }
 
 /** Everything a simulation step touches; the live sim and scratch replay
  * verification worlds both step through the same code via one of these. */
-interface Ctx { world: RAPIER.World; bodies: Map<string, number>; grabs: Map<string, Grab>; scene: SceneRef | null }
+interface Ctx {
+  world: RAPIER.World
+  bodies: Map<string, number>
+  grabs: Map<string, Grab>
+  props: Map<string, Prop>
+  data: Map<string, string>
+  scene: SceneRef | null
+}
 
 function bodyOf(ctx: Ctx, netId: string): RAPIER.RigidBody | null {
   const h = ctx.bodies.get(netId)
@@ -68,7 +104,41 @@ function hashCtx(ctx: Ctx): number {
     hashF64[7] = lv.x; hashF64[8] = lv.y; hashF64[9] = lv.z
     hashF64[10] = av.x; hashF64[11] = av.y; hashF64[12] = av.z
     for (let i = 0; i < 104; i++) h = Math.imul(h ^ hashBytes[i], 0x01000193)
+    // collider shape is folded state too ('resize' ops): a peer whose box
+    // is a different size must read as diverged
+    const he = b.collider(0)?.halfExtents()
+    if (he) {
+      hashF64[0] = he.x; hashF64[1] = he.y; hashF64[2] = he.z
+      for (let i = 0; i < 24; i++) h = Math.imul(h ^ hashBytes[i], 0x01000193)
+    }
     h = Math.imul(h ^ (b.isSleeping() ? 1 : 0), 0x01000193)
+  }
+  // Props are folded state too: position, color, size and claim all matter
+  // for convergence, so they join the settled-hash exchange.
+  const str = (s: string) => { for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193) }
+  for (const netId of [...ctx.props.keys()].sort()) {
+    const p = ctx.props.get(netId)!
+    str(netId)
+    str(p.kind)
+    hashF64[0] = p.pos.x; hashF64[1] = p.pos.y; hashF64[2] = p.pos.z; hashF64[3] = p.size
+    for (let i = 0; i < 32; i++) h = Math.imul(h ^ hashBytes[i], 0x01000193)
+    h = Math.imul(h ^ p.color, 0x01000193)
+    h = Math.imul(h ^ (p.unlit ? 1 : 0), 0x01000193)
+    h = Math.imul(h ^ (p.bounce === false ? 1 : 0), 0x01000193)
+    h = Math.imul(h ^ (p.pop === false ? 1 : 0), 0x01000193)
+    h = Math.imul(h ^ Math.round((p.opacity ?? 1) * 255), 0x01000193)
+    if (p.solid && p.dims) {
+      // a solid's collider geometry shapes box physics: hash it too
+      hashF64[0] = p.yaw ?? 0; hashF64[1] = p.dims.x; hashF64[2] = p.dims.y; hashF64[3] = p.dims.z
+      for (let i = 0; i < 32; i++) h = Math.imul(h ^ hashBytes[i], 0x01000193)
+    }
+    str(p.claim ?? '')
+  }
+  // The kv table is folded state like everything above: a peer whose
+  // table differs is a diverged peer.
+  for (const key of [...ctx.data.keys()].sort()) {
+    str(key)
+    str(ctx.data.get(key)!)
   }
   return h >>> 0
 }
@@ -86,8 +156,22 @@ function cloneGrabs(m: Map<string, Grab>): Map<string, Grab> {
   return out
 }
 
-function boxCollider() {
-  return RAPIER.ColliderDesc.cuboid(BOX_HALF, BOX_HALF, BOX_HALF).setRestitution(0.3).setFriction(0.8)
+function cloneProps(m: Map<string, Prop>): Map<string, Prop> {
+  const out = new Map<string, Prop>()
+  for (const [k, p] of m) out.set(k, { ...p, pos: { ...p.pos } })
+  return out
+}
+
+// Resizes clamp identically on every peer (pure function of the op), so a
+// hostile or buggy sender cannot make peers disagree by sending garbage.
+export const DIMS_MIN = 0.1
+export const DIMS_MAX = 8
+
+function boxCollider(dims?: Vec3) {
+  const clamp = (n: number) => Math.min(DIMS_MAX, Math.max(DIMS_MIN, n)) / 2
+  return RAPIER.ColliderDesc
+    .cuboid(clamp(dims?.x ?? 1), clamp(dims?.y ?? 1), clamp(dims?.z ?? 1))
+    .setRestitution(0.3).setFriction(0.8)
 }
 
 const vec = (v: { x: number; y: number; z: number }): Vec3 => ({ x: v.x, y: v.y, z: v.z })
@@ -159,6 +243,11 @@ export class Sim {
   tick = 0
   bodies = new Map<string, number>()
   grabs = new Map<string, Grab>()
+  /** kinematic physics-free entities (see Prop); folded state like bodies */
+  props = new Map<string, Prop>()
+  /** the shared kv table: script-owned game state, folded like props
+   * (values are JSON text; the sim never looks inside them) */
+  data = new Map<string, string>()
   /** the active glTF scene (never in `bodies`: not hashed, not dumped) */
   scene: SceneRef | null = null
   private sceneGeoms = new Map<string, SceneGeometry>()
@@ -216,16 +305,16 @@ export class Sim {
    * however late they arrived. Deliberately NOT snapshotted: tracks are
    * append-only observations, not simulated state.
    */
-  private tracks = new Map<string, Map<string, { tick: number; pos: Vec3 }[]>>()
+  private tracks = new Map<string, Map<string, { tick: number; pos: Vec3; rot?: Quat }[]>>()
 
-  addPose(netId: string, peer: string, tick: number, pos: Vec3) {
+  addPose(netId: string, peer: string, tick: number, pos: Vec3, rot?: Quat) {
     let byPeer = this.tracks.get(netId)
     if (!byPeer) this.tracks.set(netId, (byPeer = new Map()))
     let arr = byPeer.get(peer)
     if (!arr) byPeer.set(peer, (arr = []))
     let i = arr.length
     while (i > 0 && arr[i - 1].tick > tick) i--
-    arr.splice(i, 0, { tick, pos })
+    arr.splice(i, 0, { tick, pos, rot })
   }
 
   /**
@@ -284,8 +373,35 @@ export class Sim {
     const rate = Math.hypot(sa.pos.x - prev.pos.x, sa.pos.y - prev.pos.y, sa.pos.z - prev.pos.z)
       / (sa.tick - prev.tick)
     const d = Math.hypot(sa.pos.x - g.target.x, sa.pos.y - g.target.y, sa.pos.z - g.target.z)
-    if (d <= rate || rate === 0) return sa.pos
-    return mix(g.target, sa.pos, rate / d)
+    // Floor the catch-up step at d/8: hand rate alone strands the pin
+    // when a burst leaves it far from the track and the hand then slows
+    // (a near-horizon fling turns pixels into hundreds of metres; a slow
+    // drag back would reel the box in at centimetres per tick, and it
+    // hangs in the distance until release). d/8 closes any gap within a
+    // few ticks, exponentially; in steady tracking d ~ rate, so the
+    // hand-rate limit (the anti-phantom-velocity rule above) still
+    // governs. Same pure function of samples on every peer and replay.
+    const step = Math.max(rate, d / 8)
+    if (d <= step) return sa.pos
+    return mix(g.target, sa.pos, step / d)
+  }
+
+  /** The rotation pin for a held body at `tick`: the newest sample at or
+   * before `tick` that carries one (the edit gizmo streams rot beside pos).
+   * Latest-wins with no rate limit - a spinning kinematic box is far less
+   * violent than a ramming one - and, like pinTarget, it reads only samples
+   * <= tick so live stepping and replays compute identical values. null
+   * leaves the body's rotation alone (plain drags never rotate). */
+  private pinRot(g: Grab, netId: string, tick: number): Quat | null {
+    const arr = this.tracks.get(netId)?.get(g.holder)
+    if (!arr) return null
+    for (let i = arr.length - 1; i >= 0; i--) {
+      const s = arr[i]
+      if (s.tick < g.since) break
+      if (s.tick > tick) continue
+      if (s.rot) return s.rot
+    }
+    return null
   }
 
   /** did `peer` stream any pose in (from, to]? The beat-fold guard: no
@@ -303,7 +419,15 @@ export class Sim {
   }
 
   holdsAny(peer: string): boolean {
-    for (const g of this.grabs.values()) if (g.holder === peer) return true
+    for (const [netId, g] of this.grabs) {
+      // avatar pins are permanent: without this skip, every beat from
+      // every peer would heal-fold an idle room forever. A sample-less
+      // window pins to the persisted g.target on every peer identically,
+      // so nothing needs healing; windows the avatar actually moved in
+      // are caught by posesFrom like any drag.
+      if (netId.startsWith(AVATAR_PREFIX)) continue
+      if (g.holder === peer) return true
+    }
     return false
   }
 
@@ -388,6 +512,8 @@ export class Sim {
       snap: this.world.takeSnapshot(),
       bodies: new Map(this.bodies),
       grabs: cloneGrabs(this.grabs),
+      props: cloneProps(this.props),
+      data: new Map(this.data),
       scene: this.scene && { ...this.scene },
     })
   }
@@ -398,6 +524,13 @@ export class Sim {
     const h = this.bodies.get(netId)
     if (h === undefined) return null
     return this.world.getRigidBody(h) ?? null
+  }
+
+  /** A box's cuboid full extents, read straight from its collider (the
+   * physics world is the only home 'resize' state has). */
+  boxDims(netId: string): Vec3 | null {
+    const he = this.body(netId)?.collider(0)?.halfExtents()
+    return he ? { x: he.x * 2, y: he.y * 2, z: he.z * 2 } : null
   }
 
   /**
@@ -433,6 +566,7 @@ export class Sim {
       this.inputLog.push({
         tick: k, claimedTick, peer: i.peer, order: i.order, seq: i.seq,
         type: i.type, netId: i.netId, pos: i.pos, vel: i.vel, rot: i.rot, angvel: i.angvel, color: i.color,
+        dims: i.dims,
       })
     }
     const entry: Entry = { tick: k, order: i.order, seq: i.seq, i }
@@ -466,6 +600,8 @@ export class Sim {
     this.world.timestep = 1 / TICK_HZ
     this.bodies = new Map(rec.bodies)
     this.grabs = cloneGrabs(rec.grabs)
+    this.props = cloneProps(rec.props)
+    this.data = new Map(rec.data)
     // handles are stable across snapshot restore, so the stored ref is valid
     this.scene = rec.scene && { ...rec.scene }
     this.tick = k
@@ -491,7 +627,9 @@ export class Sim {
     }
   }
 
-  private liveCtx(): Ctx { return { world: this.world, bodies: this.bodies, grabs: this.grabs, scene: this.scene } }
+  private liveCtx(): Ctx {
+    return { world: this.world, bodies: this.bodies, grabs: this.grabs, props: this.props, data: this.data, scene: this.scene }
+  }
 
   private applyTick(ctx: Ctx, tick: number) {
     if (this.tickHasBoot(tick)) {
@@ -562,6 +700,8 @@ export class Sim {
     ctx.world = buildWorld()
     ctx.bodies.clear()
     ctx.grabs.clear()
+    ctx.props.clear() // boot entries recreate them (claims included)
+    ctx.data.clear()  // and the kv table
     ctx.scene = null
     if (scene) this.addScene(ctx, scene.url, scene.tick)
   }
@@ -579,6 +719,8 @@ export class Sim {
       const t = this.pinTarget(g, netId, tick)
       g.target = { x: t.x, y: t.y, z: t.z } // persist: next tick approaches from here
       b.setNextKinematicTranslation(g.target)
+      const r = this.pinRot(g, netId, tick)
+      if (r) b.setNextKinematicRotation(r)
     }
     ctx.world.step()
   }
@@ -595,6 +737,8 @@ export class Sim {
         snap,
         bodies: new Map(this.bodies),
         grabs: cloneGrabs(this.grabs),
+        props: cloneProps(this.props),
+        data: new Map(this.data),
         scene: this.scene && { ...this.scene },
       })
       for (const key of this.history.keys()) {
@@ -671,6 +815,8 @@ export class Sim {
       world: RAPIER.World.restoreSnapshot(rec.snap),
       bodies: new Map(rec.bodies),
       grabs: cloneGrabs(rec.grabs),
+      props: cloneProps(rec.props),
+      data: new Map(rec.data),
       scene: rec.scene && { ...rec.scene },
     }
     ctx.world.timestep = 1 / TICK_HZ
@@ -718,6 +864,11 @@ export class Sim {
         + (g ? ` grab=${g.holder}` : '') + ` bits=${hex}`
     }
     w.free()
+    for (const [netId, p] of rec.props) {
+      out[netId] = `prop ${p.kind} p=${p.pos.x.toFixed(6)},${p.pos.y.toFixed(6)},${p.pos.z.toFixed(6)}`
+        + ` color=${p.color.toString(16)} size=${p.size}` + (p.claim ? ` claim=${p.claim}` : '')
+    }
+    for (const [key, value] of rec.data) out[`data:${key}`] = value
     return out
   }
 
@@ -738,6 +889,19 @@ export class Sim {
     return { equal: s1.length === s2.length && firstDiff === -1, firstDiff, len1: s1.length, len2: s2.length }
   }
 
+  /** A solid prop's fixed cuboid body. Created only inside op folds, so
+   * creation order (and thus handle assignment) is timeline order on every
+   * peer; the handle rides the Prop so despawn/move/dump can find the body
+   * again after any snapshot restore. */
+  private addSolidBody(ctx: Ctx, p: Prop) {
+    const half = (p.yaw ?? 0) / 2
+    const body = ctx.world.createRigidBody(RAPIER.RigidBodyDesc.fixed()
+      .setTranslation(p.pos.x, p.pos.y, p.pos.z)
+      .setRotation({ x: 0, y: Math.sin(half), z: 0, w: Math.cos(half) }))
+    ctx.world.createCollider(RAPIER.ColliderDesc.cuboid(p.dims!.x / 2, p.dims!.y / 2, p.dims!.z / 2), body)
+    p.handle = body.handle
+  }
+
   private applyTo(ctx: Ctx, i: Interaction, tick: number) {
     switch (i.type) {
       case 'spawn': {
@@ -753,7 +917,29 @@ export class Sim {
         this.ecs.ensureEntity(i.netId, i.color ?? 0xffffff)
         return
       }
+      case 'avatar': {
+        // A peer's avatar collider: a kinematic box owned (held) by its
+        // peer from birth, so the pose plane drives it exactly like a
+        // grabbed box - streamed positions pin it via pinAndStep, folds
+        // and boot seams carry it in the grab table, 'despawn' removes
+        // it. netId must be 'avatar:<peer>' (avatar-ness is derived from
+        // the id everywhere: rendering skips the box mesh, persistence
+        // skips the body, holdsAny skips the permanent grab).
+        if (ctx.bodies.has(i.netId) || !i.netId.startsWith(AVATAR_PREFIX)) return
+        const body = ctx.world.createRigidBody(
+          RAPIER.RigidBodyDesc.kinematicPositionBased().setCanSleep(false)
+            .setTranslation(i.pos.x, i.pos.y, i.pos.z)
+            .setRotation(i.rot ?? { x: 0, y: 0, z: 0, w: 1 }))
+        ctx.world.createCollider(boxCollider(i.dims), body)
+        ctx.bodies.set(i.netId, body.handle)
+        ctx.grabs.set(i.netId, { holder: i.peer, order: i.order, target: { ...i.pos }, since: tick })
+        this.ecs.ensureEntity(i.netId, i.color ?? 0xffffff)
+        return
+      }
       case 'grab': {
+        // avatar bodies are permanently their owner's: a stray grab
+        // (script, test) must not overwrite the pin's holder
+        if (i.netId.startsWith(AVATAR_PREFIX)) return
         const b = bodyOf(ctx, i.netId)
         if (!b) return
         // The grabber teleports the body to their presented pose, which is the
@@ -767,14 +953,18 @@ export class Sim {
         return
       }
       case 'release': {
+        if (i.netId.startsWith(AVATAR_PREFIX)) return // the avatar pin never releases
         const g = ctx.grabs.get(i.netId)
         if (!g || g.holder !== i.peer) return
         ctx.grabs.delete(i.netId)
         const b = bodyOf(ctx, i.netId)
         if (!b) return
         // Physics takes back over from the author's authoritative state.
+        // rot rides along on gizmo releases: the rotation pin alone could
+        // leave the final orientation one tick stale.
         b.setBodyType(RAPIER.RigidBodyType.Dynamic, true)
         b.setTranslation(i.pos, true)
+        if (i.rot) b.setRotation(i.rot, true)
         if (i.vel) b.setLinvel(i.vel, true)
         b.setAngvel(ZERO, true)
         return
@@ -792,8 +982,95 @@ export class Sim {
         ctx.world = buildWorld()
         ctx.bodies.clear()
         ctx.grabs.clear()
+        ctx.props.clear()
+        ctx.data.clear()
         ctx.scene = null
         this.addScene(ctx, i.netId, tick)
+        return
+      }
+      case 'prop': {
+        if (ctx.props.has(i.netId) || ctx.bodies.has(i.netId)) return
+        const p: Prop = {
+          kind: i.shape ?? 'sphere', pos: { ...i.pos },
+          color: i.color ?? 0xffffff, size: i.size ?? 0.5, unlit: !!i.unlit, claim: null,
+          bounce: i.bounce, pop: i.pop, opacity: i.opacity,
+          yaw: i.yaw, dims: i.dims && { ...i.dims }, solid: !!i.solid,
+        }
+        if (p.solid && p.dims) this.addSolidBody(ctx, p)
+        ctx.props.set(i.netId, p)
+        return
+      }
+      case 'despawn': {
+        const sp = ctx.props.get(i.netId)
+        if (sp) {
+          if (sp.handle !== undefined) {
+            const b = ctx.world.getRigidBody(sp.handle)
+            if (b) ctx.world.removeRigidBody(b)
+          }
+          ctx.props.delete(i.netId)
+          return
+        }
+        const h = ctx.bodies.get(i.netId)
+        if (h === undefined) return
+        const b = ctx.world.getRigidBody(h)
+        if (b) ctx.world.removeRigidBody(b)
+        ctx.bodies.delete(i.netId)
+        ctx.grabs.delete(i.netId)
+        return
+      }
+      case 'claim': {
+        // First writer wins, by timeline order: a claim against a prop
+        // someone else already holds is deterministically inert on every
+        // peer, so rival chains resolve without consensus machinery.
+        const p = ctx.props.get(i.netId)
+        if (!p || (p.claim !== null && p.claim !== i.peer)) return
+        p.claim = i.peer
+        return
+      }
+      case 'unclaim': {
+        const p = ctx.props.get(i.netId)
+        if (!p || p.claim === null) return
+        // force is the ghost-cleanup path (a claimer's session died); any
+        // author may clear any claim with it, which is fine in a
+        // cooperative world and still deterministic (pure state x op).
+        if (p.claim !== i.peer && !i.force) return
+        p.claim = null
+        return
+      }
+      case 'move': {
+        // Anyone may move a prop, claimed or not: board-structure edits
+        // (column drops after a dots clear) must win over in-flight chains,
+        // whose scripts re-validate against the new positions.
+        const p = ctx.props.get(i.netId)
+        if (!p) return
+        p.pos = { ...i.pos }
+        if (p.handle !== undefined) ctx.world.getRigidBody(p.handle)?.setTranslation(p.pos, true)
+        return
+      }
+      case 'paint': {
+        const p = ctx.props.get(i.netId)
+        if (!p || i.color === undefined) return
+        p.color = i.color
+        return
+      }
+      case 'data': {
+        // Last write wins by timeline order: pure state x op, so racing
+        // writers resolve identically on every peer with no consensus.
+        if (i.data === undefined || i.data === '') ctx.data.delete(i.netId)
+        else ctx.data.set(i.netId, i.data)
+        return
+      }
+      case 'resize': {
+        // Swap the box's cuboid collider for one with the op's extents.
+        // Remove + recreate (rather than setHalfExtents) so the parent
+        // body's mass properties are recomputed unambiguously; handle
+        // allocation order stays timeline order, like body creation.
+        if (i.netId.startsWith(AVATAR_PREFIX)) return // avatar dims are fixed at spawn
+        const b = bodyOf(ctx, i.netId)
+        if (!b || !i.dims) return
+        const old = b.collider(0)
+        if (old) ctx.world.removeCollider(old, false)
+        ctx.world.createCollider(boxCollider(i.dims), b)
         return
       }
       case 'boot': {
@@ -801,6 +1078,26 @@ export class Sim {
         // the seam (rebuild + raced-op replay) happens even in a room with
         // no entities yet.
         if (!i.netId) return
+        // kv entries cross the seam like props: netId is the key
+        if (i.data !== undefined) {
+          ctx.data.set(i.netId, i.data)
+          return
+        }
+        // Prop entities cross the seam whole (claim included): recreate in
+        // dump order, exactly like bodies.
+        if (i.prop) {
+          const p: Prop = {
+            kind: i.prop.kind, pos: { ...i.pos },
+            color: i.prop.color, size: i.prop.size, unlit: i.prop.unlit, claim: i.prop.claim,
+            bounce: i.prop.bounce, pop: i.prop.pop, opacity: i.prop.opacity,
+            yaw: i.prop.yaw, dims: i.prop.dims && { ...i.prop.dims }, solid: !!i.prop.solid,
+          }
+          // the seam rebuilt the world from empty: the fixed body must be
+          // recreated with the prop, in dump order like everything else
+          if (p.solid && p.dims) this.addSolidBody(ctx, p)
+          ctx.props.set(i.netId, p)
+          return
+        }
         // The grab table crosses the seam too: a body mid-drag at boot time
         // must be pinned (kinematic) from the same tick on every peer.
         if (i.grab) ctx.grabs.set(i.netId, { holder: i.grab.holder, order: i.grab.order, target: { ...i.grab.target }, since: tick })
@@ -821,7 +1118,7 @@ export class Sim {
           .setLinvel(i.vel?.x ?? 0, i.vel?.y ?? 0, i.vel?.z ?? 0)
           .setAngvel(i.angvel ?? ZERO)
         const body = ctx.world.createRigidBody(desc)
-        ctx.world.createCollider(boxCollider(), body)
+        ctx.world.createCollider(boxCollider(i.dims), body)
         ctx.bodies.set(i.netId, body.handle)
         this.ecs.ensureEntity(i.netId, i.color ?? 0xffffff)
         return
@@ -873,28 +1170,69 @@ export class Sim {
     let from = this.tick
     let rec: HistoryRec | null = null
     for (const [k, r] of this.history) { if (k <= this.tick) { from = k; rec = r } }
+    return { from, entities: rec ? this.dumpRec(rec, true) : [] }
+  }
+
+  /**
+   * Settled dump for persistence checkpoints, read from the OLDEST stored
+   * snapshot: rollbacks clamp there, so no fold can rewrite what leaves
+   * here. Grabs are dropped (a checkpoint outlives every holder's
+   * session); a held body persists as a dynamic one at its pinned pose.
+   */
+  dumpPersist(): { tick: number; entities: BootEntity[] } {
+    for (const [k, rec] of this.history) return { tick: k, entities: this.dumpRec(rec, false) }
+    return { tick: this.tick, entities: [] }
+  }
+
+  private dumpRec(rec: HistoryRec, grabs: boolean): BootEntity[] {
     const out: BootEntity[] = []
-    if (rec) {
-      const world = RAPIER.World.restoreSnapshot(rec.snap)
-      for (const [netId, h] of rec.bodies) {
-        const b = world.getRigidBody(h)
-        const eid = this.ecs.entityFor(netId)
-        if (!b || eid === undefined) continue
-        const q = b.rotation()
-        const g = rec.grabs.get(netId)
-        out.push({
-          netId,
-          color: this.ecs.Tint.value[eid],
-          pos: vec(b.translation()),
-          rot: { x: q.x, y: q.y, z: q.z, w: q.w },
-          linvel: vec(b.linvel()),
-          angvel: vec(b.angvel()),
-          grab: g && { holder: g.holder, order: g.order, target: { ...g.target } },
-        })
-      }
-      world.free()
+    const world = RAPIER.World.restoreSnapshot(rec.snap)
+    for (const [netId, h] of rec.bodies) {
+      // persistence checkpoints (grabs=false) outlive every session, and
+      // avatar bodies die with their peers: keep them out. Boot seams
+      // (grabs=true) carry them whole - the grab table entry makes the
+      // generic boot path recreate them kinematic, dims and all.
+      if (!grabs && netId.startsWith(AVATAR_PREFIX)) continue
+      const b = world.getRigidBody(h)
+      const eid = this.ecs.entityFor(netId)
+      if (!b || eid === undefined) continue
+      const q = b.rotation()
+      const g = grabs ? rec.grabs.get(netId) : undefined
+      // dims cross the seam only when a resize changed them (the default
+      // 1,1,1 is exact: extents only ever come from clamped op floats)
+      const he = b.collider(0)?.halfExtents()
+      const resized = he && (he.x !== BOX_HALF || he.y !== BOX_HALF || he.z !== BOX_HALF)
+      out.push({
+        netId,
+        color: this.ecs.Tint.value[eid],
+        pos: vec(b.translation()),
+        rot: { x: q.x, y: q.y, z: q.z, w: q.w },
+        linvel: vec(b.linvel()),
+        angvel: vec(b.angvel()),
+        grab: g && { holder: g.holder, order: g.order, target: { ...g.target } },
+        dims: resized ? { x: he.x * 2, y: he.y * 2, z: he.z * 2 } : undefined,
+      })
     }
-    return { from, entities: out }
+    world.free()
+    for (const [netId, p] of rec.props) {
+      out.push({
+        netId, color: p.color, pos: { ...p.pos },
+        rot: { x: 0, y: 0, z: 0, w: 1 }, linvel: { ...ZERO }, angvel: { ...ZERO },
+        prop: {
+          kind: p.kind, color: p.color, size: p.size, unlit: p.unlit, claim: p.claim,
+          bounce: p.bounce, pop: p.pop, opacity: p.opacity,
+          yaw: p.yaw, dims: p.dims && { ...p.dims }, solid: p.solid,
+        },
+      })
+    }
+    for (const [key, value] of rec.data) {
+      out.push({
+        netId: key, color: 0, pos: { ...ZERO },
+        rot: { x: 0, y: 0, z: 0, w: 1 }, linvel: { ...ZERO }, angvel: { ...ZERO },
+        data: value,
+      })
+    }
+    return out
   }
 
 }

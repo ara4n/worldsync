@@ -5,9 +5,44 @@ import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js'
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js'
 import type { SceneGeometry } from './sim'
 
+// -- KHR_audio (thirdroom's flavour of the draft): the world scene can
+// carry its own sound. Extracted here at parse time into plain data the
+// audio engine consumes: encoded sample bytes per source (note metadata
+// in the source's glTF extras marks an instrument sample), grouped
+// under emitters that are either positional (anchored to a scene node,
+// panned as the camera moves) or global. --
+export interface SceneAudioSource {
+  name: string
+  /** MIDI note this sample records, from the source's extras; null for
+   * plain non-instrument sources (ambience, one-shots) */
+  note: number | null
+  gain: number
+  /** encoded audio bytes (mp3/wav per the glb); decoded lazily by the
+   * engine, so parsing a scene never touches WebAudio */
+  bytes: ArrayBuffer
+}
+export interface SceneAudioEmitter {
+  name: string
+  gain: number
+  /** the scene node the emitter rides (positional) or null (global) */
+  node: THREE.Object3D | null
+  positional: {
+    distanceModel: DistanceModelType
+    refDistance: number
+    maxDistance: number
+    rolloffFactor: number
+    coneInnerAngle: number
+    coneOuterAngle: number
+    coneOuterGain: number
+  } | null
+  sources: SceneAudioSource[]
+}
+export interface SceneAudio { emitters: SceneAudioEmitter[] }
+
 /** A parsed GLB: the renderable graph plus every mesh baked (world-
- * transformed) into one triangle soup for the fixed trimesh collider. */
-export interface ParsedScene { object: THREE.Group; geometry: SceneGeometry }
+ * transformed) into one triangle soup for the fixed trimesh collider,
+ * plus any KHR_audio sound the world carries. */
+export interface ParsedScene { object: THREE.Group; geometry: SceneGeometry; audio: SceneAudio | null }
 
 // Keyed by mxc URL. Parse results are immutable; the same URL always maps
 // to the same bytes (Matrix media is content-addressed in practice).
@@ -27,14 +62,105 @@ let loader: GLTFLoader | null = null
  * determinism too: every peer runs the same wasm on the same bytes, so
  * decoded POSITION streams (and thus colliders) stay bit-identical.
  */
+/** the shared loader, decoders included once configureGlbLoader has run.
+ * Avatar assets load through this too: a pipeline-compressed avatar GLB
+ * (KTX2 textures, meshopt/draco geometry) needs the same decoders as the
+ * scene, and a bare GLTFLoader refuses its extensionsRequired outright. */
+export const glbLoader = () => loader ?? new GLTFLoader()
+
 export function configureGlbLoader(renderer: THREE.WebGLRenderer) {
   if (loader) return
-  const ktx2 = new KTX2Loader().setTranscoderPath('/basis/').detectSupport(renderer)
-  const draco = new DRACOLoader().setDecoderPath('/draco/')
+  const ktx2 = new KTX2Loader().setTranscoderPath(`${import.meta.env.BASE_URL}basis/`).detectSupport(renderer)
+  const draco = new DRACOLoader().setDecoderPath(`${import.meta.env.BASE_URL}draco/`)
   loader = new GLTFLoader()
     .setKTX2Loader(ktx2)
     .setDRACOLoader(draco)
     .setMeshoptDecoder(MeshoptDecoder)
+}
+
+/**
+ * Parse glTF JSON (embedded data-URI buffers only) into a renderable
+ * graph: script-instantiated cosmetics (world.loadGltf), so no collider
+ * bake - scripts draw with these, they do not build physics.
+ */
+export async function parseGltfJson(json: string): Promise<THREE.Group> {
+  const gltf = await (loader ?? new GLTFLoader()).parseAsync(json, '')
+  return gltf.scene
+}
+
+// GLTFLoader ignores unknown root extensions but keeps the raw JSON on
+// its parser, so KHR_audio is read straight from there: audio bytes via
+// bufferView dependencies, emitter anchors via node dependencies (the
+// loader may rename nodes to dedupe, so index lookup beats names).
+type GltfParser = {
+  json: {
+    extensions?: Record<string, unknown>
+    nodes?: { extensions?: Record<string, unknown> }[]
+    scenes?: { extensions?: Record<string, unknown> }[]
+    scene?: number
+  }
+  getDependency(type: 'bufferView' | 'node', index: number): Promise<unknown>
+}
+interface KhrAudioDef {
+  audio?: { bufferView?: number; mimeType?: string; name?: string }[]
+  sources?: { audio?: number; gain?: number; name?: string; extras?: { note?: unknown } }[]
+  emitters?: {
+    name?: string; type?: string; gain?: number; sources?: number[]
+    positional?: {
+      distanceModel?: string; refDistance?: number; maxDistance?: number; rolloffFactor?: number
+      coneInnerAngle?: number; coneOuterAngle?: number; coneOuterGain?: number
+    }
+  }[]
+}
+
+async function extractAudio(parser: GltfParser): Promise<SceneAudio | null> {
+  const root = parser.json.extensions?.KHR_audio as KhrAudioDef | undefined
+  if (!root?.audio?.length || !root.sources?.length || !root.emitters?.length) return null
+  const bytes = await Promise.all(root.audio.map(a =>
+    a.bufferView === undefined
+      ? Promise.resolve(null)
+      : (parser.getDependency('bufferView', a.bufferView) as Promise<ArrayBuffer>)))
+  const sources = root.sources.map((s, i): SceneAudioSource | null => {
+    const b = s.audio === undefined ? null : bytes[s.audio]
+    if (!b) return null
+    const note = s.extras && typeof s.extras.note === 'number' ? s.extras.note : null
+    return { name: s.name ?? `source_${i}`, note, gain: s.gain ?? 1, bytes: b }
+  })
+  const emitterFor = async (index: number, node: THREE.Object3D | null): Promise<SceneAudioEmitter | null> => {
+    const def = root.emitters?.[index]
+    if (!def) return null
+    const p = def.type === 'positional' ? def.positional ?? {} : null
+    return {
+      name: def.name ?? `emitter_${index}`,
+      gain: def.gain ?? 1,
+      node: def.type === 'positional' ? node : null,
+      positional: p && {
+        distanceModel: (p.distanceModel ?? 'inverse') as DistanceModelType,
+        refDistance: p.refDistance ?? 1,
+        maxDistance: p.maxDistance ?? 10000,
+        rolloffFactor: p.rolloffFactor ?? 1,
+        coneInnerAngle: p.coneInnerAngle ?? 2 * Math.PI,
+        coneOuterAngle: p.coneOuterAngle ?? 2 * Math.PI,
+        coneOuterGain: p.coneOuterGain ?? 0,
+      },
+      sources: (def.sources ?? []).map(i => sources[i]).filter((s): s is SceneAudioSource => !!s),
+    }
+  }
+  const emitters: SceneAudioEmitter[] = []
+  for (const [i, n] of (parser.json.nodes ?? []).entries()) {
+    const att = n.extensions?.KHR_audio as { emitter?: number } | undefined
+    if (att?.emitter === undefined) continue
+    const obj = await (parser.getDependency('node', i) as Promise<THREE.Object3D>)
+    const e = await emitterFor(att.emitter, obj)
+    if (e) emitters.push(e)
+  }
+  const sceneDef = parser.json.scenes?.[parser.json.scene ?? 0]
+  const att = sceneDef?.extensions?.KHR_audio as { emitters?: number[] } | undefined
+  for (const idx of att?.emitters ?? []) {
+    const e = await emitterFor(idx, null)
+    if (e) emitters.push(e)
+  }
+  return emitters.length ? { emitters } : null
 }
 
 /**
@@ -89,5 +215,6 @@ export async function parseGlb(bytes: ArrayBuffer): Promise<ParsedScene> {
   const indices = new Uint32Array(iparts.reduce((n, p) => n + p.length, 0))
   let vo = 0; for (const p of vparts) { vertices.set(p, vo); vo += p.length }
   let io = 0; for (const p of iparts) { indices.set(p, io); io += p.length }
-  return { object, geometry: { vertices, indices } }
+  const audio = await extractAudio(gltf.parser as unknown as GltfParser)
+  return { object, geometry: { vertices, indices }, audio }
 }

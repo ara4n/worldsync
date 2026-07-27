@@ -1,0 +1,229 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<script type="importmap">
+{ "imports": {
+  "three": "/nm/three/build/three.module.js",
+  "three/addons/": "/nm/three/examples/jsm/"
+} }
+</script>
+</head><body>
+<script type="module">
+import * as THREE from 'three'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js'
+
+const status = m => { window.__status = m; console.log(m) }
+
+// The worldsync clip vocabulary (avatar.ts resolves clips by these names)
+const CLIPS = ['Fall1','Fall2','Fall3','Idle','Run','RunBack','StrafeLeft','StrafeLeftRun',
+  'StrafeRight','StrafeRightRun','TurnLeft','TurnRight','Walk','WalkBack']
+const FPS = 30
+
+const load = url => new Promise((res, rej) => new GLTFLoader().load(url, res, undefined, rej))
+
+function findSkinned(root) {
+  const out = []
+  root.traverse(o => { if (o.isSkinnedMesh) out.push(o) })
+  return out
+}
+
+/** bind-pose WORLD transform per bone name: the skinned mesh's world
+ * matrix (bind matrix) composed with inverted inverseBindMatrices. */
+function bindWorld(root) {
+  const map = new Map() // name -> {quat, pos}
+  for (const sm of findSkinned(root)) {
+    sm.updateMatrixWorld(true)
+    // three renders the mesh undeformed exactly when every bone's world
+    // matrix equals inverse(boneInverse) - that IS the bind pose in world
+    sm.skeleton.bones.forEach((b, i) => {
+      if (map.has(b.name)) return
+      const m = sm.skeleton.boneInverses[i].clone().invert()
+      const pos = new THREE.Vector3(), quat = new THREE.Quaternion(), s = new THREE.Vector3()
+      m.decompose(pos, quat, s)
+      map.set(b.name, { quat, pos })
+    })
+  }
+  return map
+}
+
+async function main() {
+  const robotG = await load('/input.glb')
+  const rigG = await load('/ws/avatar-default.glb')
+  const robot = robotG.scene, rig = rigG.scene
+  robot.updateMatrixWorld(true); rig.updateMatrixWorld(true)
+
+  // -- bone maps. Source names arrive however GLTFLoader sanitized them --
+  const srcByStripped = new Map()
+  rig.traverse(o => {
+    if (!o.isBone) return
+    const stripped = o.name.replace(/^mixamorig:?/, '')
+    if (!srcByStripped.has(stripped)) srcByStripped.set(stripped, o)
+  })
+  const pairs = [] // {t: robot bone, s: rig bone} in hierarchy (top-down) order
+  robot.traverse(o => {
+    if (!o.isBone) return
+    const s = srcByStripped.get(o.name)
+    if (s) pairs.push({ t: o, s })
+  })
+  status(`mapped ${pairs.length} bones`)
+  if (pairs.length < 50) throw new Error('bone mapping failed')
+
+  const srcBind = bindWorld(rig)     // by rig bone name
+  const tgtBind = bindWorld(robot)   // by robot bone name
+
+  // -- 1. pose the robot's bind skeleton into the SOURCE's bind pose by
+  // hierarchical bone-direction matching; matched[b] = robot world quat --
+  // Work on plain data: world quat/pos recomputed top-down as we adjust.
+  const matched = new Map() // robot bone name -> THREE.Quaternion (world)
+  const matchedPos = new Map() // robot bone name -> world pos in matched pose
+  for (const { t } of pairs) {
+    const bind = tgtBind.get(t.name)
+    const parent = t.parent
+    const pName = parent && matched.has(parent.name) ? parent.name : null
+    let q, p
+    if (!pName) {
+      q = bind.quat.clone(); p = bind.pos.clone()
+    } else {
+      const pBind = tgtBind.get(pName)
+      // local bind offset, re-expressed under the parent's matched pose
+      const localPos = bind.pos.clone().sub(pBind.pos)
+        .applyQuaternion(pBind.quat.clone().invert())
+      const localQuat = pBind.quat.clone().invert().multiply(bind.quat)
+      q = matched.get(pName).clone().multiply(localQuat)
+      p = localPos.applyQuaternion(matched.get(pName)).add(matchedPos.get(pName))
+    }
+    matched.set(t.name, q); matchedPos.set(t.name, p)
+  }
+  // direction pass: rotate each bone (and thereby its subtree, since
+  // children recompute from parents) so its bone direction matches the
+  // source's bind direction. Process top-down; after adjusting a bone,
+  // recompute its descendants' matched world transforms.
+  const robotChildren = new Map() // name -> [{child pair}]
+  for (const { t } of pairs) {
+    const kids = pairs.filter(p => p.t.parent === t)
+    robotChildren.set(t.name, kids)
+  }
+  const recompute = (t) => {
+    for (const { t: c } of robotChildren.get(t.name) ?? []) {
+      const bind = tgtBind.get(c.name), pBind = tgtBind.get(t.name)
+      const localPos = bind.pos.clone().sub(pBind.pos)
+        .applyQuaternion(pBind.quat.clone().invert())
+      const localQuat = pBind.quat.clone().invert().multiply(bind.quat)
+      matched.set(c.name, matched.get(t.name).clone().multiply(localQuat))
+      matchedPos.set(c.name, localPos.applyQuaternion(matched.get(t.name)).add(matchedPos.get(t.name)))
+      recompute(c)
+    }
+  }
+  for (const { t, s } of pairs) {
+    // average the shortest-arc corrections over mapped children
+    const kids = (robotChildren.get(t.name) ?? [])
+    const arcs = []
+    for (const { t: ct, s: cs } of kids) {
+      const dT = matchedPos.get(ct.name).clone().sub(matchedPos.get(t.name))
+      const dS = srcBind.get(cs.name).pos.clone().sub(srcBind.get(s.name).pos)
+      if (dT.lengthSq() < 1e-8 || dS.lengthSq() < 1e-8) continue
+      arcs.push(new THREE.Quaternion().setFromUnitVectors(dT.normalize(), dS.normalize()))
+    }
+    if (arcs.length) {
+      const corr = arcs[0].clone()
+      for (let i = 1; i < arcs.length; i++) corr.slerp(arcs[i], 1 / (i + 1))
+      matched.set(t.name, corr.multiply(matched.get(t.name)))
+      // reposition children under the corrected orientation
+      recompute(t)
+    }
+  }
+
+  // -- 2. fixed per-bone offsets: source bind world -> matched world --
+  const offset = new Map() // robot bone name -> quat
+  for (const { t, s } of pairs) {
+    offset.set(t.name, srcBind.get(s.name).quat.clone().invert().multiply(matched.get(t.name)))
+  }
+
+  const hipsScale = tgtBind.get('Hips').pos.y / srcBind.get(srcByStripped.get('Hips').name).pos.y
+  status(`hips scale ${hipsScale.toFixed(3)}`)
+
+  // -- 3. sample each clip on the source rig, write robot local tracks --
+  // snapshot robot bind locals so every clip starts clean and the export
+  // (scene rest pose) is untouched
+  const snapshot = pairs.map(({ t }) => ({ t, p: t.position.clone(), q: t.quaternion.clone() }))
+  const restore = () => { for (const { t, p, q } of snapshot) { t.position.copy(p); t.quaternion.copy(q) } }
+
+  // Mixamo tracks start at t=1/30; while a playing action's time sits
+  // BEFORE the first keyframe the mixer leaves bones unwritten, so
+  // sampling frame 0 at t=0 would bake the rig's static pose into every
+  // clip's first frame (a one-frame pop at each loop wrap). Shift every
+  // clip to start at 0 first - same fix worldsync applies at load.
+  // Times arrays are shared between tracks; shift each instance once.
+  const shiftedTimes = new Set()
+  for (const clip of rigG.animations) {
+    const t0 = Math.min(...clip.tracks.map(tr => tr.times[0]))
+    if (!(t0 > 0) || !Number.isFinite(t0)) continue
+    for (const tr of clip.tracks) {
+      if (shiftedTimes.has(tr.times)) continue
+      shiftedTimes.add(tr.times)
+      for (let i = 0; i < tr.times.length; i++) tr.times[i] -= t0
+    }
+    clip.resetDuration()
+  }
+
+  const mixer = new THREE.AnimationMixer(rig)
+  const wq = new THREE.Quaternion(), pwq = new THREE.Quaternion()
+  const newClips = []
+  for (const clip of rigG.animations) {
+    if (!CLIPS.includes(clip.name)) continue
+    const action = mixer.clipAction(clip)
+    mixer.stopAllAction(); action.reset().play()
+    const frames = Math.max(2, Math.round(clip.duration * FPS) + 1)
+    const dt = clip.duration / (frames - 1)
+    const times = new Float32Array(frames)
+    const quatData = new Map(pairs.map(({ t }) => [t.name, new Float32Array(frames * 4)]))
+    const hipsPos = new Float32Array(frames * 3)
+    mixer.update(0)
+    for (let f = 0; f < frames; f++) {
+      times[f] = f * dt
+      rig.updateMatrixWorld(true)
+      // drive robot bones top-down: world = srcWorld * offset
+      for (const { t, s } of pairs) {
+        s.getWorldQuaternion(wq)
+        wq.multiply(offset.get(t.name))
+        t.parent.getWorldQuaternion(pwq)
+        t.quaternion.copy(pwq.invert().multiply(wq))
+        if (t.name === 'Hips') {
+          const sp = new THREE.Vector3()
+          s.getWorldPosition(sp).multiplyScalar(hipsScale)
+          // robot Hips' parent is the identity root: world == local
+          t.position.copy(sp)
+          sp.toArray(hipsPos, f * 3)
+        }
+        t.updateMatrixWorld(true)
+        t.quaternion.toArray(quatData.get(t.name), f * 4)
+      }
+      if (f < frames - 1) mixer.update(f === frames - 2 ? dt - 1e-6 : dt)
+    }
+    const tracks = []
+    for (const { t } of pairs) {
+      tracks.push(new THREE.QuaternionKeyframeTrack(`${t.name}.quaternion`, times, quatData.get(t.name)))
+    }
+    tracks.push(new THREE.VectorKeyframeTrack('Hips.position', times, hipsPos))
+    newClips.push(new THREE.AnimationClip(clip.name, clip.duration, tracks))
+  }
+  restore()
+  status(`built ${newClips.length} clips`)
+
+  // -- 4. rename bones to the mixamorig vocabulary worldsync expects
+  // (colon-free: survives every loader) and fix track names to match --
+  for (const { t } of pairs) t.name = `mixamorig${t.name}`
+  for (const clip of newClips) {
+    for (const tr of clip.tracks) tr.name = `mixamorig${tr.name}`
+  }
+
+  // -- 5. export --
+  const exporter = new GLTFExporter()
+  const buf = await exporter.parseAsync(robot, { binary: true, animations: newClips })
+  status(`exported ${buf.byteLength} bytes`)
+  window.__glb = new Uint8Array(buf)
+  window.__done = true
+}
+main().catch(e => { window.__error = String(e.stack || e); console.error(e) })
+</script>
+</body></html>

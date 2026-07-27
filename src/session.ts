@@ -1,5 +1,5 @@
 import { BOOT_LEAD_TICKS, Sim, TICK_MS } from './sim'
-import { wallNow, type DcMessage, type Interaction, type Quat, type Vec3 } from './types'
+import { wallNow, type DcMessage, type Interaction, type PropInfo, type Quat, type Vec3 } from './types'
 
 const HASH_EVERY_TICKS = 60
 // Only exchange tick hashes older than this. A fold can rewrite any tick in
@@ -123,19 +123,40 @@ export class Session {
   }
 
   get calibrated() { return this.tickClock.calibrated }
+  /** This peer rooted the tick grid itself (nobody calibrated it): the
+   * world it starts from IS the room's world, so checkpoint restore is
+   * its job alone. Flips false on a hard resync (a live senior appeared;
+   * their world wins and a restore mid-flight must abort). */
+  get rooted() { return this.started && this.calibratedFrom === null }
   tickTimeNow(now = this.clock()) { return this.tickClock.tickTimeAt(now) }
   ready() { return this.id !== '' && this.started }
   nextNetId() { return `${this.id}-${this.spawnCount++}` }
+
+  /** Has the late-join boot settled? Scripts must not start (and e.g.
+   * seed a board) while the world they would read is still in flight: a
+   * rejoining peer that seeds before its boot seam folds plants a second
+   * board on everyone. Boot ops are stamped BOOT_LEAD_TICKS ahead, so
+   * settled means the grid has PASSED the seam tick (the ops applied) -
+   * mere receipt still reads as an empty world. */
+  worldSettled() {
+    if (!this.bootAsked) return true
+    if (this.bootSeamTick !== null && this.sim.tick > this.bootSeamTick) return true
+    return this.clock() - this.startedAtMs > 5000
+  }
+  private bootSeamTick: number | null = null
+  private startedAtMs = 0
+  private calibratedFrom: string | null = null
 
   /** calibration is done: pin the sim to the grid and open for business */
   private start() {
     if (this.started) return
     this.started = true
+    this.startedAtMs = this.clock()
     this.sim.startAt(Math.ceil(this.tickClock.tickTimeAt(this.clock())))
     this.startTick = this.sim.tick
     this.nextHashTick = this.sim.tick + HASH_EVERY_TICKS
     this.nextBeatTick = this.sim.tick + BEAT_EVERY_TICKS
-    this.onLog(`tick grid ${this.order === this.rootOrder() ? 'rooted' : 'calibrated'} at tick ${this.sim.tick}`)
+    this.onLog(`tick grid ${this.calibratedFrom === null ? 'rooted' : `calibrated (adopted ${this.calibratedFrom.split(':')[0]}'s grid)`} at tick ${this.sim.tick}`)
     for (const p of this.pendingOps) this.receive(p.from, { kind: 'i', i: p.i })
     this.pendingOps.length = 0
     this.maybeBootReq()
@@ -148,20 +169,31 @@ export class Session {
     return min
   }
 
-  // Late joiners pull a state snapshot from the first senior peer, but only
-  // once the tick grid is calibrated: boot ops carry tick stamps that mean
-  // nothing to an unstarted sim.
+  // Joiners that ADOPTED a running grid pull a state snapshot, but only
+  // once the tick grid is calibrated: boot ops carry tick stamps that
+  // mean nothing to an unstarted sim. A peer that rooted its own grid
+  // never pulls - it IS the world, and asking a freshly-connected senior
+  // for a dump would replace a running board with whatever the senior
+  // has (possibly nothing). The dump comes from the senior-most peer -
+  // the most settled world; a fresh joiner's dump can race in-flight
+  // ops and its seam then drops them everywhere - else from the peer
+  // whose grid we adopted (a senior rejoining a room of juniors pulls
+  // from them). An unstarted target ignores the request; advance()
+  // re-issues until a seam arrives.
   private maybeBootReq() {
-    if (!this.started || this.bootAsked) return
-    let senior: SessionPeer | null = null
+    if (!this.started || this.bootAsked || this.calibratedFrom === null) return
+    let target: SessionPeer | null = null
     for (const p of this.peers.values()) {
-      if (p.order < this.order && (senior === null || p.order < senior.order)) senior = p
+      if (p.order < this.order && (target === null || p.order < target.order)) target = p
     }
-    if (senior) {
+    if (!target) target = this.peers.get(this.calibratedFrom) ?? null
+    if (target) {
       this.bootAsked = true
-      this.sendRaw(senior.id, { kind: 'boot-req' })
+      this.bootReqAtMs = this.clock()
+      this.sendRaw(target.id, { kind: 'boot-req' })
     }
   }
+  private bootReqAtMs = 0
 
   peerConnected(id: string, order: number) {
     if (!this.peers.has(id)) {
@@ -203,8 +235,10 @@ export class Session {
     }
   }
 
-  // JSON round-trips doubles exactly except that -0 becomes 0, so normalise
-  // negative zeros at the source to keep local and remote inputs bit-equal.
+  // Normalise negative zeros at the source to keep local and remote inputs
+  // bit-equal. The original JSON wire flattened -0 to 0 on its own; CBOR
+  // (src/wire.ts) would carry -0 faithfully, so this normalisation is now
+  // the only thing upholding the guarantee - keep it.
   private z = (n: number) => n + 0 === 0 ? 0 : n
   private zv = (v: Vec3) => ({ x: this.z(v.x), y: this.z(v.y), z: this.z(v.z) })
   private zq = (q: Quat) => ({ x: this.z(q.x), y: this.z(q.y), z: this.z(q.z), w: this.z(q.w) })
@@ -212,6 +246,10 @@ export class Session {
   emit(type: Interaction['type'], netId: string, data: {
     pos: Vec3; vel?: Vec3; rot?: Quat; angvel?: Vec3
     grab?: { holder: string; order: number; target: Vec3 }; color?: number
+    shape?: string; size?: number; unlit?: boolean; bounce?: boolean; pop?: boolean; opacity?: number
+    force?: boolean; prop?: PropInfo
+    yaw?: number; dims?: Vec3; solid?: boolean
+    data?: string
   }, tickOverride?: number, from?: number) {
     const i: Interaction = {
       // Stamped with the tick about to be simulated, so our own sim applies
@@ -222,6 +260,12 @@ export class Session {
       grab: data.grab && { holder: data.grab.holder, order: data.grab.order, target: this.zv(data.grab.target) },
       from,
       color: data.color,
+      shape: data.shape, size: data.size, unlit: data.unlit, bounce: data.bounce, pop: data.pop,
+      opacity: data.opacity !== undefined ? this.z(data.opacity) : undefined,
+      force: data.force, prop: data.prop,
+      yaw: data.yaw !== undefined ? this.z(data.yaw) : undefined,
+      dims: data.dims && this.zv(data.dims), solid: data.solid,
+      data: data.data,
     }
     this.sim.insert(i)
     this.sendRaw(null, { kind: 'i', i })
@@ -255,12 +299,14 @@ export class Session {
   }
 
   /** Continuous motion for a held entity: latest-wins, never rolls anyone
-   * back; heartbeat folds heal its contact consequences. */
-  streamPose(netId: string, pos: Vec3) {
+   * back; heartbeat folds heal its contact consequences. rot rides along
+   * while the holder is precision-rotating (the edit gizmo). */
+  streamPose(netId: string, pos: Vec3, rot?: Quat) {
     if (!this.started) return
     const p = this.zv(pos)
-    this.sim.addPose(netId, this.id, this.sim.tick, p)
-    this.sendRaw(null, { kind: 'pose', tick: this.sim.tick, peer: this.id, netId, pos: p })
+    const r = rot && this.zq(rot)
+    this.sim.addPose(netId, this.id, this.sim.tick, p, r)
+    this.sendRaw(null, { kind: 'pose', tick: this.sim.tick, peer: this.id, netId, pos: p, rot: r })
   }
 
   receive(fromId: string, msg: DcMessage) {
@@ -283,22 +329,32 @@ export class Session {
         const best = peer.samples.reduce((a, b) => (b.rtt < a.rtt ? b : a))
         peer.rtt = best.rtt
         peer.offset = best.offset
-        // Tick-clock discipline against the responder's grid reading. A
-        // senior peer's first usable pong calibrates us outright; after
-        // that, only the current root steers, and only by bounded slew, so
-        // one bad sample cannot yank the grid. Phase error is harmless for
-        // convergence (ops fold at their stamped tick everywhere); this
-        // just keeps "now" aligned so folds stay shallow.
-        if (msg.tt >= 0 && peer.order < this.order) {
+        // Tick-clock discipline against the responder's grid reading. Any
+        // calibrated peer's first usable pong calibrates us outright - a
+        // senior rejoining a running room must adopt the world that exists,
+        // not wait for (or out-rank) the juniors already playing on it.
+        // After that, only the current root steers, and only by bounded
+        // slew, so one bad sample cannot yank the grid. Phase error is
+        // harmless for convergence (ops fold at their stamped tick
+        // everywhere); this just keeps "now" aligned so folds stay shallow.
+        if (msg.tt >= 0) {
           const est = msg.tt + (t3 - msg.t0) / 2 / TICK_MS
           if (!this.tickClock.calibrated) {
+            this.calibratedFrom = fromId
             this.tickClock.set(t3, est)
             this.start()
-          } else if (peer.order === this.rootOrder()) {
+          } else if (peer.order < this.order && peer.order === this.rootOrder()) {
             const delta = est - this.tickClock.tickTimeAt(t3)
             if (Math.abs(delta) > HARD_RESYNC_TICKS) {
               this.onLog(`tick clock ${delta.toFixed(1)} ticks off root; hard resync`)
               this.tickClock.set(t3, est)
+              // Our grid was the wrong one (self-rooted before this live
+              // senior appeared): our world state is too, so re-pull it
+              // from the root that just yanked our clock.
+              this.calibratedFrom = fromId
+              this.bootAsked = false
+              this.bootSeamTick = null
+              this.maybeBootReq()
             } else {
               this.tickClock.nudge(delta)
             }
@@ -308,6 +364,9 @@ export class Session {
       }
       case 'i': {
         if (peer.excluded) return
+        // settled only once the grid PASSES the seam (boot ops are
+        // stamped ahead; on receipt they have not applied yet)
+        if (msg.i.type === 'boot') this.bootSeamTick = Math.max(this.bootSeamTick ?? -1, msg.i.tick)
         if (!this.started) { this.pendingOps.push({ from: fromId, i: msg.i }); return }
         if (!this.admissible(peer, msg.i.tick)) return
         const k = this.sim.insert(msg.i)
@@ -324,7 +383,7 @@ export class Session {
         if (!this.admissible(peer, msg.tick)) return
         // Recorded, not folded: the next beat from this author re-simulates
         // the interval against the completed track.
-        this.sim.addPose(msg.netId, msg.peer, msg.tick, msg.pos)
+        this.sim.addPose(msg.netId, msg.peer, msg.tick, msg.pos, msg.rot)
         break
       }
       case 'beat': {
@@ -345,7 +404,10 @@ export class Session {
         // (us included, via emit) folds the identical seam at the same
         // tick, stamped ahead so nobody has already passed it. An empty
         // room still gets a marker op: the seam must exist so ops that
-        // raced the join are re-applied everywhere.
+        // raced the join are re-applied everywhere. An UNSTARTED peer
+        // must never answer: its dump would be an empty world stamped on
+        // a meaningless grid - a wrecking ball for the requester.
+        if (!this.started) return
         const seamTick = this.sim.tick + BOOT_LEAD_TICKS
         const { from, entities } = this.sim.dumpSeam()
         if (entities.length === 0) {
@@ -353,7 +415,9 @@ export class Session {
         }
         for (const e of entities) {
           this.emit('boot', e.netId,
-            { pos: e.pos, rot: e.rot, vel: e.linvel, angvel: e.angvel, grab: e.grab, color: e.color }, seamTick, from)
+            { pos: e.pos, rot: e.rot, vel: e.linvel, angvel: e.angvel, grab: e.grab, color: e.color,
+              dims: e.dims, prop: e.prop, data: e.data },
+            seamTick, from)
         }
         break
       }
@@ -397,6 +461,13 @@ export class Session {
       for (const p of this.peers.values()) this.sendRaw(p.id, { kind: 'ping', t0: now })
     }
     if (!this.started) return
+    // A boot-req can go unanswered (the target was still unstarted, or
+    // the message was lost to a transport blip): re-issue until a seam
+    // actually arrives.
+    if (this.bootAsked && this.bootSeamTick === null && now - this.bootReqAtMs > 2000) {
+      this.bootAsked = false
+      this.maybeBootReq()
+    }
     this.sim.advance(this.tickClock.tickTimeAt(now))
     if (this.sim.tick >= this.nextBeatTick) {
       this.nextBeatTick = this.sim.tick + BEAT_EVERY_TICKS
