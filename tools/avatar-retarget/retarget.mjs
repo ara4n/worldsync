@@ -1,7 +1,7 @@
 // Retarget the worldsync locomotion clip set onto a foreign humanoid GLB
 // (a Mixamo-auto-rigged character exported from elsewhere, e.g. Unity via
 // the thirdroom exporter) and bake a drop-in avatar asset. See
-// ../../AVATAR-RETARGET.md for the full logic and the gotchas.
+// the README beside this file for the full logic and the gotchas.
 //
 //   node tools/avatar-retarget/retarget.mjs <character.glb> [out.glb]
 //
@@ -78,4 +78,4 @@ for (const clip of ['Fall1', 'Run', 'Walk', 'Idle']) {
 await browser.close()
 server.close()
 if (!clean) process.exit(1)
-console.log('done. Consider thirdroom.io/pipeline for KTX2 compression (see AVATAR-RETARGET.md).')
+console.log('done. Consider thirdroom.io/pipeline for KTX2 compression (see the README).')

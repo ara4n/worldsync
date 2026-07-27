@@ -2,7 +2,7 @@
 
 How `public/avatar-robot.glb` was made from `Robot_Black.glb` (a Third Room
 Unity-exporter GLB), and everything learned doing it. The runnable version of
-this document is `tools/avatar-retarget/retarget.mjs`; read this first, run
+this document is `retarget.mjs` beside this file; read this first, run
 that second. The worked example throughout is the robot, but the method is
 character-agnostic for any Mixamo-auto-rigged humanoid.
 
