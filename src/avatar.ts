@@ -35,9 +35,12 @@ export interface AvatarPose {
 
 /** who a figure belongs to, for the name billboard over its head. name is
  * whatever the transport knows (Matrix displayname, else the peer id);
- * imageUrl is a displayable url (blob:/data:/https) or absent. */
+ * sub is a disambiguator (the mxid, when displaynames clash) drawn in
+ * brackets on its own line; imageUrl is a displayable url
+ * (blob:/data:/https) or absent. */
 export interface AvatarIdentity {
   name: string
+  sub?: string | null
   imageUrl?: string | null
 }
 
@@ -93,11 +96,14 @@ function rotateBoneWorld(b: THREE.Object3D, delta: THREE.Quaternion, weight: num
   b.quaternion.premultiply(rotQc)
 }
 
-// billboard canvas pixels per world metre: sets on-figure text size
-const LABEL_PX_PER_M = 300
-const LABEL_IMG_PX = 84 // avatar image diameter
-const LABEL_TEXT_PX = 30
-const LABEL_PILL_PX = 44 // name pill height
+// billboard canvas pixels per world metre: sets on-figure size. Canvas
+// px are 1.5x what the old 300px/m card rasterised at (crisper up close)
+// while the divisor also shrinks the on-screen card to ~2/3 the size.
+const LABEL_PX_PER_M = 675
+const LABEL_IMG_PX = 126 // avatar image diameter
+const LABEL_TEXT_PX = 45
+const LABEL_SUB_PX = 30 // the bracketed-mxid disambiguation line
+const LABEL_PILL_PX = 66 // name pill height (sans disambiguation line)
 
 /** name + avatar-image card as a camera-facing sprite. Draws the name
  * immediately; the image streams in with a texture refresh when (if) it
@@ -107,28 +113,41 @@ function makeLabel(id: AvatarIdentity): THREE.Sprite {
   const ctx = canvas.getContext('2d')!
   ctx.font = `600 ${LABEL_TEXT_PX}px system-ui, sans-serif`
   const textW = Math.ceil(ctx.measureText(id.name).width)
+  const sub = id.sub ? `(${id.sub})` : null
+  ctx.font = `400 ${LABEL_SUB_PX}px system-ui, sans-serif`
+  const subW = sub ? Math.ceil(ctx.measureText(sub).width) : 0
   const withImg = !!id.imageUrl
-  const W = Math.max(textW + 28, withImg ? LABEL_IMG_PX + 8 : 0, 60)
-  const H = (withImg ? LABEL_IMG_PX + 6 : 0) + LABEL_PILL_PX
+  const pillH = LABEL_PILL_PX + (sub ? LABEL_SUB_PX + 9 : 0)
+  const W = Math.max(textW + 42, subW + 42, withImg ? LABEL_IMG_PX + 12 : 0, 90)
+  const H = (withImg ? LABEL_IMG_PX + 9 : 0) + pillH
   canvas.width = W
   canvas.height = H
   const draw = (img: HTMLImageElement | null) => {
     ctx.clearRect(0, 0, W, H)
     ctx.beginPath()
-    ctx.roundRect(0, H - LABEL_PILL_PX, W, LABEL_PILL_PX, 12)
+    ctx.roundRect(0, H - pillH, W, pillH, 18)
     ctx.fillStyle = 'rgba(10, 12, 18, 0.72)'
     ctx.fill()
     ctx.font = `600 ${LABEL_TEXT_PX}px system-ui, sans-serif`
     ctx.fillStyle = '#fff'
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
-    ctx.fillText(id.name, W / 2, H - LABEL_PILL_PX / 2 + 1)
+    ctx.fillText(id.name, W / 2, H - pillH + LABEL_PILL_PX / 2 + 1)
+    if (sub) {
+      ctx.font = `400 ${LABEL_SUB_PX}px system-ui, sans-serif`
+      ctx.fillStyle = 'rgba(255, 255, 255, 0.72)'
+      ctx.fillText(sub, W / 2, H - pillH + LABEL_PILL_PX + LABEL_SUB_PX / 2)
+    }
     if (img) {
       ctx.save()
       ctx.beginPath()
       ctx.arc(W / 2, LABEL_IMG_PX / 2, LABEL_IMG_PX / 2, 0, Math.PI * 2)
       ctx.clip()
-      ctx.drawImage(img, (W - LABEL_IMG_PX) / 2, 0, LABEL_IMG_PX, LABEL_IMG_PX)
+      // object-fit: cover - crop the source to its central square so a
+      // non-square image fills the circle without stretching
+      const s = Math.min(img.naturalWidth, img.naturalHeight)
+      ctx.drawImage(img, (img.naturalWidth - s) / 2, (img.naturalHeight - s) / 2, s, s,
+        (W - LABEL_IMG_PX) / 2, 0, LABEL_IMG_PX, LABEL_IMG_PX)
       ctx.restore()
     }
   }
@@ -190,6 +209,9 @@ export class Avatars {
   enabled = true
   /** the local peer id; its figure hides while the camera is inside it */
   localId = ''
+  /** over-the-shoulder cam: the local figure is in view but its own
+   * billboard is noise dead-centre of the screen, so nav hides it */
+  hideLocalLabel = false
 
   /** main wires this to the panel log */
   log: (line: string) => void = () => {}
@@ -245,7 +267,8 @@ export class Avatars {
    * (displayname edit, avatar image arriving late) redraws in place. */
   setIdentity(peer: string, identity: AvatarIdentity) {
     const cur = this.identities.get(peer)
-    if (cur && cur.name === identity.name && (cur.imageUrl ?? null) === (identity.imageUrl ?? null)) return
+    if (cur && cur.name === identity.name && (cur.sub ?? null) === (identity.sub ?? null)
+      && (cur.imageUrl ?? null) === (identity.imageUrl ?? null)) return
     this.identities.set(peer, identity)
     const rig = this.avatars.get(peer)?.rig
     if (rig) this.attachLabel(rig, identity)
@@ -281,6 +304,7 @@ export class Avatars {
       const rig = a.rig!
       rig.group.visible = !(peer === this.localId && cameraPos
         && cameraPos.distanceToSquared(tmpV.set(a.pos.x, a.pos.y + 1.6, a.pos.z)) < 1.44)
+      if (rig.label) rig.label.visible = !(peer === this.localId && this.hideLocalLabel)
       this.animate(a, dt)
     }
   }

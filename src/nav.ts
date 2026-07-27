@@ -204,6 +204,12 @@ export class Nav {
     return this.userMode
   }
 
+  /** true while the walk camera is on the V-key shoulder boom (the local
+   * figure fills mid-screen, so e.g. its own billboard gets hidden) */
+  get shoulderCam(): boolean {
+    return this.shoulder && this.effective() === 'walk'
+  }
+
   setUserMode(m: NavMode) {
     this.userMode = m
     this.applyMode()

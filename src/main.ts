@@ -284,11 +284,16 @@ async function main() {
     const m = net as import('./matrix/net').MatrixNet
     const userId = m.userIdFor(peerId)
     const member = m.client.getRoom(wp.roomId)?.getMember(userId)
-    view.avatars.setIdentity(peerId, { name: member?.name ?? userId })
+    // when displaynames clash the sdk disambiguates; the billboard shows
+    // the mxid bracketed on its own line rather than inline in the name
+    const who = member
+      ? { name: member.rawDisplayName || userId, sub: member.disambiguate ? userId : null }
+      : { name: userId }
+    view.avatars.setIdentity(peerId, who)
     const mxc = member?.getMxcAvatarUrl()
     if (mxc) {
       void avatarImageUrl(mxc).then(url => {
-        if (url) view.avatars.setIdentity(peerId, { name: member!.name ?? userId, imageUrl: url })
+        if (url) view.avatars.setIdentity(peerId, { ...who, imageUrl: url })
       })
     }
     if ((!member || !mxc) && attempt < 5) setTimeout(() => resolveIdentity(peerId, attempt + 1), 3000)
@@ -1244,6 +1249,8 @@ async function main() {
   const avatarSync = (now: number) => {
     if (!session.ready()) return
     view.avatars.localId = session.id
+    // over the shoulder your own billboard would hang dead-centre in view
+    view.avatars.hideLocalLabel = nav.shoulderCam
     const myId = avatarNetId(session.id)
     // placement: provisional immediately, refined once a pending scene
     // arrives - unless the user already set off on foot
