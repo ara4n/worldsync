@@ -262,6 +262,38 @@ async function main() {
     }
     session.receive(from, msg)
   }
+  // Who each figure is, for the billboard over its head. In Matrix mode
+  // the room member's displayname + avatar image (fetched through the
+  // host via MSC4039, mxc blob cached); the ws demo just shows peer ids.
+  // Member state can lag the transport (a joiner's profile crawls through
+  // the host after LiveKit already sees them), so retry a few times while
+  // the profile is missing and redraw in place when it lands.
+  const mxcBlobs = new Map<string, Promise<string | null>>()
+  const avatarImageUrl = (mxc: string): Promise<string | null> => {
+    let p = mxcBlobs.get(mxc)
+    if (!p) {
+      p = fetchWorldAsset((net as import('./matrix/net').MatrixNet).api, mxc)
+        .then(buf => URL.createObjectURL(new Blob([buf])))
+        .catch(() => null)
+      mxcBlobs.set(mxc, p)
+    }
+    return p
+  }
+  const resolveIdentity = (peerId: string, attempt = 0) => {
+    if (!wp) { view.avatars.setIdentity(peerId, { name: peerId }); return }
+    const m = net as import('./matrix/net').MatrixNet
+    const userId = m.userIdFor(peerId)
+    const member = m.client.getRoom(wp.roomId)?.getMember(userId)
+    view.avatars.setIdentity(peerId, { name: member?.name ?? userId })
+    const mxc = member?.getMxcAvatarUrl()
+    if (mxc) {
+      void avatarImageUrl(mxc).then(url => {
+        if (url) view.avatars.setIdentity(peerId, { name: member!.name ?? userId, imageUrl: url })
+      })
+    }
+    if ((!member || !mxc) && attempt < 5) setTimeout(() => resolveIdentity(peerId, attempt + 1), 3000)
+  }
+
   // A departed peer takes its shared lines and its avatar with it, and the
   // primary clears any claims it left behind (its own session can no
   // longer unclaim them) and retires its avatar collider.
@@ -280,16 +312,20 @@ async function main() {
   }
 
   if (net instanceof Net) {
-    net.onJoined = (id, order, alone) => session.identity(id, order, alone)
+    net.onJoined = (id, order, alone) => { session.identity(id, order, alone); resolveIdentity(id) }
     net.onMessage = (peer, msg) => onMsg(peer.id, msg)
-    net.onPeerConnected = peer => session.peerConnected(peer.id, peer.order)
+    net.onPeerConnected = peer => { session.peerConnected(peer.id, peer.order); resolveIdentity(peer.id) }
     net.onPeerLeft = onLeft
     net.onLog = log
   } else {
     const m = net as import('./matrix/net').MatrixNet
-    m.onJoined = (id, order, alone) => { log(`joined as ${id} (order ${order}${alone ? ', alone: rooting grid' : ''})`); session.identity(id, order, alone) }
+    m.onJoined = (id, order, alone) => {
+      log(`joined as ${id} (order ${order}${alone ? ', alone: rooting grid' : ''})`)
+      session.identity(id, order, alone)
+      resolveIdentity(id)
+    }
     m.onMessage = onMsg
-    m.onPeerConnected = (id, order) => { log(`peer connected ${id} (#${order})`); session.peerConnected(id, order) }
+    m.onPeerConnected = (id, order) => { log(`peer connected ${id} (#${order})`); session.peerConnected(id, order); resolveIdentity(id) }
     m.onPeerLeft = onLeft
     m.onLog = log
     // Room already has an MSC3815 scene: fetch, parse, and adopt it before

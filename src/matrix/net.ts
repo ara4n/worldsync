@@ -119,6 +119,18 @@ export class MatrixNet {
    * joined peer as a member before its state crawls through the host */
   private helloOrder = new Map<string, number>()
 
+  /** the Matrix user behind a peer/membership id. Read from the RTC
+   * membership when there is one; the string fallback (member ids are
+   * `${userId}:${deviceId}`, device ids never contain ':') covers the
+   * window before membership state has crawled through the host. */
+  userIdFor(memberId: string): string {
+    for (const m of this.rtc?.memberships ?? []) {
+      if (`${m.userId}:${m.deviceId}` === memberId) return m.userId
+    }
+    const cut = memberId.lastIndexOf(':')
+    return cut > 0 ? memberId.slice(0, cut) : memberId
+  }
+
   private memberIdFor(sfuId: string): string | null {
     for (const [mid, sid] of this.sfuIdFor) if (sid === sfuId) return mid
     for (const id of this.peers.keys()) {

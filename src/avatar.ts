@@ -33,6 +33,14 @@ export interface AvatarPose {
   aim?: Vec3 | null // left-hand point target (selection, or world.aim)
 }
 
+/** who a figure belongs to, for the name billboard over its head. name is
+ * whatever the transport knows (Matrix displayname, else the peer id);
+ * imageUrl is a displayable url (blob:/data:/https) or absent. */
+export interface AvatarIdentity {
+  name: string
+  imageUrl?: string | null
+}
+
 // thirdroom's animation.game.ts constants, thresholds re-tuned to this
 // jig's speeds: thresholds are on SQUARED horizontal speed; thirdroom's
 // walk->run boundary (10 ~ 3.2m/s) sits below our 4m/s walk, so it
@@ -85,10 +93,66 @@ function rotateBoneWorld(b: THREE.Object3D, delta: THREE.Quaternion, weight: num
   b.quaternion.premultiply(rotQc)
 }
 
+// billboard canvas pixels per world metre: sets on-figure text size
+const LABEL_PX_PER_M = 300
+const LABEL_IMG_PX = 84 // avatar image diameter
+const LABEL_TEXT_PX = 30
+const LABEL_PILL_PX = 44 // name pill height
+
+/** name + avatar-image card as a camera-facing sprite. Draws the name
+ * immediately; the image streams in with a texture refresh when (if) it
+ * loads. Callers own disposal of material.map and material. */
+function makeLabel(id: AvatarIdentity): THREE.Sprite {
+  const canvas = document.createElement('canvas')
+  const ctx = canvas.getContext('2d')!
+  ctx.font = `600 ${LABEL_TEXT_PX}px system-ui, sans-serif`
+  const textW = Math.ceil(ctx.measureText(id.name).width)
+  const withImg = !!id.imageUrl
+  const W = Math.max(textW + 28, withImg ? LABEL_IMG_PX + 8 : 0, 60)
+  const H = (withImg ? LABEL_IMG_PX + 6 : 0) + LABEL_PILL_PX
+  canvas.width = W
+  canvas.height = H
+  const draw = (img: HTMLImageElement | null) => {
+    ctx.clearRect(0, 0, W, H)
+    ctx.beginPath()
+    ctx.roundRect(0, H - LABEL_PILL_PX, W, LABEL_PILL_PX, 12)
+    ctx.fillStyle = 'rgba(10, 12, 18, 0.72)'
+    ctx.fill()
+    ctx.font = `600 ${LABEL_TEXT_PX}px system-ui, sans-serif`
+    ctx.fillStyle = '#fff'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText(id.name, W / 2, H - LABEL_PILL_PX / 2 + 1)
+    if (img) {
+      ctx.save()
+      ctx.beginPath()
+      ctx.arc(W / 2, LABEL_IMG_PX / 2, LABEL_IMG_PX / 2, 0, Math.PI * 2)
+      ctx.clip()
+      ctx.drawImage(img, (W - LABEL_IMG_PX) / 2, 0, LABEL_IMG_PX, LABEL_IMG_PX)
+      ctx.restore()
+    }
+  }
+  draw(null)
+  const map = new THREE.CanvasTexture(canvas)
+  map.colorSpace = THREE.SRGBColorSpace
+  if (id.imageUrl) {
+    const img = new Image()
+    // http(s) images would taint the canvas and kill the texture upload;
+    // blob:/data: urls (the Matrix path) don't care either way
+    img.crossOrigin = 'anonymous'
+    img.onload = () => { draw(img); map.needsUpdate = true }
+    img.src = id.imageUrl
+  }
+  const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map, transparent: true, depthWrite: false }))
+  sprite.scale.set(W / LABEL_PX_PER_M, H / LABEL_PX_PER_M, 1)
+  return sprite
+}
+
 interface Rig {
   group: THREE.Group // at the feet, yawed to face travel
   mixer: THREE.AnimationMixer
   actions: Map<string, THREE.AnimationAction>
+  label: THREE.Sprite | null // identity billboard, child of group
   head: THREE.Object3D | null
   neck: THREE.Object3D | null
   lArm: THREE.Object3D | null
@@ -132,7 +196,8 @@ export class Avatars {
 
   private url = DEFAULT_URL
   private avatars = new Map<string, PeerAvatar>()
-  private asset: { scene: THREE.Object3D; clips: THREE.AnimationClip[] } | null = null
+  private identities = new Map<string, AvatarIdentity>()
+  private asset: { scene: THREE.Object3D; clips: THREE.AnimationClip[]; height: number } | null = null
   private loading = false
   private loadFailed = false
   private lastMs = 0
@@ -171,9 +236,35 @@ export class Avatars {
     if (!a) return
     this.dropRig(a)
     this.avatars.delete(peer)
+    this.identities.delete(peer)
   }
 
   has(peer: string) { return this.avatars.has(peer) }
+
+  /** who this figure is (billboard over its head). Idempotent; a change
+   * (displayname edit, avatar image arriving late) redraws in place. */
+  setIdentity(peer: string, identity: AvatarIdentity) {
+    const cur = this.identities.get(peer)
+    if (cur && cur.name === identity.name && (cur.imageUrl ?? null) === (identity.imageUrl ?? null)) return
+    this.identities.set(peer, identity)
+    const rig = this.avatars.get(peer)?.rig
+    if (rig) this.attachLabel(rig, identity)
+  }
+
+  private attachLabel(rig: Rig, identity: AvatarIdentity) {
+    if (rig.label) {
+      rig.group.remove(rig.label)
+      rig.label.material.map?.dispose()
+      rig.label.material.dispose()
+    }
+    const label = makeLabel(identity)
+    // hover over the head: the asset's bind-pose height plus clearance
+    // (sprite position is its center). The group yaw-rotates with travel;
+    // sprites ignore rotation and face the camera regardless.
+    label.position.y = (this.asset?.height ?? 1.8) + 0.15 + label.scale.y / 2
+    rig.group.add(label)
+    rig.label = label
+  }
 
   /** per-frame: smoothing, locomotion blending, head + arm overrides.
    * cameraPos hides the LOCAL figure whenever the camera is inside it -
@@ -186,7 +277,7 @@ export class Avatars {
     if (!this.enabled) return
     if (!this.asset) { this.ensureAsset(); return }
     for (const [peer, a] of this.avatars) {
-      if (!a.rig) this.buildRig(a)
+      if (!a.rig) this.buildRig(peer, a)
       const rig = a.rig!
       rig.group.visible = !(peer === this.localId && cameraPos
         && cameraPos.distanceToSquared(tmpV.set(a.pos.x, a.pos.y + 1.6, a.pos.z)) < 1.44)
@@ -199,6 +290,7 @@ export class Avatars {
     clip: string; weight: number; pos: Vec3; visible: boolean
     headPitch: number; aimWeight: number; aimSide: 'l' | 'r'; bones: boolean
     headWorldY: number | null
+    label: string | null // billboard name if one is attached
   }> {
     const out: ReturnType<Avatars['debug']> = {}
     for (const [peer, a] of this.avatars) {
@@ -220,6 +312,7 @@ export class Avatars {
         aimWeight: Math.max(a.aimWeightL, a.aimWeightR), aimSide: a.aimSide,
         bones: !!(a.rig?.head && a.rig.lArm && a.rig.lForeArm && a.rig.rArm),
         headWorldY,
+        label: a.rig?.label ? this.identities.get(peer)?.name ?? '' : null,
       }
     }
     return out
@@ -262,7 +355,10 @@ export class Avatars {
           this.patchMaterial(m)
         }
       })
-      this.asset = { scene: gltf.scene, clips: gltf.animations }
+      // bind-pose height, for hanging the identity billboard over the
+      // head whatever the character's proportions (robot 1.5m, bot 1.9m)
+      const height = new THREE.Box3().setFromObject(gltf.scene).max.y
+      this.asset = { scene: gltf.scene, clips: gltf.animations, height }
     }, undefined, e => {
       this.loading = false
       this.loadFailed = true // a broken asset must not refetch every frame
@@ -270,7 +366,7 @@ export class Avatars {
     })
   }
 
-  private buildRig(a: PeerAvatar) {
+  private buildRig(peer: string, a: PeerAvatar) {
     const root = cloneSkinned(this.asset!.scene)
     const group = new THREE.Group()
     // mixamo figures face +Z in bind pose; the jig's yaw-0 forward is -Z,
@@ -290,18 +386,24 @@ export class Avatars {
       actions.set(clip.name, action)
     }
     a.rig = {
-      group, mixer, actions,
+      group, mixer, actions, label: null,
       head: bone(root, 'Head'), neck: bone(root, 'Neck'),
       lArm: bone(root, 'LeftArm'), lForeArm: bone(root, 'LeftForeArm'), lHand: bone(root, 'LeftHand'),
       rArm: bone(root, 'RightArm'), rForeArm: bone(root, 'RightForeArm'), rHand: bone(root, 'RightHand'),
     }
+    const identity = this.identities.get(peer)
+    if (identity) this.attachLabel(a.rig, identity)
   }
 
   private dropRig(a: PeerAvatar) {
     if (!a.rig) return
     this.group.remove(a.rig.group)
     a.rig.mixer.stopAllAction()
-    a.rig = null // geometry/materials are shared with the cached asset; nothing to dispose
+    // the label's canvas texture is per-figure (unlike the shared
+    // geometry/materials of the cached asset), so it does need disposing
+    a.rig.label?.material.map?.dispose()
+    a.rig.label?.material.dispose()
+    a.rig = null
   }
 
   // -- thirdroom's clip selection (animation.game.ts), on the broadcast
