@@ -1,0 +1,59 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<script type="importmap">
+{ "imports": {
+  "three": "/nm/three/build/three.module.js",
+  "three/addons/": "/nm/three/examples/jsm/"
+} }
+</script>
+<style>body{margin:0}</style>
+</head><body>
+<script type="module">
+import * as THREE from 'three'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js'
+
+const POSES = [
+  ['Idle', 0.5], ['Walk', 0.35], ['Run', 0.3], ['WalkBack', 0.5],
+  ['StrafeLeft', 0.4], ['TurnRight', 0.5], ['Fall1', 0.3],
+]
+
+const renderer = new THREE.WebGLRenderer({ antialias: true })
+renderer.setSize(1600, 500)
+document.body.appendChild(renderer.domElement)
+const scene = new THREE.Scene()
+scene.background = new THREE.Color(0x2a2a2e)
+const cam = new THREE.PerspectiveCamera(35, 1600 / 500, 0.1, 100)
+cam.position.set(0, 1.4, 6.4)
+cam.lookAt(0, 0.7, 0)
+scene.add(new THREE.AmbientLight(0xffffff, 1.1))
+const sun = new THREE.DirectionalLight(0xffffff, 2.2)
+sun.position.set(2, 5, 4)
+scene.add(sun)
+scene.add(new THREE.GridHelper(12, 24, 0x555555, 0x3a3a3f))
+
+new GLTFLoader().load('/output.glb', gltf => {
+  const clips = gltf.animations
+  window.__clips = clips.map(c => c.name)
+  const unbound = []
+  const origWarn = console.warn
+  console.warn = (...a) => { unbound.push(a.join(' ')); origWarn(...a) }
+  gltf.scene.traverse(o => { if (o.isMesh) o.frustumCulled = false })
+  POSES.forEach(([name, t], i) => {
+    const clip = clips.find(c => c.name === name)
+    if (!clip) { unbound.push(`clip missing: ${name}`); return }
+    const inst = cloneSkinned(gltf.scene)
+    inst.position.x = (i - (POSES.length - 1) / 2) * 1.35
+    scene.add(inst)
+    const mixer = new THREE.AnimationMixer(inst)
+    const action = mixer.clipAction(clip)
+    action.play()
+    mixer.update(t * clip.duration)
+  })
+  console.warn = origWarn
+  window.__unbound = unbound
+  renderer.render(scene, cam)
+  window.__done = true
+}, undefined, e => { window.__error = String(e) })
+</script>
+</body></html>

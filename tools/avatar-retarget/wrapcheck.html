@@ -1,0 +1,67 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<script type="importmap">
+{ "imports": { "three": "/nm/three/build/three.module.js", "three/addons/": "/nm/three/examples/jsm/" } }
+</script></head><body>
+<script type="module">
+import * as THREE from 'three'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+
+const params = new URLSearchParams(location.search)
+const URLGLB = params.get('u'), CLIP = params.get('clip') ?? 'Fall1'
+const IDENTITY = new THREE.Quaternion()
+const rotQa = new THREE.Quaternion(), rotQb = new THREE.Quaternion(), rotQc = new THREE.Quaternion()
+function rotateBoneWorld(b, delta, weight) {
+  if (weight <= 0) return
+  b.parent.getWorldQuaternion(rotQa)
+  rotQb.copy(IDENTITY).slerp(delta, Math.min(1, weight))
+  rotQc.copy(rotQa).invert().multiply(rotQb).multiply(rotQa)
+  b.quaternion.premultiply(rotQc)
+}
+const bone = (root, n) => root.getObjectByName(`mixamorig${n}`) ?? root.getObjectByName(`mixamorig:${n}`)
+
+new GLTFLoader().load(URLGLB, gltf => {
+  // worldsync's load-time shift
+  const shifted = new Set()
+  for (const clip of gltf.animations) {
+    const t0 = Math.min(...clip.tracks.map(tr => tr.times[0]))
+    if (!(t0 > 0) || !Number.isFinite(t0)) continue
+    for (const tr of clip.tracks) {
+      if (shifted.has(tr.times)) continue
+      shifted.add(tr.times)
+      for (let i = 0; i < tr.times.length; i++) tr.times[i] -= t0
+    }
+    clip.resetDuration()
+  }
+  const root = gltf.scene
+  const mixer = new THREE.AnimationMixer(root)
+  const clip = gltf.animations.find(c => c.name === CLIP)
+  const action = mixer.clipAction(clip)
+  action.play(); action.setEffectiveWeight(1)
+  const head = bone(root, 'Head'), neck = bone(root, 'Neck')
+  const headPitch = -0.5, yaw = 0
+  const dt = 1 / 120
+  const prev = new THREE.Quaternion(), cur = new THREE.Quaternion()
+  let worst = { deg: 0, at: 0, frame: -1 }
+  const spikes = []
+  mixer.update(0); root.updateMatrixWorld(true)
+  head.getWorldQuaternion(prev)
+  const frames = Math.ceil(5 / dt)
+  for (let f = 0; f < frames; f++) {
+    mixer.update(dt)
+    root.updateMatrixWorld(true)
+    const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw))
+    const q2 = new THREE.Quaternion()
+    if (neck) rotateBoneWorld(neck, q2.setFromAxisAngle(right, headPitch * 0.35), 1)
+    if (head) rotateBoneWorld(head, q2.setFromAxisAngle(right, headPitch * 0.65), 1)
+    root.updateMatrixWorld(true)
+    head.getWorldQuaternion(cur)
+    const deg = 2 * THREE.MathUtils.radToDeg(Math.acos(Math.min(1, Math.abs(cur.dot(prev)))))
+    if (deg > worst.deg) worst = { deg, at: action.time, frame: f }
+    if (deg > 5) spikes.push({ f, deg: +deg.toFixed(1), t: +action.time.toFixed(4) })
+    prev.copy(cur)
+  }
+  window.__out = { clip: CLIP, dur: +clip.duration.toFixed(4), worst: { deg: +worst.deg.toFixed(1), t: +worst.at.toFixed(4) }, spikes: spikes.slice(0, 12), nSpikes: spikes.length }
+  window.__done = true
+}, undefined, e => { window.__error = String(e) })
+</script></body></html>
